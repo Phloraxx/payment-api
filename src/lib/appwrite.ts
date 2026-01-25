@@ -20,6 +20,7 @@ export interface Ticket {
     amount: number;
     status: 'pending' | 'paid';
     createdAt: string;
+    senderName?: string;
 }
 
 export class AppwriteService {
@@ -55,7 +56,7 @@ export class AppwriteService {
         }
     }
 
-    async markAsPaid(ticketId: string) {
+    async markAsPaid(ticketId: string, senderName?: string) {
         try {
             // First we need to find the document by our ticketId
             const response = await this.databases.listDocuments(
@@ -75,7 +76,8 @@ export class AppwriteService {
                 this.env.APPWRITE_COLLECTION_ID,
                 docId,
                 {
-                    status: 'paid'
+                    status: 'paid',
+                    senderName: senderName
                 }
             );
             return true;
@@ -101,7 +103,8 @@ export class AppwriteService {
             return {
                 ticketId: doc.ticketId,
                 status: doc.status,
-                amount: doc.amount
+                amount: doc.amount,
+                senderName: doc.senderName
             };
         } catch (error) {
             console.error('Appwrite getTicketStatus error:', error);
