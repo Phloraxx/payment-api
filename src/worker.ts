@@ -57,30 +57,61 @@ app.post('/api/webhook', async (c) => {
             return c.json({ error: 'Unauthorized' }, 401);
         }
 
-        const smsText = body.sms || body.message || rawBody;
-        // Regex to find "TICKET" followed by numbers (and optional hyphens if we changed format, but currently it's TICKET\d+)
-        const ticketMatch = smsText.match(/TICKET(\d+)/);
+        // Combine potential fields to search for Ticket ID
+        const content = ((body.sms || '') + ' ' + (body.body || '') + ' ' + (body.message || '')).trim() || rawBody;
+
+        console.log('SEARCH CONTENT:', content);
+
+        // Regex to find "TICKET" followed by numbers
+        const ticketMatch = content.match(/TICKET(\d+)/);
+
+        // Regex to find "{Sender Name} paid you ₹{Amount}" or "{Sender Name} has paid you ₹{Amount}"
+        // Prefer extracting from 'body' field if available, as it likely contains just the message.
+        // We use a non-greedy capture for the name if possible, or rely on the field boundary.
+        const paymentSource = body.body || content;
+        const paymentMatch = paymentSource.match(/([a-zA-Z0-9\s\.]+?) (?:has )?paid you ₹(\d+(\.\d{1,2})?)/i);
 
         let foundId = null;
         let status = 'ignored';
         let updated = false;
 
-        if (ticketMatch) {
+        if (ticketMatch && paymentMatch) {
             foundId = ticketMatch[0];
+            const senderName = paymentMatch[1].trim();
+            const paidAmount = parseFloat(paymentMatch[2]);
+
             console.log('FOUND TICKET ID:', foundId);
+            console.log('SENDER:', senderName);
+            console.log('PAID AMOUNT:', paidAmount);
 
             const appwrite = new AppwriteService(c.env);
-            updated = await appwrite.markAsPaid(foundId);
 
-            if (updated) {
-                console.log(`Ticket ${foundId} MARKED AS PAID`);
-                status = 'success';
+            // First get the ticket to verify amount
+            const ticket = await appwrite.getTicketStatus(foundId);
+
+            if (!ticket) {
+                console.log(`Ticket ${foundId} NOT FOUND`);
+                status = 'ticket_not_found';
+            } else if (ticket.status === 'paid') {
+                console.log(`Ticket ${foundId} ALREADY PAID`);
+                status = 'already_paid';
+            } else if (ticket.amount !== paidAmount) {
+                console.log(`AMOUNT MISMATCH: Ticket requires ${ticket.amount}, but received ${paidAmount}`);
+                status = 'amount_mismatch';
             } else {
-                console.log(`Ticket ${foundId} NOT FOUND or already paid`);
-                status = 'not_found_or_error';
+                updated = await appwrite.markAsPaid(foundId, senderName);
+                if (updated) {
+                    console.log(`Ticket ${foundId} MARKED AS PAID`);
+                    status = 'success';
+                } else {
+                    status = 'update_failed';
+                }
             }
         } else {
-            console.log('NO TICKET ID FOUND IN SMS');
+            console.log('INVALID SMS FORMAT: Missing Ticket ID or Payment Details');
+            if (!ticketMatch) console.log(' - Missing Ticket ID');
+            if (!paymentMatch) console.log(' - Missing Payment Details (Name/Amount)');
+            status = 'invalid_format';
         }
 
         return c.json({
