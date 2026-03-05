@@ -1,36 +1,105 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Payment Gateway Worker (PoC)
 
-## Getting Started
+This project is a Proof of Concepts (PoC) payment gateway system built with **Cloudflare Workers** (Hono framework) and **Appwrite Database**. It replaces the traditional server-side logic with a serverless edge API.
 
-First, run the development server:
+## Features
+- **Ticket Generation**: Creates a unique ticket with a specified amount.
+- **Webhook Verification**: Validates payment via SMS forwarding webhook.
+- **Secure Processing**: Uses a `WEBHOOK_SECRET` to prevent unauthorized calls.
+- **Data Persistence**: Stores tickets and status in Appwrite.
+- **Sender Verification**: Extracts and verifies sender name and amount from the payment SMS.
 
+## Tech Stack
+- **Runtime**: Cloudflare Workers
+- **Framework**: [Hono](https://hono.dev/)
+- **Database**: [Appwrite](https://appwrite.io/)
+- **Language**: TypeScript
+
+## Setup & configuration
+
+### 1. Install Dependencies
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### 2. Environment Variables
+Create a `.dev.vars` file for local development (do not commit this file):
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```ini
+APPWRITE_ENDPOINT="https://backend.mulearnscet.in/v1"
+APPWRITE_PROJECT_ID="YOUR_PROJECT_ID"
+APPWRITE_DATABASE_ID="YOUR_DB_ID"
+APPWRITE_COLLECTION_ID="YOUR_COLLECTION_ID"
+APPWRITE_API_KEY="YOUR_API_KEY"
+WEBHOOK_SECRET="YOUR_SECURE_SECRET"
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+For production, verify these secrets are set in your Cloudflare Worker dashboard.
 
-## Learn More
+### 3. Run Locally
+```bash
+npm run dev
+# or 
+npx wrangler dev
+```
+The server typically starts at `http://localhost:8787`.
 
-To learn more about Next.js, take a look at the following resources:
+## API Reference
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### 1. Generate Ticket
+Creates a new payment ticket.
+- **Endpoint**: `POST /api/ticket`
+- **Body**:
+  ```json
+  { "amount": 100 }
+  ```
+- **Response**:
+  ```json
+  {
+    "id": "TICKET1769333...",
+    "amount": 100,
+    "status": "pending"
+  }
+  ```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### 2. Payment Webhook
+Called by the SMS forwarder app when a payment is received.
+- **Endpoint**: `POST /api/webhook?secret=YOUR_SECURE_SECRET`
+- **Headers**: `Content-Type: application/json`
+- **Body Requirement**:
+  The JSON body must contain a field (`sms`, `body`, or `message`) that includes the **Ticket ID** and the **Payment Message**.
+  
+  **Format Regex**: `"{Name} [has] paid you ₹{Amount}"`
 
-## Deploy on Vercel
+  **Example Payload**:
+  ```json
+  {
+    "sms": "Confirmed payment for TICKET1769333...",
+    "body": "Sourav P Bijoy has paid you ₹100"
+  }
+  ```
+- **Logic**:
+  1. Validates `ticketId` exists in payload.
+  2. Parses `senderName` ("Sourav P Bijoy") and `amount` (100).
+  3. Verifies `amount` matches the amount stored in Appwrite for that ticket.
+  4. If matched, updates status to `paid` and saves `senderName`.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### 3. Check Status
+Checks the status of a specific ticket.
+- **Endpoint**: `GET /api/status/:id`
+- **Example**: `/api/status/TICKET1769333...`
+- **Response**:
+  ```json
+  {
+    "ticketId": "TICKET1769333...",
+    "status": "paid",
+    "amount": 100,
+    "senderName": "Sourav P Bijoy"
+  }
+  ```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Deployment
+To deploy to Cloudflare Workers:
+```bash
+npx wrangler deploy
+```

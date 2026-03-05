@@ -1,10 +1,5 @@
 import { Client, Databases, ID, Query } from 'node-appwrite';
 
-// Environment variables should be defined in wrangler.json or set in Cloudflare dashboard
-// In Hono + Cloudflare Workers, we access env via Context, but for this helper
-// we might need to pass the config or initialize it per request.
-// However, since we want to keep it simple, we can export a function that takes the env.
-
 export interface Env {
     APPWRITE_ENDPOINT: string;
     APPWRITE_PROJECT_ID: string;
@@ -12,15 +7,18 @@ export interface Env {
     APPWRITE_DATABASE_ID: string;
     APPWRITE_COLLECTION_ID: string;
     WEBHOOK_SECRET: string;
+    EMAIL_SECRET: string;   // shared secret for the Cloudflare email worker webhook
 }
 
 export interface Ticket {
-    id: string; // $id in Appwrite
-    ticketId: string; // Custom ID we generate (or we can use $id if we want)
+    id: string;         // $id in Appwrite
+    ticketId: string;   // Custom ID we generate  e.g. TICKET1709123456789
     amount: number;
     status: 'pending' | 'paid';
-    createdAt: string;
+    createdAt: string;  // ISO string — set by Appwrite ($createdAt)
     senderName?: string;
+    rrn?: string;       // Reference Retrieval Number from UPI credit mail
+    paidAt?: string;    // ISO timestamp when email-based payment was confirmed
 }
 
 export class AppwriteService {
@@ -42,12 +40,11 @@ export class AppwriteService {
             return await this.databases.createDocument(
                 this.env.APPWRITE_DATABASE_ID,
                 this.env.APPWRITE_COLLECTION_ID,
-                ID.unique(), // Appwrite ID
+                ID.unique(),
                 {
                     ticketId: ticketId,
                     amount: amount,
                     status: 'pending',
-
                 }
             );
         } catch (error) {
@@ -56,9 +53,12 @@ export class AppwriteService {
         }
     }
 
-    async markAsPaid(ticketId: string, senderName?: string) {
+    /**
+     * Mark a ticket as paid, optionally persisting the sender name, RRN,
+     * and the timestamp at which payment was confirmed.
+     */
+    async markAsPaid(ticketId: string, senderName?: string, rrn?: string) {
         try {
-            // First we need to find the document by our ticketId
             const response = await this.databases.listDocuments(
                 this.env.APPWRITE_DATABASE_ID,
                 this.env.APPWRITE_COLLECTION_ID,
@@ -71,14 +71,21 @@ export class AppwriteService {
 
             const docId = response.documents[0].$id;
 
+            const updatePayload: Record<string, unknown> = {
+                status: 'paid',
+                senderName: senderName,
+                paidAt: new Date().toISOString(),
+            };
+
+            if (rrn) {
+                updatePayload.rrn = rrn;
+            }
+
             await this.databases.updateDocument(
                 this.env.APPWRITE_DATABASE_ID,
                 this.env.APPWRITE_COLLECTION_ID,
                 docId,
-                {
-                    status: 'paid',
-                    senderName: senderName
-                }
+                updatePayload
             );
             return true;
         } catch (error) {
@@ -104,11 +111,39 @@ export class AppwriteService {
                 ticketId: doc.ticketId,
                 status: doc.status,
                 amount: doc.amount,
-                senderName: doc.senderName
+                senderName: doc.senderName,
+                rrn: doc.rrn ?? null,
+                paidAt: doc.paidAt ?? null,
+                createdAt: doc.$createdAt,   // Appwrite built-in timestamp
             };
         } catch (error) {
             console.error('Appwrite getTicketStatus error:', error);
             return null;
+        }
+    }
+
+    async listRecentPendingTickets(limit: number = 20) {
+        try {
+            const response = await this.databases.listDocuments(
+                this.env.APPWRITE_DATABASE_ID,
+                this.env.APPWRITE_COLLECTION_ID,
+                [
+                    Query.equal('status', 'pending'),
+                    Query.orderDesc('$createdAt'),
+                    Query.limit(limit)
+                ]
+            );
+
+            return response.documents.map(doc => ({
+                id: doc.$id,
+                ticketId: doc.ticketId,
+                status: doc.status,
+                amount: doc.amount,
+                createdAt: doc.$createdAt
+            }));
+        } catch (error) {
+            console.error('Appwrite listRecentPendingTickets error:', error);
+            return [];
         }
     }
 }
