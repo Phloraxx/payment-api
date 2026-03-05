@@ -1,0 +1,352 @@
+Delivered-To: souravpbijoy@gmail.com
+Received: by 2002:a05:6a06:3de:b0:773:880d:aa16 with SMTP id j30csp3612318pip;
+        Wed, 4 Mar 2026 22:57:19 -0800 (PST)
+X-Received: by 2002:a05:6a00:cd3:b0:81c:96b7:7faa with SMTP id d2e1a72fcca58-82972c64cf6mr4547992b3a.41.1772693839342;
+        Wed, 04 Mar 2026 22:57:19 -0800 (PST)
+ARC-Seal: i=1; a=rsa-sha256; t=1772693839; cv=none;
+        d=google.com; s=arc-20240605;
+        b=lgyIFb/nG31XDw2wWiYNog2VzJpisHBBYufzbiYRBB0yzjhUQttW+6ZmNhtp9f8Y0h
+         /ivPmIL1v4S2OH++mGv9NTmobujI+DkU4W8ghJcC29n4PMezwnEmQkrSEFsXwTYNM/4N
+         WkFHDxSb39B2E/R71RuwhlWIA7S2dilYpFF7a4D3ksjWMsFfm8YjjHqx/c9nt0w8WPV6
+         OJnimy61Tn2/dTGs6MRac+X62inbFHxQVp8yBNUcOox07tIyvAEQfuWNDFXZY6GwfQre
+         hDOLzb1oCrvfpdVh7wHOLVa+yOrAotzDy0tm4u0vB6FjeLwr+W9QSbwINaaQL5dL9Tw8
+         6+0A==
+ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20240605;
+        h=feedback-id:message-id:content-transfer-encoding:to:subject:from
+         :date:mime-version:dkim-signature:dkim-signature;
+        bh=gtKjjH4xZatjNfhVWHr6gZsIFBCgSHaZKXrJuxBvxq0=;
+        fh=EosWA7Z0URvaMLM/+B6LGs5kfQmbAacXy+hOxpSBUYk=;
+        b=kg/Bj7QBP+N7Zv4OeLXVMpsr6mqT7MKsPv1AGmm+T/0ygQfYHcb7yFm/K++G785Nnv
+         EmkMss2Em64ajJZTLeXE6X58NQBHMD6iDfUkv7RAIjD82Y+2NpSVhvjFfmLwVFRUVCX3
+         Vpy7HW6YzTZwDr1JZiAbz5bh5tr/X5/uLOAsxtm6nvuKxo5kKMn9HLKTaf9sZGjWZyAI
+         DkKlSemnkxLHhWmxv1zm/fleqWqvdBE45NfYeLR87UQFnlT15+jHilxmFhLr3GZfo0RO
+         3PhgUKCA2YOcAC6uCZ3RtkK1ElA23D+8uQF5FdnBPLRlYU6qG1qdHtpFMc2Oah9CNKYS
+         ewSQ==;
+        dara=google.com
+ARC-Authentication-Results: i=1; mx.google.com;
+       dkim=pass header.i=@slice.bank.in header.s=r27ngqbd5ceqe6opuhl72jgkw47cefm7 header.b=EQfjrPRR;
+       dkim=pass header.i=@amazonses.com header.s=dvogjbaa3ou3tduyzvyu4rj5tkuzdi4h header.b=Ujplbjep;
+       spf=pass (google.com: domain of 0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com designates 76.223.180.117 as permitted sender) smtp.mailfrom=0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com
+Return-Path: <0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com>
+Received: from c180-117.smtp-out.ap-south-1.amazonses.com (c180-117.smtp-out.ap-south-1.amazonses.com. [76.223.180.117])
+        by mx.google.com with ESMTPS id d2e1a72fcca58-8273a309515si44739067b3a.179.2026.03.04.22.57.18
+        for <souravpbijoy@gmail.com>
+        (version=TLS1_3 cipher=TLS_AES_128_GCM_SHA256 bits=128/128);
+        Wed, 04 Mar 2026 22:57:19 -0800 (PST)
+Received-SPF: pass (google.com: domain of 0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com designates 76.223.180.117 as permitted sender) client-ip=76.223.180.117;
+Authentication-Results: mx.google.com;
+       dkim=pass header.i=@slice.bank.in header.s=r27ngqbd5ceqe6opuhl72jgkw47cefm7 header.b=EQfjrPRR;
+       dkim=pass header.i=@amazonses.com header.s=dvogjbaa3ou3tduyzvyu4rj5tkuzdi4h header.b=Ujplbjep;
+       spf=pass (google.com: domain of 0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com designates 76.223.180.117 as permitted sender) smtp.mailfrom=0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple; s=r27ngqbd5ceqe6opuhl72jgkw47cefm7; d=slice.bank.in; t=1772693837; h=Mime-Version:Date:From:Subject:To:Content-Type:Content-Transfer-Encoding:Message-ID; bh=IntBXu/9h+8JyGuuZOvW9szYfRp65SWUuynVcTaOfew=; b=EQfjrPRRGKnvTon5e/orv8OEF7VFhcVy6IL7SyMOlJNAMgrlOk8DSkolIS0ELoDV gxr04BJUzafEGDXO6GnHuUXReoXcxBV8NOmsDckzWA9reBBs4MBIESO8cME6kKeofKz TJlDeTQT+WWXzsMn0ZpA7ZCPNU0U4hvdhmdMASEw=
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple; s=dvogjbaa3ou3tduyzvyu4rj5tkuzdi4h; d=amazonses.com; t=1772693837; h=Mime-Version:Date:From:Subject:To:Content-Type:Content-Transfer-Encoding:Message-ID:Feedback-ID; bh=IntBXu/9h+8JyGuuZOvW9szYfRp65SWUuynVcTaOfew=; b=UjplbjeplSLUiDCp/JBfp/icB637zeWq6XdPwQo1w4wjv1xyXCEYktM4guI7OVE4 lSHYDyief+67hsUsBz44RljF6EYELSMyihENiG6qaVrze0d8P4Pp0pl8IN5XdfAEPjK OLwnsykD7D25WXgsOHXb9tA917XDd7r8xwO1j8h4=
+Mime-Version: 1.0
+Date: Thu, 5 Mar 2026 06:57:17 +0000
+From: slice <noreply@slice.bank.in>
+Subject: Received ₹1.02 via UPI
+To: souravpbijoy@gmail.com
+Content-Type: text/html; charset=UTF-8
+Content-Transfer-Encoding: quoted-printable
+Message-ID: <0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com>
+Feedback-ID: ::1.ap-south-1.HtOgnP+dOLDZfUdWYk9LGx9WGraj+McCqsntUA1ZdfQ=:AmazonSES
+X-SES-Outgoing: 2026.03.05-76.223.180.117
+
+<html lang=3D"en"><head>
+     =20
+      <style>
+         * {
+          margin: 0;
+          padding: 0;
+          box-sizing: border-box;
+         }
+         .text {
+          font-size: 20px;
+          font-weight: 400;
+          line-height: 28px;
+         }
+         .footer a, .check-now-btn a {
+          text-decoration: none !important;
+          color: #ffffff !important;
+         }
+         a {
+          color: #ffffff;
+          text-decoration: none;
+         }
+         .strong-text {
+          font-weight: 800;
+         }
+         .pb-24 {
+          padding-bottom: 24px;
+         }
+         .pb-48 {
+          padding-bottom: 48px;
+         }
+         .pt-48 {
+          padding-top: 48px;
+         }
+         .footer-bg {
+         background-image: url('https://res.cloudinary.com/quadrillion/imag=
+e/upload/v1748946673/email_footer_graphic_1_dinu8d.png');
+         background-size: cover;
+         background-position: bottom;
+         border-radius: 0 0 20px 20px;
+         padding: 0;
+         }
+         .footer-main {
+         font-family: 'Inter', Arial, Helvetica, sans-serif !important;
+         color: #fff !important;
+         text-align: left;
+         padding: 38px 32px 120px 32px;
+         font-size: 16px;
+         line-height: 24px;
+         background: none !important;
+         }
+         .footer-social td {
+         padding-right: 16px;
+         }
+         .footer-social td:last-child { padding-right: 0; }
+         .footer-social img {
+         width: 21px !important;
+         height: 21px !important;
+         display: block;
+         background: transparent;
+         }
+         .footer-main a, .footer-main td, .footer-main div {
+         color: #fff !important;
+         text-decoration: underline;
+         font-family: 'Inter', Arial, Helvetica, sans-serif !important;
+         }
+         .footer-main a { text-decoration: underline !important; }
+         @media only screen and (max-width:590px) {
+            .container, .footer-main, .content-block, .header { padding-lef=
+t: 4vw !important; padding-right: 4vw !important; }
+            .logo { width: 63px !important; margin-bottom: 24px !important;=
+ }
+            .main-title { font-size: 17px !important;}
+            .greeting, .section-title, .list li, .pointer-label, .pointer-d=
+esc {
+            font-size: 12.8px !important;
+            }
+            .footer-main { font-size: 13px !important; }
+            .footer-social img { width: 13px !important; height: 13px !impo=
+rtant;}
+         }
+      </style>
+   </head>
+   <body>
+      <table width=3D"100%" cellspacing=3D"0" cellpadding=3D"0" border=3D"0=
+" align=3D"center">
+         <tbody>
+            <tr>
+               <td style=3D"background-color:#f5f5f5;vertical-align:top;pad=
+ding:0px 0px 0px 0px;" bgcolor=3D"#f5f5f5" align=3D"center">
+                  <table width=3D"600" style=3D"min-width:600px;width:600px=
+;background-color:#ffffff;" class=3D"tbl_main" cellspacing=3D"0" cellpaddin=
+g=3D"0" border=3D"0" bgcolor=3D"#ffffff">
+                     <tbody>
+                        <tr>
+                           <td class=3D"" valign=3D"top" style=3D"border-co=
+llapse:collapse;" align=3D"center">
+                              <table width=3D"100%" style=3D"background-col=
+or:#ffffff;" cellspacing=3D"0" cellpadding=3D"0" border=3D"0" bgcolor=3D"#f=
+fffff" align=3D"center">
+                                 <tbody>
+                                    <tr>
+                                       <td style=3D"vertical-align:top;padd=
+ing:0px 0px 0px 0px;min-width:600px;width:600px;" class=3D"tbl_main" align=
+=3D"center">
+                                          <table width=3D"100%" cellspacing=
+=3D"0" cellpadding=3D"0" border=3D"0" align=3D"center">
+                                             <tbody>
+                                                <tr>
+                                                   <td valign=3D"top" style=
+=3D"padding:0px 0px 0px 0px;" align=3D"center">
+                                                      <table class=3D"tbl_m=
+ain" width=3D"456" cellspacing=3D"0" cellpadding=3D"0" border=3D"0" align=
+=3D"center">
+                                                         <tbody>
+                                                            <tr>
+                                                               <td valign=
+=3D"top" style=3D"padding: 71px 0px 32px 0px;" class=3D"" align=3D"left"><a=
+ href=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fwww.slice=
+it.com%2F/1/0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000/L9=
+FsvbENUtTjIfEPUNuXI9NbmGQ=3D249"> <img width=3D"100" style=3D"display: bloc=
+k;border: 0;" src=3D"https://res.cloudinary.com/slicepay/image/upload/v1653=
+988818/slice-new_dn8xaa.png" class=3D"" border=3D"0"></a></td>
+                                                            </tr>
+                                                            <tr>
+                                                               <td valign=
+=3D"top" style=3D"font-family:Inter,sans-serif;font-size:20px;font-weight:4=
+00;line-height:28px;text-align:left;color:#000000;padding:0px 0px 24px 0px;=
+" class=3D"" align=3D"left">Hi SOURAV P,</td>
+                                                            </tr>
+                                                            <tr>
+                                                              <td valign=3D=
+"top" style=3D"font-family: Inter,sans-serif;
+                                                                     font-s=
+ize: 20px;
+                                                                     font-w=
+eight:400;
+                                                                     line-h=
+eight:28px;
+                                                                     text-a=
+lign:left;
+                                                                     color:=
+#000000;
+                                                                     paddin=
+g:0px 0px 24px 0px;
+                                                                     border=
+-bottom: 1px solid #f5f5f5;" class=3D"" align=3D"left">
+                                                                  You have =
+received =E2=82=B91.02 via UPI in your slice bank account xx1012. Avl. Bal.=
+ =E2=82=B9456.78!
+                                                               </td>
+                                                           </tr>
+
+                                                            <tr>
+                                                               <td align=3D=
+"left" class=3D"" style=3D"font-family: Inter, sans-serif;
+                                                                  font-size=
+: 18px;
+                                                                  font-weig=
+ht: 400;
+                                                                  line-heig=
+ht: 28px;
+                                                                  text-alig=
+n: left;
+                                                                  color: #0=
+00000;
+                                                                  padding: =
+24px 0px 24px 0px;
+                                                                  border-bo=
+ttom: 1px solid #f5f5f5;" valign=3D"top">
+                                                                  <table st=
+yle=3D"width: 100%; border-collapse: collapse;">
+                                                                     <tbody=
+>
+                                                                     <tr>
+                                                                           =
+<td style=3D"font-family:Inter,sans-serif; font-size:18px; font-weight:400;=
+ width: 40%; text-align: left; padding: 12px 0;">Transaction date</td>
+                                                                           =
+<td style=3D"font-family:Inter,sans-serif; font-size:18px; font-weight:400;=
+ width: 60%; text-align: left; padding: 12px 0;">05-Mar-26</td>
+                                                                     </tr>
+                                                                     <tr>
+                                                                           =
+<td style=3D"font-family:Inter,sans-serif; font-size:18px; font-weight:400;=
+ width: 40%; text-align: left; padding: 12px 0;">From</td>
+                                                                           =
+<td style=3D"font-family:Inter,sans-serif; font-size:18px; font-weight:400;=
+ width: 60%; text-align: left; padding: 12px 0;">SOURAVPBIJOY</td>
+                                                                     </tr>
+                                                                     <tr>
+                                                                           =
+<td style=3D"font-family:Inter,sans-serif; font-size:18px; font-weight:400;=
+ width: 40%; text-align: left; padding: 12px 0;">RRN</td>
+                                                                           =
+<td style=3D"font-family:Inter,sans-serif; font-size:18px; font-weight:400;=
+ width: 60%; text-align: left; padding: 12px 0;">122714386890</td>
+                                                                     </tr>
+                                                                  </tbody><=
+/table>
+                                                               </td>
+                                                            </tr>
+
+                                                            <tr>
+                                                               <td valign=
+=3D"top" style=3D"font-family:Inter,sans-serif;font-size:20px;font-weight:4=
+00;line-height:28px;text-align:left;color:#000000;padding:20px 0px 40px 0px=
+;" class=3D"" align=3D"left">
+                                                                  Best,<br>
+                                                                  Team <spa=
+n style=3D"color:#9E2BCF;">slice</span>
+                                                                  <br><a hr=
+ef=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fwww.sliceit.=
+com%2Fbeware-of-fraud%2F/1/0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc=
+5248b-000000/WC3kgFzsiXwj06g-PwBfaLpjBSc=3D249" style=3D"color: #9E2BCF; te=
+xt-decoration: underline;">Digital safety tips</a>
+                                                               </td>
+                                                            </tr>
+                                                         </tbody>
+                                                      </table>
+                                                      <table class=3D"foote=
+r-bg" width=3D"100%" cellpadding=3D"0" cellspacing=3D"0" role=3D"presentati=
+on">
+                                                        <tbody>
+                                                         <tr>
+                                                          <td>
+                                                            <div class=3D"f=
+ooter-main">
+                                                              <div style=3D=
+"padding-bottom: 21px;">
+                                                                To talk to =
+us, drop an email to=20
+                                                                <a href=3D"=
+mailto:help@slicebank.com" style=3D"color:#fff !important; text-decoration:=
+underline;">help@slicebank.com</a>
+                                                              </div>
+                                                              <div style=3D=
+"padding-bottom: 18px;">
+                                                                =C2=A9 slic=
+e small finance bank. All rights reserved.
+                                                              </div>
+                                                               <table class=
+=3D"footer-social" border=3D"0" cellspacing=3D"0" cellpadding=3D"0" width=
+=3D"140" style=3D"margin-top:8px;">
+                                                                <tbody>
+                                                                  <tr>
+                                                                     <td><a=
+ href=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fwww.insta=
+gram.com%2Fslicebank_%2F/1/0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc=
+5248b-000000/LY0BUZD70UGFszRfJyZ88HXC0Ag=3D249"><img src=3D"https://res.clo=
+udinary.com/slicepay/image/upload/v1683799007/email-templates/instagram_tat=
+olo.png" width=3D"16" style=3D"display:block;" alt=3D"Instagram"></a></td>
+                                                                     <td><a=
+ href=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fwww.faceb=
+ook.com%2Fsliceitt%2F/1/0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc524=
+8b-000000/nYvb2i17FkPO_01G1TtusRjl68w=3D249"><img src=3D"https://res.cloudi=
+nary.com/slicepay/image/upload/v1683799007/email-templates/fb_gfjun2.png" w=
+idth=3D"16" style=3D"display:block;" alt=3D"Facebook"></a></td>
+                                                                     <td><a=
+ href=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fx.com%2Fs=
+licebank/1/0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000/16h=
+lZ2wnwKNdFf8kTM6lkRHoqWs=3D249"><img src=3D"https://res.cloudinary.com/slic=
+epay/image/upload/v1683799008/email-templates/twitter_uu1oxw.png" width=3D"=
+16" style=3D"display:block;" alt=3D"Twitter"></a></td>
+                                                                     <td><a=
+ href=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fwww.linke=
+din.com%2Fcompany%2Fsliceit%2Fmycompany%2F/1/0109019cbcc954ed-8762b62c-21dd=
+-49bc-aff4-5d96bdc5248b-000000/HqcHkp30bRQHKF2R95J4RAVaG8Y=3D249"><img src=
+=3D"https://res.cloudinary.com/slicepay/image/upload/v1683799007/email-temp=
+lates/linkedn_b7nukm.png" width=3D"16" style=3D"display:block;" alt=3D"Link=
+edIn"></a></td>
+                                                                  </tr>
+                                                                </tbody>
+                                                               </table>
+                                                              </div>
+                                                          </td>
+                                                        </tr>
+                                                      </tbody>
+                                                   </table>
+                                                   </td>
+                                                </tr>
+                                             </tbody>
+                                          </table>
+                                       </td>
+                                    </tr>
+                                 </tbody>
+                              </table>
+                           </td>
+                        </tr>
+                     </tbody>
+                  </table>
+               </td>
+            </tr>
+         </tbody>
+      </table>
+  =20
+<img alt=3D"" src=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/I0/0109019cb=
+cc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000/IKrzek6ufdKk9mKT3PWYh3v=
+Ut48=3D249" style=3D"display: none; width: 1px; height: 1px;">
+</body></html>
