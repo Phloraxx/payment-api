@@ -215,6 +215,30 @@ export class AppwriteService {
     }
   }
 
+  async listRecentTickets(limit: number = 20) {
+    try {
+      const response = await this.databases.listDocuments<TicketDocument>(
+        this.env.APPWRITE_DATABASE_ID,
+        this.env.APPWRITE_COLLECTION_ID,
+        [
+          Query.orderDesc("$createdAt"),
+          Query.limit(limit),
+        ],
+      );
+
+      return response.documents.map((doc) => ({
+        id: doc.$id,
+        ticketId: doc.ticketId,
+        status: doc.status,
+        amount: doc.amount,
+        createdAt: doc.$createdAt,
+      }));
+    } catch (error) {
+      console.error("Appwrite listRecentTickets error:", error);
+      return [];
+    }
+  }
+
   async getPendingDecimalsForAmount(baseAmount: number): Promise<number[]> {
     try {
       // Fetch recent pending tickets (assume 100 is enough for a 5-min window)
