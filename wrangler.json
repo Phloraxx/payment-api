@@ -1,5 +1,5 @@
 {
-    "name": "payment-gateway-worker",
+    "name": "payment-api",
     "main": "src/worker.ts",
     "compatibility_date": "2024-09-23",
     "compatibility_flags": [
@@ -7,5 +7,13 @@
     ],
     "observability": {
         "enabled": true
+    },
+    "vars": {
+        "APPWRITE_API_KEY": "standard_f574f4dd66a5a78b0884c356ef4449bc15ef4fce21d84e126429bcc6224377dab84053ca593849567cd129be03d5adb8f7c78acd7d02dca1c7415e218521898c6db3f7387d0643fa8d9d6dd8a27ba87136045485b514ec7397990999f89aa82ea311230484175e1f86dfde841ccba3e4ff855649e9f4ea7b9790eb9c198a42fc",
+        "APPWRITE_COLLECTION_ID": "payment",
+        "APPWRITE_DATABASE_ID": "697522750025b8e28c32",
+        "APPWRITE_ENDPOINT": "https://backend.mulearnscet.in/v1",
+        "APPWRITE_PROJECT_ID": "6948e3640018a902b864",
+        "WEBHOOK_SECRET": "Chamaka123@@"
     }
 }

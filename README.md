@@ -1,105 +1,132 @@
-# Payment Gateway Worker (PoC)
+# 💳 Stateless UPI Payment Gateway API
 
-This project is a Proof of Concepts (PoC) payment gateway system built with **Cloudflare Workers** (Hono framework) and **Appwrite Database**. It replaces the traditional server-side logic with a serverless edge API.
+A high-performance, stateless, and secure payment gateway PoC built on **Cloudflare Workers** (Hono) and **Appwrite**. Designed for high-concurrency event registration where traditional payment gateway fees or infrastructure costs are a barrier.
 
-## Features
-- **Ticket Generation**: Creates a unique ticket with a specified amount.
-- **Webhook Verification**: Validates payment via SMS forwarding webhook.
-- **Secure Processing**: Uses a `WEBHOOK_SECRET` to prevent unauthorized calls.
-- **Data Persistence**: Stores tickets and status in Appwrite.
-- **Sender Verification**: Extracts and verifies sender name and amount from the payment SMS.
+---
 
-## Tech Stack
-- **Runtime**: Cloudflare Workers
-- **Framework**: [Hono](https://hono.dev/)
-- **Database**: [Appwrite](https://appwrite.io/)
-- **Language**: TypeScript
+## 🚀 Unique Features
 
-## Setup & configuration
+### 1. Dynamic Decimal Matching (DDM)
 
-### 1. Install Dependencies
-```bash
-npm install
-```
+Solves the "Single VPA" problem. Instead of a custom UPI ID for every user, we use a single merchant VPA and uniquely identify payments by allocating specific decimals:
 
-### 2. Environment Variables
-Create a `.dev.vars` file for local development (do not commit this file):
+- **Base Amount**: ₹100
+- **Allocation**: User A pays ₹100.01, User B pays ₹100.02.
+- **Verification**: The system parses banking emails in real-time and matches the decimal (`.02`) to the specific transaction.
 
-```ini
-APPWRITE_ENDPOINT="https://backend.mulearnscet.in/v1"
-APPWRITE_PROJECT_ID="YOUR_PROJECT_ID"
-APPWRITE_DATABASE_ID="YOUR_DB_ID"
-APPWRITE_COLLECTION_ID="YOUR_COLLECTION_ID"
-APPWRITE_API_KEY="YOUR_API_KEY"
-WEBHOOK_SECRET="YOUR_SECURE_SECRET"
-```
+### 2. Stateless Refresh Strategy
 
-For production, verify these secrets are set in your Cloudflare Worker dashboard.
+Eliminates `localStorage` dependency. The transaction state is persisted in the URL and verified against the backend on every load:
 
-### 3. Run Locally
-```bash
-npm run dev
-# or 
-npx wrangler dev
-```
-The server typically starts at `http://localhost:8787`.
+- Users can refresh the page, switch browsers, or lose connection.
+- Reading the `ticketId` from the URL allows the frontend to instantly resume status and re-render the QR code.
 
-## API Reference
+### 3. Edge-Optimized Lazy Evaluation
 
-### 1. Generate Ticket
-Creates a new payment ticket.
-- **Endpoint**: `POST /api/ticket`
-- **Body**:
-  ```json
-  { "amount": 100 }
-  ```
-- **Response**:
+Zero-cost cleanup of expired tickets.
+
+- **5-Minute Window**: Tickets expire automatically.
+- **Lazy Cleanup**: No cron jobs needed. The system cleans up stale records passively during active requests, saving compute and DB units.
+
+---
+
+## 🔒 Security Architecture
+
+### Edge-Proxied WebSockets (Zero Backend Exposure)
+
+Most Appwrite implementations use collection-level permissions which are insecure for payments (everyone hears everyone's events). We solved this with an **Edge WebSocket Proxy**:
+
+1.  **Strict Security**: `Permission.read(Role.any())` is entirely removed from the database collection. No one on the internet can query your database anonymously.
+2.  **Internal ID Protection**: The API **never** returns the internal Appwrite Document `$id` to the frontend.
+3.  **Scoped Read**: The Cloudflare Worker handles the Appwrite Realtime connection using an admin `APPWRITE_API_KEY`. It listens to the document and acts as a strict middleman for the frontend.
+4.  **Frontend**: Subscribes directly to a custom Cloudflare WebSocket (`/api/ws`), hiding the backend infrastructure and taking advantage of Cloudflare's massive DDoS protection.
+
+---
+
+## 📡 API Reference
+
+### 1. Create Payment Ticket
+
+`POST /api/ticket`
+
+- **Request**: `{ "amount": 100 }`
+- **Success Response**:
   ```json
   {
-    "id": "TICKET1769333...",
-    "amount": 100,
-    "status": "pending"
+    "ticketId": "TICKET1709123456789", // PUBLIC REFERENCE (For URL)
+    "amount": 100.03, // ALLOCATED AMOUNT
+    "status": "pending",
+    "createdAt": "2026-03-05T..."
   }
   ```
 
-### 2. Payment Webhook
-Called by the SMS forwarder app when a payment is received.
-- **Endpoint**: `POST /api/webhook?secret=YOUR_SECURE_SECRET`
-- **Headers**: `Content-Type: application/json`
-- **Body Requirement**:
-  The JSON body must contain a field (`sms`, `body`, or `message`) that includes the **Ticket ID** and the **Payment Message**.
-  
-  **Format Regex**: `"{Name} [has] paid you ₹{Amount}"`
+### 2. Verify/Resume Status
 
-  **Example Payload**:
-  ```json
-  {
-    "sms": "Confirmed payment for TICKET1769333...",
-    "body": "Sourav P Bijoy has paid you ₹100"
-  }
-  ```
-- **Logic**:
-  1. Validates `ticketId` exists in payload.
-  2. Parses `senderName` ("Sourav P Bijoy") and `amount` (100).
-  3. Verifies `amount` matches the amount stored in Appwrite for that ticket.
-  4. If matched, updates status to `paid` and saves `senderName`.
+`GET /api/status/:ticketId`
 
-### 3. Check Status
-Checks the status of a specific ticket.
-- **Endpoint**: `GET /api/status/:id`
-- **Example**: `/api/status/TICKET1769333...`
-- **Response**:
-  ```json
-  {
-    "ticketId": "TICKET1769333...",
-    "status": "paid",
-    "amount": 100,
-    "senderName": "Sourav P Bijoy"
-  }
-  ```
+- **Use Case**: Used on page load to re-fetch transaction details from a URL `ticketId`.
 
-## Deployment
-To deploy to Cloudflare Workers:
+---
+
+## ⚡ Frontend Integration Pattern
+
+The frontend heavily relies on Cloudflare's Edge WebSockets. You do **not** need the Appwrite SDK on the frontend.
+
+```javascript
+/* Secure, Stateless Frontend Loop */
+
+async function startPayment() {
+  const params = new URLSearchParams(window.location.search);
+  const ticketId = params.get("ticketId");
+
+  // 1. Fetch current state (Stateless Resume)
+  const res = await fetch(
+    `https://payment-api.nerdpixel.workers.dev/api/status/${ticketId}`,
+  );
+  const data = await res.json();
+
+  if (data.status === "paid") return handleSuccess();
+
+  // 2. Generate UPI locally (No Backend dependency for QR)
+  const vpa = "merchant@upi";
+  const upiStr = `upi://pay?pa=${vpa}&am=${data.amount}&tn=${data.ticketId}`;
+  renderQR(upiStr);
+
+  // 3. Connect to the Cloudflare WebSocket Proxy
+  const wsUrl = `wss://payment-api.nerdpixel.workers.dev/api/ws?ticketId=${ticketId}`;
+  const socket = new WebSocket(wsUrl);
+
+  socket.onmessage = (event) => {
+    const payload = JSON.parse(event.data);
+
+    if (payload.type === "payment_update" && payload.status === "paid") {
+      console.log("Payment successful at:", payload.paidAt);
+      socket.close();
+      handleSuccess();
+    }
+  };
+}
+```
+
+---
+
+## 🛠️ Environment Setup
+
+Required variables for the Worker (`.dev.vars` or Wrangler:
+
+- `APPWRITE_ENDPOINT`, `APPWRITE_PROJECT_ID`, `APPWRITE_DATABASE_ID`, `APPWRITE_COLLECTION_ID`
+- `APPWRITE_API_KEY`: Must have `documents.write` and `documents.read` permissions.
+- `WEBHOOK_SECRET`: For internal authentication.
+- `EMAIL_SECRET`: Shared secret with the Cloudflare Email Worker.
+
+---
+
+## 🚀 Deployment
+
 ```bash
 npx wrangler deploy
 ```
+
+---
+
+_Built with ❤️ for Mulearn SCET & IEEESahrdaya_

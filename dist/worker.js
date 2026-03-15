@@ -1139,9 +1139,11 @@ var getPath = /* @__PURE__ */ __name((request) => {
     const charCode = url.charCodeAt(i3);
     if (charCode === 37) {
       const queryIndex = url.indexOf("?", i3);
-      const path = url.slice(start, queryIndex === -1 ? void 0 : queryIndex);
+      const hashIndex = url.indexOf("#", i3);
+      const end = queryIndex === -1 ? hashIndex === -1 ? void 0 : hashIndex : hashIndex === -1 ? queryIndex : Math.min(queryIndex, hashIndex);
+      const path = url.slice(start, end);
       return tryDecodeURI(path.includes("%25") ? path.replace(/%25/g, "%2525") : path);
-    } else if (charCode === 63) {
+    } else if (charCode === 63 || charCode === 35) {
       break;
     }
   }
@@ -1587,6 +1589,7 @@ var setDefaultContentType = /* @__PURE__ */ __name((contentType, headers) => {
     ...headers
   };
 }, "setDefaultContentType");
+var createResponseInstance = /* @__PURE__ */ __name((body, init) => new Response(body, init), "createResponseInstance");
 var Context = class {
   static {
     __name(this, "Context");
@@ -1688,7 +1691,7 @@ var Context = class {
    * The Response object for the current request.
    */
   get res() {
-    return this.#res ||= new Response(null, {
+    return this.#res ||= createResponseInstance(null, {
       headers: this.#preparedHeaders ??= new Headers()
     });
   }
@@ -1699,7 +1702,7 @@ var Context = class {
    */
   set res(_res) {
     if (this.#res && _res) {
-      _res = new Response(_res.body, _res);
+      _res = createResponseInstance(_res.body, _res);
       for (const [k, v] of this.#res.headers.entries()) {
         if (k === "content-type") {
           continue;
@@ -1789,7 +1792,7 @@ var Context = class {
    */
   header = /* @__PURE__ */ __name((name, value, options) => {
     if (this.finalized) {
-      this.#res = new Response(this.#res.body, this.#res);
+      this.#res = createResponseInstance(this.#res.body, this.#res);
     }
     const headers = this.#res ? this.#res.headers : this.#preparedHeaders ??= new Headers();
     if (value === void 0) {
@@ -1878,7 +1881,7 @@ var Context = class {
       }
     }
     const status = typeof arg === "number" ? arg : arg?.status ?? this.#status;
-    return new Response(data, { status, headers: responseHeaders });
+    return createResponseInstance(data, { status, headers: responseHeaders });
   }
   newResponse = /* @__PURE__ */ __name((...args) => this.#newResponse(...args), "newResponse");
   /**
@@ -1983,7 +1986,7 @@ var Context = class {
    * ```
    */
   notFound = /* @__PURE__ */ __name(() => {
-    this.#notFoundHandler ??= () => new Response();
+    this.#notFoundHandler ??= () => createResponseInstance();
     return this.#notFoundHandler(this);
   }, "notFound");
 };
@@ -2815,6 +2818,12 @@ var SmartRouter = class {
 
 // node_modules/hono/dist/router/trie-router/node.js
 var emptyParams = /* @__PURE__ */ Object.create(null);
+var hasChildren = /* @__PURE__ */ __name((children) => {
+  for (const _ in children) {
+    return true;
+  }
+  return false;
+}, "hasChildren");
 var Node2 = class _Node2 {
   static {
     __name(this, "_Node");
@@ -2867,8 +2876,7 @@ var Node2 = class _Node2 {
     });
     return curNode;
   }
-  #getHandlerSets(node, method, nodeParams, params) {
-    const handlerSets = [];
+  #pushHandlerSets(handlerSets, node, method, nodeParams, params) {
     for (let i3 = 0, len = node.#methods.length; i3 < len; i3++) {
       const m = node.#methods[i3];
       const handlerSet = m[method] || m[METHOD_NAME_ALL];
@@ -2886,7 +2894,6 @@ var Node2 = class _Node2 {
         }
       }
     }
-    return handlerSets;
   }
   search(method, path) {
     const handlerSets = [];
@@ -2895,7 +2902,9 @@ var Node2 = class _Node2 {
     let curNodes = [curNode];
     const parts = splitPath(path);
     const curNodesQueue = [];
-    for (let i3 = 0, len = parts.length; i3 < len; i3++) {
+    const len = parts.length;
+    let partOffsets = null;
+    for (let i3 = 0; i3 < len; i3++) {
       const part = parts[i3];
       const isLast = i3 === len - 1;
       const tempNodes = [];
@@ -2906,11 +2915,9 @@ var Node2 = class _Node2 {
           nextNode.#params = node.#params;
           if (isLast) {
             if (nextNode.#children["*"]) {
-              handlerSets.push(
-                ...this.#getHandlerSets(nextNode.#children["*"], method, node.#params)
-              );
+              this.#pushHandlerSets(handlerSets, nextNode.#children["*"], method, node.#params);
             }
-            handlerSets.push(...this.#getHandlerSets(nextNode, method, node.#params));
+            this.#pushHandlerSets(handlerSets, nextNode, method, node.#params);
           } else {
             tempNodes.push(nextNode);
           }
@@ -2921,7 +2928,7 @@ var Node2 = class _Node2 {
           if (pattern === "*") {
             const astNode = node.#children["*"];
             if (astNode) {
-              handlerSets.push(...this.#getHandlerSets(astNode, method, node.#params));
+              this.#pushHandlerSets(handlerSets, astNode, method, node.#params);
               astNode.#params = params;
               tempNodes.push(astNode);
             }
@@ -2932,13 +2939,21 @@ var Node2 = class _Node2 {
             continue;
           }
           const child = node.#children[key];
-          const restPathString = parts.slice(i3).join("/");
           if (matcher instanceof RegExp) {
+            if (partOffsets === null) {
+              partOffsets = new Array(len);
+              let offset = path[0] === "/" ? 1 : 0;
+              for (let p = 0; p < len; p++) {
+                partOffsets[p] = offset;
+                offset += parts[p].length + 1;
+              }
+            }
+            const restPathString = path.substring(partOffsets[i3]);
             const m = matcher.exec(restPathString);
             if (m) {
               params[name] = m[0];
-              handlerSets.push(...this.#getHandlerSets(child, method, node.#params, params));
-              if (Object.keys(child.#children).length) {
+              this.#pushHandlerSets(handlerSets, child, method, node.#params, params);
+              if (hasChildren(child.#children)) {
                 child.#params = params;
                 const componentCount = m[0].match(/\//)?.length ?? 0;
                 const targetCurNodes = curNodesQueue[componentCount] ||= [];
@@ -2950,10 +2965,14 @@ var Node2 = class _Node2 {
           if (matcher === true || matcher.test(part)) {
             params[name] = part;
             if (isLast) {
-              handlerSets.push(...this.#getHandlerSets(child, method, params, node.#params));
+              this.#pushHandlerSets(handlerSets, child, method, params, node.#params);
               if (child.#children["*"]) {
-                handlerSets.push(
-                  ...this.#getHandlerSets(child.#children["*"], method, params, node.#params)
+                this.#pushHandlerSets(
+                  handlerSets,
+                  child.#children["*"],
+                  method,
+                  params,
+                  node.#params
                 );
               }
             } else {
@@ -2963,7 +2982,8 @@ var Node2 = class _Node2 {
           }
         }
       }
-      curNodes = tempNodes.concat(curNodesQueue.shift() ?? []);
+      const shifted = curNodesQueue.shift();
+      curNodes = shifted ? tempNodes.concat(shifted) : tempNodes;
     }
     if (handlerSets.length > 1) {
       handlerSets.sort((a3, b) => {
@@ -3102,6 +3122,103 @@ var cors = /* @__PURE__ */ __name((options) => {
     }
   }, "cors2");
 }, "cors");
+
+// node_modules/hono/dist/middleware/serve-static/index.js
+var ENCODINGS = {
+  br: ".br",
+  zstd: ".zst",
+  gzip: ".gz"
+};
+var ENCODINGS_ORDERED_KEYS = Object.keys(ENCODINGS);
+
+// node_modules/hono/dist/helper/websocket/index.js
+var WSContext = class {
+  static {
+    __name(this, "WSContext");
+  }
+  #init;
+  constructor(init) {
+    this.#init = init;
+    this.raw = init.raw;
+    this.url = init.url ? new URL(init.url) : null;
+    this.protocol = init.protocol ?? null;
+  }
+  send(source, options) {
+    this.#init.send(source, options ?? {});
+  }
+  raw;
+  binaryType = "arraybuffer";
+  get readyState() {
+    return this.#init.readyState;
+  }
+  url;
+  protocol;
+  close(code, reason) {
+    this.#init.close(code, reason);
+  }
+};
+var defineWebSocketHelper = /* @__PURE__ */ __name((handler) => {
+  return ((...args) => {
+    if (typeof args[0] === "function") {
+      const [createEvents, options] = args;
+      return /* @__PURE__ */ __name(async function upgradeWebSocket2(c, next) {
+        const events = await createEvents(c);
+        const result = await handler(c, events, options);
+        if (result) {
+          return result;
+        }
+        await next();
+      }, "upgradeWebSocket");
+    } else {
+      const [c, events, options] = args;
+      return (async () => {
+        const upgraded = await handler(c, events, options);
+        if (!upgraded) {
+          throw new Error("Failed to upgrade WebSocket");
+        }
+        return upgraded;
+      })();
+    }
+  });
+}, "defineWebSocketHelper");
+
+// node_modules/hono/dist/adapter/cloudflare-workers/websocket.js
+var upgradeWebSocket = defineWebSocketHelper(async (c, events) => {
+  const upgradeHeader = c.req.header("Upgrade");
+  if (upgradeHeader !== "websocket") {
+    return;
+  }
+  const webSocketPair = new WebSocketPair();
+  const client = webSocketPair[0];
+  const server = webSocketPair[1];
+  const wsContext = new WSContext({
+    close: /* @__PURE__ */ __name((code, reason) => server.close(code, reason), "close"),
+    get protocol() {
+      return server.protocol;
+    },
+    raw: server,
+    get readyState() {
+      return server.readyState;
+    },
+    url: server.url ? new URL(server.url) : null,
+    send: /* @__PURE__ */ __name((source) => server.send(source), "send")
+  });
+  if (events.onClose) {
+    server.addEventListener("close", (evt) => events.onClose?.(evt, wsContext));
+  }
+  if (events.onMessage) {
+    server.addEventListener("message", (evt) => events.onMessage?.(evt, wsContext));
+  }
+  if (events.onError) {
+    server.addEventListener("error", (evt) => events.onError?.(evt, wsContext));
+  }
+  server.accept?.();
+  return new Response(null, {
+    status: 101,
+    // @ts-expect-error - webSocket is not typed
+    webSocket: client
+  });
+});
 
 // node_modules/node-fetch-native-with-agent/dist/native.mjs
 var e = globalThis.Blob;
@@ -6508,6 +6625,101 @@ Permission.delete = (role) => {
   return `delete("${role}")`;
 };
 
+// node_modules/node-appwrite/dist/role.mjs
+var Role = class {
+  static {
+    __name(this, "Role");
+  }
+  /**
+   * Grants access to anyone.
+   * 
+   * This includes authenticated and unauthenticated users.
+   * 
+   * @returns {string}
+   */
+  static any() {
+    return "any";
+  }
+  /**
+   * Grants access to a specific user by user ID.
+   * 
+   * You can optionally pass verified or unverified for
+   * `status` to target specific types of users.
+   *
+   * @param {string} id 
+   * @param {string} status 
+   * @returns {string}
+   */
+  static user(id, status = "") {
+    if (status === "") {
+      return `user:${id}`;
+    }
+    return `user:${id}/${status}`;
+  }
+  /**
+   * Grants access to any authenticated or anonymous user.
+   * 
+   * You can optionally pass verified or unverified for
+   * `status` to target specific types of users.
+   * 
+   * @param {string} status 
+   * @returns {string}
+   */
+  static users(status = "") {
+    if (status === "") {
+      return "users";
+    }
+    return `users/${status}`;
+  }
+  /**
+   * Grants access to any guest user without a session.
+   * 
+   * Authenticated users don't have access to this role.
+   * 
+   * @returns {string}
+   */
+  static guests() {
+    return "guests";
+  }
+  /**
+   * Grants access to a team by team ID.
+   * 
+   * You can optionally pass a role for `role` to target
+   * team members with the specified role.
+   * 
+   * @param {string} id 
+   * @param {string} role 
+   * @returns {string}
+   */
+  static team(id, role = "") {
+    if (role === "") {
+      return `team:${id}`;
+    }
+    return `team:${id}/${role}`;
+  }
+  /**
+   * Grants access to a specific member of a team.
+   * 
+   * When the member is removed from the team, they will
+   * no longer have access.
+   * 
+   * @param {string} id 
+   * @returns {string}
+   */
+  static member(id) {
+    return `member:${id}`;
+  }
+  /**
+   * Grants access to a user with the specified label.
+   * 
+   * @param {string} name 
+   * @returns  {string}
+   */
+  static label(name) {
+    return `label:${name}`;
+  }
+};
+
 // node_modules/node-appwrite/dist/id.mjs
 var ID = class _ID {
   static {
@@ -6696,7 +6908,6 @@ var AppwriteService = class {
         this.env.APPWRITE_DATABASE_ID,
         this.env.APPWRITE_COLLECTION_ID,
         ID.unique(),
-        // Appwrite ID
         {
           ticketId,
           amount,
@@ -6708,7 +6919,11 @@ var AppwriteService = class {
       throw error3;
     }
   }
-  async markAsPaid(ticketId) {
+  /**
+   * Mark a ticket as paid, optionally persisting the sender name, RRN,
+   * and the timestamp at which payment was confirmed.
+   */
+  async markAsPaid(ticketId, senderName, rrn) {
     try {
       const response = await this.databases.listDocuments(
         this.env.APPWRITE_DATABASE_ID,
@@ -6716,21 +6931,38 @@ var AppwriteService = class {
         [Query.equal("ticketId", ticketId)]
       );
       if (response.documents.length === 0) {
-        return false;
+        return null;
       }
       const docId = response.documents[0].$id;
-      await this.databases.updateDocument(
+      const updatePayload = {
+        status: "paid",
+        senderName,
+        paidAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      if (rrn) {
+        updatePayload.rrn = rrn;
+      }
+      console.log("Sending update to Appwrite for ticket:", ticketId);
+      console.log("Update Payload:", JSON.stringify(updatePayload, null, 2));
+      const updatedDoc = await this.databases.updateDocument(
         this.env.APPWRITE_DATABASE_ID,
         this.env.APPWRITE_COLLECTION_ID,
         docId,
-        {
-          status: "paid"
-        }
+        updatePayload
       );
-      return true;
+      return {
+        id: updatedDoc.$id,
+        ticketId: updatedDoc.ticketId,
+        status: updatedDoc.status,
+        amount: updatedDoc.amount,
+        senderName: updatedDoc.senderName,
+        rrn: updatedDoc.rrn ?? null,
+        paidAt: updatedDoc.paidAt ?? null,
+        createdAt: updatedDoc.$createdAt
+      };
     } catch (error3) {
       console.error("Appwrite markAsPaid error:", error3);
-      return false;
+      return null;
     }
   }
   async getTicketStatus(ticketId) {
@@ -6744,19 +6976,212 @@ var AppwriteService = class {
         return null;
       }
       const doc = response.documents[0];
+      let currentStatus = doc.status;
+      if (currentStatus === "pending") {
+        const ticketTime = new Date(doc.$createdAt).getTime();
+        const FIVE_MIN_MS = 5 * 60 * 1e3;
+        if (Date.now() - ticketTime > FIVE_MIN_MS) {
+          currentStatus = "cancelled";
+          this.databases.updateDocument(
+            this.env.APPWRITE_DATABASE_ID,
+            this.env.APPWRITE_COLLECTION_ID,
+            doc.$id,
+            { status: "cancelled" }
+          ).catch((err) => console.error("Lazy cancel DB update error:", err));
+        }
+      }
       return {
+        id: doc.$id,
+        // THE SECURE INTERNAL DOCUMENT ID
         ticketId: doc.ticketId,
-        status: doc.status,
-        amount: doc.amount
+        status: currentStatus,
+        amount: doc.amount,
+        senderName: doc.senderName,
+        rrn: doc.rrn ?? null,
+        paidAt: doc.paidAt ?? null,
+        createdAt: doc.$createdAt
+        // Appwrite built-in timestamp
       };
     } catch (error3) {
       console.error("Appwrite getTicketStatus error:", error3);
       return null;
     }
   }
+  async listRecentPendingTickets(limit = 20) {
+    try {
+      const response = await this.databases.listDocuments(
+        this.env.APPWRITE_DATABASE_ID,
+        this.env.APPWRITE_COLLECTION_ID,
+        [
+          Query.equal("status", "pending"),
+          Query.orderDesc("$createdAt"),
+          Query.limit(limit)
+        ]
+      );
+      return response.documents.map((doc) => ({
+        id: doc.$id,
+        ticketId: doc.ticketId,
+        status: doc.status,
+        amount: doc.amount,
+        createdAt: doc.$createdAt
+      }));
+    } catch (error3) {
+      console.error("Appwrite listRecentPendingTickets error:", error3);
+      return [];
+    }
+  }
+  async getPendingDecimalsForAmount(baseAmount) {
+    try {
+      const candidates = await this.listRecentPendingTickets(100);
+      const now = Date.now();
+      const FIVE_MIN_MS = 5 * 60 * 1e3;
+      const decimalsAllocated = [];
+      let cancellationsLeft = 5;
+      for (const ticket of candidates) {
+        const ticketTime = new Date(ticket.createdAt).getTime();
+        if (now - ticketTime > FIVE_MIN_MS) {
+          if (cancellationsLeft > 0) {
+            cancellationsLeft--;
+            if (ticket.ticketId.startsWith("lock_")) {
+              this.databases.deleteDocument(
+                this.env.APPWRITE_DATABASE_ID,
+                this.env.APPWRITE_COLLECTION_ID,
+                ticket.id
+              ).catch(
+                (err) => console.log(
+                  "Lazy cancel batch error (ignorable):",
+                  err.message
+                )
+              );
+            } else {
+              this.databases.updateDocument(
+                this.env.APPWRITE_DATABASE_ID,
+                this.env.APPWRITE_COLLECTION_ID,
+                ticket.id,
+                { status: "cancelled" }
+              ).catch(
+                (err) => console.log(
+                  "Lazy cancel batch error (ignorable):",
+                  err.message
+                )
+              );
+            }
+          }
+          continue;
+        }
+        if (Math.floor(ticket.amount) === baseAmount) {
+          const decPart = Math.round((ticket.amount - baseAmount) * 100);
+          decimalsAllocated.push(decPart);
+        }
+      }
+      return decimalsAllocated;
+    } catch (error3) {
+      console.error("Appwrite getPendingDecimalsForAmount error:", error3);
+      return [];
+    }
+  }
+  /**
+   * Attempts to acquire an absolute, atomic database-level lock for a specific decimal.
+   * Uses Appwrite's Document ID uniqueness constraint to guarantee no two concurrent requests
+   * can claim the exact same decimal simultaneously.
+   */
+  async claimDatabaseLock(baseAmount, decimal) {
+    const lockDocId = `lock_${baseAmount}_${decimal.toString().padStart(2, "0")}`;
+    const finalAmount = baseAmount + decimal / 100;
+    try {
+      await this.databases.createDocument(
+        this.env.APPWRITE_DATABASE_ID,
+        this.env.APPWRITE_COLLECTION_ID,
+        lockDocId,
+        {
+          ticketId: lockDocId,
+          amount: finalAmount,
+          status: "pending"
+        },
+        [Permission.read(Role.any())]
+      );
+      return true;
+    } catch (error3) {
+      if (error3.code === 409) {
+        try {
+          const existingLock = await this.databases.getDocument(
+            this.env.APPWRITE_DATABASE_ID,
+            this.env.APPWRITE_COLLECTION_ID,
+            lockDocId
+          );
+          const lockTime = new Date(existingLock.$createdAt).getTime();
+          if (Date.now() - lockTime > 5 * 60 * 1e3) {
+            try {
+              await this.releaseDatabaseLock(baseAmount, decimal);
+            } catch (e3) {
+            }
+            return await this.claimDatabaseLock(baseAmount, decimal);
+          }
+        } catch (e3) {
+        }
+        return false;
+      }
+      throw error3;
+    }
+  }
+  /**
+   * Releases an atomic database-level lock so the decimal can be reused immediately.
+   */
+  async releaseDatabaseLock(baseAmount, decimal) {
+    const lockDocId = `lock_${baseAmount}_${decimal.toString().padStart(2, "0")}`;
+    try {
+      await this.databases.deleteDocument(
+        this.env.APPWRITE_DATABASE_ID,
+        this.env.APPWRITE_COLLECTION_ID,
+        lockDocId
+      );
+    } catch (error3) {
+    }
+  }
+};
+
+// src/lib/emailParser.ts
+var EmailParser = class {
+  static {
+    __name(this, "EmailParser");
+  }
+  /**
+   * Extracts the payment amount, decimal parts, RRN, and Sender Name from a Slice UPI email.
+   */
+  static parseSliceEmail(subject, textOrHtmlBody) {
+    const result = {
+      paidAmount: null,
+      intPart: null,
+      decPart: null,
+      rrn: null,
+      senderName: "UNKNOWN"
+    };
+    const normalised = textOrHtmlBody.replace(/=\r?\n/g, "").replace(/=3D/g, "=").replace(/=E2=82=B9/gi, "\u20B9").replace(/&nbsp;/g, " ");
+    let amountMatch = subject.match(/₹\s*(\d+)(?:\.(\d{2}))?/i);
+    if (!amountMatch) {
+      amountMatch = normalised.match(/received\s*₹\s*(\d+)(?:\.(\d{2}))?\s*via/i) || normalised.match(/₹\s*(\d+)(?:\.(\d{2}))?/);
+    }
+    if (amountMatch) {
+      result.intPart = parseInt(amountMatch[1], 10);
+      result.decPart = amountMatch[2] ? parseInt(amountMatch[2], 10) : 0;
+      result.paidAmount = parseFloat(
+        `${result.intPart}.${amountMatch[2] || "00"}`
+      );
+    }
+    const rrnMatch = normalised.match(/RRN\s*<\/td>\s*<td[^>]*>\s*(\d{9,15})/i) || normalised.match(/RRN\D{0,10}(\d{9,15})/i);
+    if (rrnMatch) {
+      result.rrn = rrnMatch[1];
+    }
+    const senderMatch = normalised.match(/From\s*<\/td>\s*<td[^>]*>\s*([A-Z0-9 ]+)\s*</i) || normalised.match(/From\s*[\|\t:]\s*([A-Z0-9 ]+)/i);
+    if (senderMatch) {
+      result.senderName = senderMatch[1].trim();
+    }
+    return result;
+  }
 };
 
 // src/worker.ts
+var localDecimalLocks = /* @__PURE__ */ new Set();
 var app = new Hono2();
 app.use("/*", cors());
 app.get("/", (c) => {
@@ -6765,18 +7190,51 @@ app.get("/", (c) => {
 app.post("/api/ticket", async (c) => {
   try {
     const body = await c.req.json();
-    const amount = body.amount;
-    if (!amount || typeof amount !== "number") {
+    const baseAmount = body.amount;
+    if (!baseAmount || typeof baseAmount !== "number") {
       return c.json({ error: "Invalid amount" }, 400);
     }
-    const timestamp = Date.now();
-    const ticketId = `TICKET${timestamp}`;
     const appwrite = new AppwriteService(c.env);
-    await appwrite.createTicket(ticketId, amount);
+    const dbAllocatedDecimals = await appwrite.getPendingDecimalsForAmount(
+      Math.floor(baseAmount)
+    );
+    let availableDecimal = -1;
+    for (let i3 = 0; i3 < 100; i3++) {
+      const candidateDecimal = i3;
+      const lockKey = `${Math.floor(baseAmount)}_${candidateDecimal} `;
+      if (!dbAllocatedDecimals.includes(candidateDecimal) && !localDecimalLocks.has(lockKey)) {
+        const lockAcquired = await appwrite.claimDatabaseLock(
+          Math.floor(baseAmount),
+          candidateDecimal
+        );
+        if (lockAcquired) {
+          availableDecimal = candidateDecimal;
+          localDecimalLocks.add(lockKey);
+          setTimeout(() => localDecimalLocks.delete(lockKey), 5 * 60 * 1e3);
+          break;
+        }
+      }
+    }
+    if (availableDecimal === -1) {
+      return c.json(
+        {
+          error: "System busy: Too many concurrent transactions for this amount. Please try again later."
+        },
+        503
+      );
+    }
+    const finalAmount = Math.floor(baseAmount) + availableDecimal / 100;
+    const timestamp = Date.now().toString();
+    const prefix = timestamp.slice(0, -2);
+    const decimalStr = availableDecimal.toString().padStart(2, "0");
+    const ticketId = `TICKET${prefix}${decimalStr} `;
+    const createdDoc = await appwrite.createTicket(ticketId, finalAmount);
     return c.json({
-      id: ticketId,
-      amount,
-      status: "pending"
+      ticketId,
+      // THE READABLE TICKET REFERENCE
+      amount: finalAmount,
+      status: "pending",
+      createdAt: createdDoc.$createdAt
     });
   } catch (error3) {
     console.error("Error creating ticket:", error3);
@@ -6793,7 +7251,9 @@ app.post("/api/webhook", async (c) => {
     try {
       body = JSON.parse(rawBody);
     } catch (e3) {
-      console.log("Could not parse JSON body, assuming raw text or URL encoded.");
+      console.log(
+        "Could not parse JSON body, assuming raw text or URL encoded."
+      );
       body = { sms: rawBody };
     }
     const secret = c.req.query("secret") || body.secret_key;
@@ -6801,25 +7261,55 @@ app.post("/api/webhook", async (c) => {
       console.log("Unauthorized Webhook Attempt");
       return c.json({ error: "Unauthorized" }, 401);
     }
-    const smsText = body.sms || body.message || rawBody;
-    const ticketMatch = smsText.match(/TICKET(\d+)/);
+    const content = ((body.sms || "") + " " + (body.body || "") + " " + (body.message || "")).trim() || rawBody;
+    console.log("SEARCH CONTENT:", content);
+    const ticketMatch = content.match(/TICKET(\d+)/);
+    const paymentSource = body.body || content;
+    const paymentMatch = paymentSource.match(
+      /([a-zA-Z0-9\s\.]+?) (?:has )?paid you ₹(\d+(\.\d{1,2})?)/i
+    );
     let foundId = null;
     let status = "ignored";
-    let updated = false;
-    if (ticketMatch) {
+    let updatedDoc = null;
+    if (ticketMatch && paymentMatch) {
       foundId = ticketMatch[0];
+      const senderName = paymentMatch[1].trim();
+      const paidAmount = parseFloat(paymentMatch[2]);
       console.log("FOUND TICKET ID:", foundId);
+      console.log("SENDER:", senderName);
+      console.log("PAID AMOUNT:", paidAmount);
       const appwrite = new AppwriteService(c.env);
-      updated = await appwrite.markAsPaid(foundId);
-      if (updated) {
-        console.log(`Ticket ${foundId} MARKED AS PAID`);
-        status = "success";
+      const ticket = await appwrite.getTicketStatus(foundId);
+      if (!ticket) {
+        console.log(`Ticket ${foundId} NOT FOUND`);
+        status = "ticket_not_found";
+      } else if (ticket.status === "paid") {
+        console.log(`Ticket ${foundId} ALREADY PAID`);
+        status = "already_paid";
+      } else if (ticket.amount !== paidAmount) {
+        console.log(
+          `AMOUNT MISMATCH: Ticket requires ${ticket.amount}, but received ${paidAmount} `
+        );
+        status = "amount_mismatch";
       } else {
-        console.log(`Ticket ${foundId} NOT FOUND or already paid`);
-        status = "not_found_or_error";
+        updatedDoc = await appwrite.markAsPaid(foundId, senderName);
+        if (updatedDoc) {
+          console.log(`Ticket ${foundId} MARKED AS PAID`);
+          status = "success";
+          const baseAmount = Math.floor(ticket.amount);
+          const decPart = Math.round((ticket.amount - baseAmount) * 100);
+          localDecimalLocks.delete(`${baseAmount}_${decPart} `);
+          await appwrite.releaseDatabaseLock(baseAmount, decPart).catch(() => null);
+        } else {
+          status = "update_failed";
+        }
       }
     } else {
-      console.log("NO TICKET ID FOUND IN SMS");
+      console.log("INVALID SMS FORMAT: Missing Ticket ID or Payment Details");
+      if (!ticketMatch) console.log(" - Missing Ticket ID");
+      if (!paymentMatch)
+        console.log(" - Missing Payment Details (Name/Amount)");
+      status = "invalid_format";
     }
     return c.json({
       status: "received",
@@ -6828,6 +7318,107 @@ app.post("/api/webhook", async (c) => {
     });
   } catch (error3) {
     console.error("Webhook error:", error3);
+    return c.json({ error: "Internal Server Error" }, 500);
+  }
+});
+app.post("/api/email-webhook", async (c) => {
+  try {
+    const rawBody = await c.req.text();
+    console.log("--- EMAIL WEBHOOK RECEIVED ---");
+    console.log("TIMESTAMP:", (/* @__PURE__ */ new Date()).toISOString());
+    let body;
+    try {
+      body = JSON.parse(rawBody);
+    } catch {
+      return c.json({ error: "Invalid JSON" }, 400);
+    }
+    const secret = c.req.query("secret") || body.secret;
+    if (!secret || secret !== c.env.EMAIL_SECRET) {
+      console.log("Unauthorized email webhook attempt");
+      return c.json({ error: "Unauthorized" }, 401);
+    }
+    const from = (body.from || "").toLowerCase().trim();
+    const subject = (body.subject || "").trim();
+    const text = (body.text || body.html || "").replace(/=\r?\n/g, "").replace(/=3D/g, "=");
+    console.log("FROM:", from, "| SUBJECT:", subject);
+    if (!subject.toLowerCase().includes("received") || !subject.toLowerCase().includes("via upi")) {
+      console.log("Rejected: subject does not match UPI credit pattern");
+      return c.json({ status: "ignored", reason: "subject_mismatch" });
+    }
+    const parsedEmail = EmailParser.parseSliceEmail(subject, text);
+    if (parsedEmail.paidAmount === null || parsedEmail.decPart === null || parsedEmail.intPart === null) {
+      console.log("Could not extract amount from email body or subject");
+      return c.json({ status: "ignored", reason: "amount_not_found" });
+    }
+    const { paidAmount, decPart, intPart, rrn, senderName } = parsedEmail;
+    console.log("PAID AMOUNT:", paidAmount, "| DEC PART:", decPart);
+    console.log("RRN:", rrn);
+    console.log("SENDER NAME:", senderName);
+    const appwrite = new AppwriteService(c.env);
+    const candidates = await appwrite.listRecentPendingTickets(6);
+    const now = Date.now();
+    const FIVE_MIN_MS = 5 * 60 * 1e3;
+    let matchedTicket = null;
+    let matchedTicketId = null;
+    for (const ticket of candidates) {
+      if (ticket.ticketId.startsWith("lock_")) continue;
+      const ticketTime = new Date(ticket.createdAt).getTime();
+      if (now - ticketTime > FIVE_MIN_MS) {
+        console.log(
+          `Ticket ${ticket.ticketId}: outside 5 - minute window, skipping`
+        );
+        continue;
+      }
+      const numericPart = ticket.ticketId.replace(/^TICKET/i, "");
+      const ticketSuffix = parseInt(numericPart.slice(-2), 10);
+      if (ticketSuffix !== decPart) {
+        console.log(
+          `Ticket ${ticket.ticketId}: suffix ${ticketSuffix} !== dec ${decPart}, skipping`
+        );
+        continue;
+      }
+      if (Math.floor(ticket.amount) !== intPart) {
+        console.log(
+          `Ticket ${ticket.ticketId}: integer amount mismatch(expected ${ticket.amount}, got ${intPart}), skipping`
+        );
+        continue;
+      }
+      if (ticket.status === "paid") {
+        console.log(`Ticket ${ticket.ticketId}: already paid, skipping`);
+        continue;
+      }
+      matchedTicket = ticket;
+      matchedTicketId = ticket.ticketId;
+      break;
+    }
+    if (!matchedTicket || !matchedTicketId) {
+      console.log(
+        `No matching pending ticket found for amount \u20B9${paidAmount} (dec = ${decPart})`
+      );
+      return c.json({
+        status: "ignored",
+        reason: "no_matching_ticket",
+        paid_amount: paidAmount,
+        dec_part: decPart
+      });
+    }
+    const updatedDoc = await appwrite.markAsPaid(
+      matchedTicketId,
+      senderName,
+      rrn ?? void 0
+    );
+    if (updatedDoc) {
+      console.log(
+        `Ticket ${matchedTicketId} MARKED AS PAID via email. RRN: ${rrn}`
+      );
+      localDecimalLocks.delete(`${intPart}_${decPart} `);
+      await appwrite.releaseDatabaseLock(intPart, decPart).catch(() => null);
+      return c.json(updatedDoc);
+    } else {
+      return c.json({ status: "error", reason: "update_failed" }, 500);
+    }
+  } catch (error3) {
+    console.error("Email webhook error:", error3);
     return c.json({ error: "Internal Server Error" }, 500);
   }
 });
@@ -6840,7 +7431,110 @@ app.get("/api/status/:id", async (c) => {
   }
   return c.json(status);
 });
-var worker_default = app;
+app.get(
+  "/api/ws",
+  upgradeWebSocket((c) => {
+    const ticketId = c.req.query("ticketId");
+    return {
+      onMessage(event, ws) {
+      },
+      async onOpen(evt, ws) {
+        if (!ticketId) {
+          console.log("WebSocket rejected: No ticketId provided");
+          ws.close(1008, "Ticket ID required");
+          return;
+        }
+        console.log(
+          `Frontend opened secure WebSocket for Ticket: ${ticketId} `
+        );
+        const appwrite = new AppwriteService(c.env);
+        const ticket = await appwrite.getTicketStatus(ticketId);
+        if (!ticket) {
+          console.log(`WebSocket rejected: Ticket ${ticketId} not found`);
+          ws.close(1008, "Ticket not found");
+          return;
+        }
+        const appwriteHost = c.env.APPWRITE_ENDPOINT.replace(
+          /^https?:\/\//,
+          ""
+        ).split("/")[0];
+        const channels = [
+          `databases.${c.env.APPWRITE_DATABASE_ID}.collections.${c.env.APPWRITE_COLLECTION_ID}.documents.${ticket.id}`
+        ];
+        const appwriteWsUrl = `wss://${appwriteHost}/v1/realtime?project=${c.env.APPWRITE_PROJECT_ID}&channels[]=${encodeURIComponent(channels[0])}`;
+        const appwriteSocket = new WebSocket(appwriteWsUrl, {
+          headers: {
+            "X-Appwrite-Key": c.env.APPWRITE_API_KEY
+          }
+        });
+        appwriteSocket.addEventListener("message", (msg) => {
+          try {
+            const payload = JSON.parse(msg.data);
+            if (payload.type === "event" && payload.events && payload.events.length > 0) {
+              const updateEvent = payload.events.find(
+                (e3) => e3.includes(".update")
+              );
+              if (updateEvent && payload.data && payload.data.status) {
+                console.log(
+                  `Forwarding WS Update to Frontend: ${ticketId} -> ${payload.data.status}`
+                );
+                ws.send(
+                  JSON.stringify({
+                    type: "payment_update",
+                    status: payload.data.status,
+                    paidAt: payload.data.paidAt || null
+                  })
+                );
+              }
+            }
+          } catch (e3) {
+            console.error("Failed to parse Appwrite realtime message:", e3);
+          }
+        });
+        appwriteSocket.addEventListener("close", () => {
+          console.log(`Appwrite closed connection for ${ticketId}`);
+          ws.close();
+        });
+        appwriteSocket.addEventListener("error", (err) => {
+          console.error(`Appwrite connection error for ${ticketId}`);
+          ws.close(1011, "Backend error");
+        });
+        ws.addEventListener("close", () => {
+          console.log(
+            `Frontend closed secure WebSocket for Ticket: ${ticketId}`
+          );
+          appwriteSocket.close();
+        });
+      }
+    };
+  })
+);
+var worker_default = {
+  fetch: app.fetch,
+  async email(message, env2, ctx) {
+    try {
+      console.log("Received email from:", message.from, "to:", message.to);
+      const rawEmail = await new Response(message.raw).text();
+      const payload = {
+        secret: env2.EMAIL_SECRET,
+        from: message.from,
+        subject: message.headers.get("Subject") || "",
+        text: rawEmail
+      };
+      const req = new Request("http://localhost/api/email-webhook", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const res = await app.fetch(req, env2, ctx);
+      console.log("Email webhook local processing status:", res.status);
+      const resultText = await res.text();
+      console.log("Email webhook result:", resultText);
+    } catch (e3) {
+      console.error("Email worker error:", e3);
+    }
+  }
+};
 export {
   worker_default as default
 };

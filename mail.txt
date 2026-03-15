@@ -1,55 +1,55 @@
 Delivered-To: souravpbijoy@gmail.com
-Received: by 2002:a05:6a06:3de:b0:773:880d:aa16 with SMTP id j30csp3612318pip;
-        Wed, 4 Mar 2026 22:57:19 -0800 (PST)
-X-Received: by 2002:a05:6a00:cd3:b0:81c:96b7:7faa with SMTP id d2e1a72fcca58-82972c64cf6mr4547992b3a.41.1772693839342;
-        Wed, 04 Mar 2026 22:57:19 -0800 (PST)
-ARC-Seal: i=1; a=rsa-sha256; t=1772693839; cv=none;
+Received: by 2002:ac4:d799:0:b0:773:880d:aa16 with SMTP id d25csp413775pie;
+        Fri, 6 Mar 2026 01:51:58 -0800 (PST)
+X-Received: by 2002:a05:6a00:e0e:b0:823:b39:779e with SMTP id d2e1a72fcca58-829a30c8ac8mr1537730b3a.62.1772790717789;
+        Fri, 06 Mar 2026 01:51:57 -0800 (PST)
+ARC-Seal: i=1; a=rsa-sha256; t=1772790717; cv=none;
         d=google.com; s=arc-20240605;
-        b=lgyIFb/nG31XDw2wWiYNog2VzJpisHBBYufzbiYRBB0yzjhUQttW+6ZmNhtp9f8Y0h
-         /ivPmIL1v4S2OH++mGv9NTmobujI+DkU4W8ghJcC29n4PMezwnEmQkrSEFsXwTYNM/4N
-         WkFHDxSb39B2E/R71RuwhlWIA7S2dilYpFF7a4D3ksjWMsFfm8YjjHqx/c9nt0w8WPV6
-         OJnimy61Tn2/dTGs6MRac+X62inbFHxQVp8yBNUcOox07tIyvAEQfuWNDFXZY6GwfQre
-         hDOLzb1oCrvfpdVh7wHOLVa+yOrAotzDy0tm4u0vB6FjeLwr+W9QSbwINaaQL5dL9Tw8
-         6+0A==
+        b=jkpn79c/iiQ7L7bTfnR12HF+A/qhvAc4/xDlo4/S+Vocwb+2zqja1FUk0zASNbtj92
+         POE4o7FV+s3tcrDzLjIsanz49IS4T48HQVVC4E9DkHBME4xqx3OeqRHa9NxL3vg2OsTe
+         qGdSA6rDWo5fxOg6Umf7LVoC1Vuf+siBrGT+nslBvK+J/PlSxM+vF/14bxFg2Ho6sk+J
+         4JT/kwJn0lXnq93ntnMz/ZlRW5blWJxtFBsfSiAGi98kW9oT2CFk/1bxKw3WSDtXw62o
+         FKtF0B2lHG97S8MoF5mj0Iho4MplOZeQeSrQgpjnAmE+jR0cP3V0n+X858QH82HCSMuk
+         AaWA==
 ARC-Message-Signature: i=1; a=rsa-sha256; c=relaxed/relaxed; d=google.com; s=arc-20240605;
         h=feedback-id:message-id:content-transfer-encoding:to:subject:from
          :date:mime-version:dkim-signature:dkim-signature;
-        bh=gtKjjH4xZatjNfhVWHr6gZsIFBCgSHaZKXrJuxBvxq0=;
+        bh=2/bHhNYJKvmuXeF4EYP84e6lI8Q+PFGn6L7Fqp/Fowc=;
         fh=EosWA7Z0URvaMLM/+B6LGs5kfQmbAacXy+hOxpSBUYk=;
-        b=kg/Bj7QBP+N7Zv4OeLXVMpsr6mqT7MKsPv1AGmm+T/0ygQfYHcb7yFm/K++G785Nnv
-         EmkMss2Em64ajJZTLeXE6X58NQBHMD6iDfUkv7RAIjD82Y+2NpSVhvjFfmLwVFRUVCX3
-         Vpy7HW6YzTZwDr1JZiAbz5bh5tr/X5/uLOAsxtm6nvuKxo5kKMn9HLKTaf9sZGjWZyAI
-         DkKlSemnkxLHhWmxv1zm/fleqWqvdBE45NfYeLR87UQFnlT15+jHilxmFhLr3GZfo0RO
-         3PhgUKCA2YOcAC6uCZ3RtkK1ElA23D+8uQF5FdnBPLRlYU6qG1qdHtpFMc2Oah9CNKYS
-         ewSQ==;
+        b=Qzlu6u89MgDNC7gNkNHD4/tC6ecLOY9xIp7gz+pIBXMSnHaONO8YmYfKH56VoVeKw+
+         HXzGfsr4GTAK+NXD6eAoYUUH8/TZ/upd6T7VhdJlyYYl6QMhB1qdX5afDnIGKXE1NKQW
+         PDhx0CwGObCW719WSLxGEqdOwt9Bn2qNBuhff5BdEcaTxOKwZaeAW+qLH+Cirn1XKTxn
+         zIfGL+y0pwGB2qVX4ZXdVBAEX2u/iDcDAb3/yodSR0wgYz8Q7omXrM7imi9hVUKEFO4x
+         F9UR+zCF5/0vfm/KPtQfeyu49cuuIrQmET+dQQ2saUkb/tzvxSDDFWKkQTaqkWYxZqkv
+         ttWw==;
         dara=google.com
 ARC-Authentication-Results: i=1; mx.google.com;
-       dkim=pass header.i=@slice.bank.in header.s=r27ngqbd5ceqe6opuhl72jgkw47cefm7 header.b=EQfjrPRR;
-       dkim=pass header.i=@amazonses.com header.s=dvogjbaa3ou3tduyzvyu4rj5tkuzdi4h header.b=Ujplbjep;
-       spf=pass (google.com: domain of 0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com designates 76.223.180.117 as permitted sender) smtp.mailfrom=0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com
-Return-Path: <0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com>
-Received: from c180-117.smtp-out.ap-south-1.amazonses.com (c180-117.smtp-out.ap-south-1.amazonses.com. [76.223.180.117])
-        by mx.google.com with ESMTPS id d2e1a72fcca58-8273a309515si44739067b3a.179.2026.03.04.22.57.18
+       dkim=pass header.i=@slice.bank.in header.s=r27ngqbd5ceqe6opuhl72jgkw47cefm7 header.b=fl3Tp0Di;
+       dkim=pass header.i=@amazonses.com header.s=dvogjbaa3ou3tduyzvyu4rj5tkuzdi4h header.b=epSa68aj;
+       spf=pass (google.com: domain of 0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9b0221-000000@ap-south-1.amazonses.com designates 76.223.180.114 as permitted sender) smtp.mailfrom=0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9b0221-000000@ap-south-1.amazonses.com
+Return-Path: <0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9b0221-000000@ap-south-1.amazonses.com>
+Received: from c180-114.smtp-out.ap-south-1.amazonses.com (c180-114.smtp-out.ap-south-1.amazonses.com. [76.223.180.114])
+        by mx.google.com with ESMTPS id d2e1a72fcca58-829a4901a79si1753422b3a.150.2026.03.06.01.51.57
         for <souravpbijoy@gmail.com>
         (version=TLS1_3 cipher=TLS_AES_128_GCM_SHA256 bits=128/128);
-        Wed, 04 Mar 2026 22:57:19 -0800 (PST)
-Received-SPF: pass (google.com: domain of 0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com designates 76.223.180.117 as permitted sender) client-ip=76.223.180.117;
+        Fri, 06 Mar 2026 01:51:57 -0800 (PST)
+Received-SPF: pass (google.com: domain of 0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9b0221-000000@ap-south-1.amazonses.com designates 76.223.180.114 as permitted sender) client-ip=76.223.180.114;
 Authentication-Results: mx.google.com;
-       dkim=pass header.i=@slice.bank.in header.s=r27ngqbd5ceqe6opuhl72jgkw47cefm7 header.b=EQfjrPRR;
-       dkim=pass header.i=@amazonses.com header.s=dvogjbaa3ou3tduyzvyu4rj5tkuzdi4h header.b=Ujplbjep;
-       spf=pass (google.com: domain of 0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com designates 76.223.180.117 as permitted sender) smtp.mailfrom=0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com
-DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple; s=r27ngqbd5ceqe6opuhl72jgkw47cefm7; d=slice.bank.in; t=1772693837; h=Mime-Version:Date:From:Subject:To:Content-Type:Content-Transfer-Encoding:Message-ID; bh=IntBXu/9h+8JyGuuZOvW9szYfRp65SWUuynVcTaOfew=; b=EQfjrPRRGKnvTon5e/orv8OEF7VFhcVy6IL7SyMOlJNAMgrlOk8DSkolIS0ELoDV gxr04BJUzafEGDXO6GnHuUXReoXcxBV8NOmsDckzWA9reBBs4MBIESO8cME6kKeofKz TJlDeTQT+WWXzsMn0ZpA7ZCPNU0U4hvdhmdMASEw=
-DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple; s=dvogjbaa3ou3tduyzvyu4rj5tkuzdi4h; d=amazonses.com; t=1772693837; h=Mime-Version:Date:From:Subject:To:Content-Type:Content-Transfer-Encoding:Message-ID:Feedback-ID; bh=IntBXu/9h+8JyGuuZOvW9szYfRp65SWUuynVcTaOfew=; b=UjplbjeplSLUiDCp/JBfp/icB637zeWq6XdPwQo1w4wjv1xyXCEYktM4guI7OVE4 lSHYDyief+67hsUsBz44RljF6EYELSMyihENiG6qaVrze0d8P4Pp0pl8IN5XdfAEPjK OLwnsykD7D25WXgsOHXb9tA917XDd7r8xwO1j8h4=
+       dkim=pass header.i=@slice.bank.in header.s=r27ngqbd5ceqe6opuhl72jgkw47cefm7 header.b=fl3Tp0Di;
+       dkim=pass header.i=@amazonses.com header.s=dvogjbaa3ou3tduyzvyu4rj5tkuzdi4h header.b=epSa68aj;
+       spf=pass (google.com: domain of 0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9b0221-000000@ap-south-1.amazonses.com designates 76.223.180.114 as permitted sender) smtp.mailfrom=0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9b0221-000000@ap-south-1.amazonses.com
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple; s=r27ngqbd5ceqe6opuhl72jgkw47cefm7; d=slice.bank.in; t=1772790716; h=Mime-Version:Date:From:Subject:To:Content-Type:Content-Transfer-Encoding:Message-ID; bh=lnG/j9RRch0ABzNpAiXGHoNTtqm2zJHMqZ0Gtj0qPes=; b=fl3Tp0Di8KSsR6O2QuzUY4Xxg3Y/6d7rSjDD2l3uHPxWUzVb8XU5VLemyDmradVm Y7hudEQ93KX22Uz69J/vAdrCkY+mrcWNb3VLs6E6H1uA3NmXGDGfcmCotQBhpY909o4 qvqCU9FTjuUz8xjIiYP6NS9BJytUp8Iv0Pv9LDBM=
+DKIM-Signature: v=1; a=rsa-sha256; q=dns/txt; c=relaxed/simple; s=dvogjbaa3ou3tduyzvyu4rj5tkuzdi4h; d=amazonses.com; t=1772790716; h=Mime-Version:Date:From:Subject:To:Content-Type:Content-Transfer-Encoding:Message-ID:Feedback-ID; bh=lnG/j9RRch0ABzNpAiXGHoNTtqm2zJHMqZ0Gtj0qPes=; b=epSa68aj/WMjiOMjJ4NR0AyNx4sI3DmfwUm9ziTI8bQiMFSfmcTQ49+zGmqUPbKF b9blSF04seRVOK/hBIOzXiIhYhOahzvh7ZxfzlVVI9VGIAXyndiNUKQL2JMx2sVC+nS FyYF5ShE9y8IehJxVhMTc0ddU1m3ZmIfeQWbYGLo=
 Mime-Version: 1.0
-Date: Thu, 5 Mar 2026 06:57:17 +0000
+Date: Fri, 6 Mar 2026 09:51:56 +0000
 From: slice <noreply@slice.bank.in>
-Subject: Received ₹1.02 via UPI
+Subject: Received ₹5.02 via UPI
 To: souravpbijoy@gmail.com
 Content-Type: text/html; charset=UTF-8
 Content-Transfer-Encoding: quoted-printable
-Message-ID: <0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000@ap-south-1.amazonses.com>
+Message-ID: <0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9b0221-000000@ap-south-1.amazonses.com>
 Feedback-ID: ::1.ap-south-1.HtOgnP+dOLDZfUdWYk9LGx9WGraj+McCqsntUA1ZdfQ=:AmazonSES
-X-SES-Outgoing: 2026.03.05-76.223.180.117
+X-SES-Outgoing: 2026.03.06-76.223.180.114
 
 <html lang=3D"en"><head>
      =20
@@ -169,8 +169,8 @@ ain" width=3D"456" cellspacing=3D"0" cellpadding=3D"0" border=3D"0" align=
                                                                <td valign=
 =3D"top" style=3D"padding: 71px 0px 32px 0px;" class=3D"" align=3D"left"><a=
  href=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fwww.slice=
-it.com%2F/1/0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000/L9=
-FsvbENUtTjIfEPUNuXI9NbmGQ=3D249"> <img width=3D"100" style=3D"display: bloc=
+it.com%2F/1/0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9b0221-000000/HY=
+CCjNAKc81dyVzhc9KZBm9VvuA=3D249"> <img width=3D"100" style=3D"display: bloc=
 k;border: 0;" src=3D"https://res.cloudinary.com/slicepay/image/upload/v1653=
 988818/slice-new_dn8xaa.png" class=3D"" border=3D"0"></a></td>
                                                             </tr>
@@ -198,8 +198,8 @@ g:0px 0px 24px 0px;
                                                                      border=
 -bottom: 1px solid #f5f5f5;" class=3D"" align=3D"left">
                                                                   You have =
-received =E2=82=B91.02 via UPI in your slice bank account xx1012. Avl. Bal.=
- =E2=82=B9456.78!
+received =E2=82=B95.02 via UPI in your slice bank account xx1012. Avl. Bal.=
+ =E2=82=B9164.91!
                                                                </td>
                                                            </tr>
 
@@ -230,7 +230,7 @@ yle=3D"width: 100%; border-collapse: collapse;">
  width: 40%; text-align: left; padding: 12px 0;">Transaction date</td>
                                                                            =
 <td style=3D"font-family:Inter,sans-serif; font-size:18px; font-weight:400;=
- width: 60%; text-align: left; padding: 12px 0;">05-Mar-26</td>
+ width: 60%; text-align: left; padding: 12px 0;">06-Mar-26</td>
                                                                      </tr>
                                                                      <tr>
                                                                            =
@@ -246,7 +246,7 @@ yle=3D"width: 100%; border-collapse: collapse;">
  width: 40%; text-align: left; padding: 12px 0;">RRN</td>
                                                                            =
 <td style=3D"font-family:Inter,sans-serif; font-size:18px; font-weight:400;=
- width: 60%; text-align: left; padding: 12px 0;">122714386890</td>
+ width: 60%; text-align: left; padding: 12px 0;">152153898307</td>
                                                                      </tr>
                                                                   </tbody><=
 /table>
@@ -263,8 +263,8 @@ yle=3D"width: 100%; border-collapse: collapse;">
 n style=3D"color:#9E2BCF;">slice</span>
                                                                   <br><a hr=
 ef=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fwww.sliceit.=
-com%2Fbeware-of-fraud%2F/1/0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc=
-5248b-000000/WC3kgFzsiXwj06g-PwBfaLpjBSc=3D249" style=3D"color: #9E2BCF; te=
+com%2Fbeware-of-fraud%2F/1/0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9=
+b0221-000000/9e5aYF74YVgtW299aoMlCv_ORUQ=3D249" style=3D"color: #9E2BCF; te=
 xt-decoration: underline;">Digital safety tips</a>
                                                                </td>
                                                             </tr>
@@ -298,26 +298,26 @@ e small finance bank. All rights reserved.
                                                                   <tr>
                                                                      <td><a=
  href=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fwww.insta=
-gram.com%2Fslicebank_%2F/1/0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc=
-5248b-000000/LY0BUZD70UGFszRfJyZ88HXC0Ag=3D249"><img src=3D"https://res.clo=
+gram.com%2Fslicebank_%2F/1/0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9=
+b0221-000000/Hy8Hgl7aQ0mp7QXrNufimPJBrNg=3D249"><img src=3D"https://res.clo=
 udinary.com/slicepay/image/upload/v1683799007/email-templates/instagram_tat=
 olo.png" width=3D"16" style=3D"display:block;" alt=3D"Instagram"></a></td>
                                                                      <td><a=
  href=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fwww.faceb=
-ook.com%2Fsliceitt%2F/1/0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc524=
-8b-000000/nYvb2i17FkPO_01G1TtusRjl68w=3D249"><img src=3D"https://res.cloudi=
+ook.com%2Fsliceitt%2F/1/0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9b02=
+21-000000/M4ah5wo9iAdGT-lOt0pmFvgttZs=3D249"><img src=3D"https://res.cloudi=
 nary.com/slicepay/image/upload/v1683799007/email-templates/fb_gfjun2.png" w=
 idth=3D"16" style=3D"display:block;" alt=3D"Facebook"></a></td>
                                                                      <td><a=
  href=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fx.com%2Fs=
-licebank/1/0109019cbcc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000/16h=
-lZ2wnwKNdFf8kTM6lkRHoqWs=3D249"><img src=3D"https://res.cloudinary.com/slic=
+licebank/1/0109019cc28f992a-395effcf-7939-45e8-9dc4-1b422f9b0221-000000/XjY=
+t_nAnTcwZJeFn6TZLYlYyo10=3D249"><img src=3D"https://res.cloudinary.com/slic=
 epay/image/upload/v1683799008/email-templates/twitter_uu1oxw.png" width=3D"=
 16" style=3D"display:block;" alt=3D"Twitter"></a></td>
                                                                      <td><a=
  href=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/L0/https:%2F%2Fwww.linke=
-din.com%2Fcompany%2Fsliceit%2Fmycompany%2F/1/0109019cbcc954ed-8762b62c-21dd=
--49bc-aff4-5d96bdc5248b-000000/HqcHkp30bRQHKF2R95J4RAVaG8Y=3D249"><img src=
+din.com%2Fcompany%2Fsliceit%2Fmycompany%2F/1/0109019cc28f992a-395effcf-7939=
+-45e8-9dc4-1b422f9b0221-000000/hKbyMAjb4t-roCtbKW2W_BAhUus=3D249"><img src=
 =3D"https://res.cloudinary.com/slicepay/image/upload/v1683799007/email-temp=
 lates/linkedn_b7nukm.png" width=3D"16" style=3D"display:block;" alt=3D"Link=
 edIn"></a></td>
@@ -346,7 +346,7 @@ edIn"></a></td>
          </tbody>
       </table>
   =20
-<img alt=3D"" src=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/I0/0109019cb=
-cc954ed-8762b62c-21dd-49bc-aff4-5d96bdc5248b-000000/IKrzek6ufdKk9mKT3PWYh3v=
-Ut48=3D249" style=3D"display: none; width: 1px; height: 1px;">
+<img alt=3D"" src=3D"https://5xh7drj4.r.ap-south-1.awstrack.me/I0/0109019cc=
+28f992a-395effcf-7939-45e8-9dc4-1b422f9b0221-000000/qi2wDtCPBLnhZ_aP6YgT_7W=
+CVyI=3D249" style=3D"display: none; width: 1px; height: 1px;">
 </body></html>
