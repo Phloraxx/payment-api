@@ -14,6 +14,7 @@ export interface Env {
   APPWRITE_COLLECTION_ID: string;
   WEBHOOK_SECRET: string;
   EMAIL_SECRET: string; // shared secret for the Cloudflare email worker webhook
+  ALLOWED_ORIGIN?: string;
 }
 
 export interface Ticket {
@@ -78,6 +79,20 @@ export class AppwriteService {
    */
   async markAsPaid(ticketId: string, senderName?: string, rrn?: string) {
     try {
+      if (rrn) {
+        // Prevent duplicate payment processing by checking RRN uniqueness
+        const existingWithRrn = await this.databases.listDocuments<TicketDocument>(
+          this.env.APPWRITE_DATABASE_ID,
+          this.env.APPWRITE_COLLECTION_ID,
+          [Query.equal("rrn", rrn)],
+        );
+
+        if (existingWithRrn.total > 0) {
+          console.log(`Duplicate RRN detected: ${rrn}. Skipping update.`);
+          return null;
+        }
+      }
+
       const updatePayload: Record<string, unknown> = {
         status: "paid",
         senderName: senderName,
@@ -117,17 +132,16 @@ export class AppwriteService {
 
   async getTicketStatus(ticketId: string) {
     try {
-      const response = await this.databases.listDocuments<TicketDocument>(
+      // Use getDocument directly since ticketId is mapped to document $id
+      const doc = await this.databases.getDocument<TicketDocument>(
         this.env.APPWRITE_DATABASE_ID,
         this.env.APPWRITE_COLLECTION_ID,
-        [Query.equal("ticketId", ticketId)],
-      );
+        ticketId,
+      ).catch(() => null);
 
-      if (response.documents.length === 0) {
+      if (!doc) {
         return null;
       }
-
-      const doc = response.documents[0];
 
       // --- Lazy Cancellation Check ---
       // If the ticket is pending and older than 5 minutes, cancel it immediately.
@@ -282,7 +296,7 @@ export class AppwriteService {
       if (error.code === 409) {
         // Lock already exists. Check if it is a stale lock (> 5 mins old)
         try {
-          const existingLock = await this.databases.getDocument(
+          const existingLock = await this.databases.getDocument<TicketDocument>(
             this.env.APPWRITE_DATABASE_ID,
             this.env.APPWRITE_COLLECTION_ID,
             lockDocId,
