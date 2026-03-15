@@ -235,7 +235,7 @@ app.post("/api/webhook", async (c) => {
                 console.log("UPI ID:", upiId, "| RRN:", rrn);
 
                 const appwrite = new AppwriteService(c.env);
-                const candidates = await appwrite.listRecentPendingTickets(20);
+                const candidates = await appwrite.listRecentTickets(20);
 
                 const now = Date.now();
                 const FIVE_MIN_MS = 5 * 60 * 1000;
@@ -254,7 +254,6 @@ app.post("/api/webhook", async (c) => {
 
                     if (ticketSuffix !== decPart) continue;
                     if (toCents(Math.floor(ticket.amount)) !== toCents(intPart)) continue;
-                    if (ticket.status === "paid") continue;
 
                     matchedTicket = ticket;
                     matchedTicketId = ticket.ticketId;
