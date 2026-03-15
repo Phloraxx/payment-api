@@ -6625,145 +6625,6 @@ Permission.delete = (role) => {
   return `delete("${role}")`;
 };
 
-// node_modules/node-appwrite/dist/role.mjs
-var Role = class {
-  static {
-    __name(this, "Role");
-  }
-  /**
-   * Grants access to anyone.
-   * 
-   * This includes authenticated and unauthenticated users.
-   * 
-   * @returns {string}
-   */
-  static any() {
-    return "any";
-  }
-  /**
-   * Grants access to a specific user by user ID.
-   * 
-   * You can optionally pass verified or unverified for
-   * `status` to target specific types of users.
-   *
-   * @param {string} id 
-   * @param {string} status 
-   * @returns {string}
-   */
-  static user(id, status = "") {
-    if (status === "") {
-      return `user:${id}`;
-    }
-    return `user:${id}/${status}`;
-  }
-  /**
-   * Grants access to any authenticated or anonymous user.
-   * 
-   * You can optionally pass verified or unverified for
-   * `status` to target specific types of users.
-   * 
-   * @param {string} status 
-   * @returns {string}
-   */
-  static users(status = "") {
-    if (status === "") {
-      return "users";
-    }
-    return `users/${status}`;
-  }
-  /**
-   * Grants access to any guest user without a session.
-   * 
-   * Authenticated users don't have access to this role.
-   * 
-   * @returns {string}
-   */
-  static guests() {
-    return "guests";
-  }
-  /**
-   * Grants access to a team by team ID.
-   * 
-   * You can optionally pass a role for `role` to target
-   * team members with the specified role.
-   * 
-   * @param {string} id 
-   * @param {string} role 
-   * @returns {string}
-   */
-  static team(id, role = "") {
-    if (role === "") {
-      return `team:${id}`;
-    }
-    return `team:${id}/${role}`;
-  }
-  /**
-   * Grants access to a specific member of a team.
-   * 
-   * When the member is removed from the team, they will
-   * no longer have access.
-   * 
-   * @param {string} id 
-   * @returns {string}
-   */
-  static member(id) {
-    return `member:${id}`;
-  }
-  /**
-   * Grants access to a user with the specified label.
-   * 
-   * @param {string} name 
-   * @returns  {string}
-   */
-  static label(name) {
-    return `label:${name}`;
-  }
-};
-
-// node_modules/node-appwrite/dist/id.mjs
-var ID = class _ID {
-  static {
-    __name(this, "_ID");
-  }
-  /**
-   * Generate an hex ID based on timestamp.
-   * Recreated from https://www.php.net/manual/en/function.uniqid.php
-   *
-   * @returns {string}
-   */
-  static #hexTimestamp() {
-    const now = /* @__PURE__ */ new Date();
-    const sec = Math.floor(now.getTime() / 1e3);
-    const msec = now.getMilliseconds();
-    const hexTimestamp = sec.toString(16) + msec.toString(16).padStart(5, "0");
-    return hexTimestamp;
-  }
-  /**
-   * Uses the provided ID as the ID for the resource.
-   *
-   * @param {string} id
-   * @returns {string}
-   */
-  static custom(id) {
-    return id;
-  }
-  /**
-   * Have Appwrite generate a unique ID for you.
-   * 
-   * @param {number} padding. Default is 7.
-   * @returns {string}
-   */
-  static unique(padding = 7) {
-    const baseId = _ID.#hexTimestamp();
-    let randomPadding = "";
-    for (let i3 = 0; i3 < padding; i3++) {
-      const randomHexDigit = Math.floor(Math.random() * 16).toString(16);
-      randomPadding += randomHexDigit;
-    }
-    return baseId + randomPadding;
-  }
-};
-
 // node_modules/node-appwrite/dist/operator.mjs
 var _Operator = class _Operator2 {
   static {
@@ -6893,6 +6754,10 @@ _Operator.dateSubDays = (days) => new _Operator("dateSubDays", [days]).toString(
 _Operator.dateSetNow = () => new _Operator("dateSetNow", []).toString();
 
 // src/lib/appwrite.ts
+function toCents(amount) {
+  return Math.round(amount * 100);
+}
+__name(toCents, "toCents");
 var AppwriteService = class {
   static {
     __name(this, "AppwriteService");
@@ -6907,7 +6772,7 @@ var AppwriteService = class {
       return await this.databases.createDocument(
         this.env.APPWRITE_DATABASE_ID,
         this.env.APPWRITE_COLLECTION_ID,
-        ID.unique(),
+        ticketId,
         {
           ticketId,
           amount,
@@ -6921,33 +6786,40 @@ var AppwriteService = class {
   }
   /**
    * Mark a ticket as paid, optionally persisting the sender name, RRN,
-   * and the timestamp at which payment was confirmed.
+   * UPI ID, and the timestamp at which payment was confirmed.
    */
-  async markAsPaid(ticketId, senderName, rrn) {
+  async markAsPaid(ticketId, senderName, rrn, upiId) {
     try {
-      const response = await this.databases.listDocuments(
-        this.env.APPWRITE_DATABASE_ID,
-        this.env.APPWRITE_COLLECTION_ID,
-        [Query.equal("ticketId", ticketId)]
-      );
-      if (response.documents.length === 0) {
-        return null;
+      if (rrn) {
+        const existingWithRrn = await this.databases.listDocuments(
+          this.env.APPWRITE_DATABASE_ID,
+          this.env.APPWRITE_COLLECTION_ID,
+          [Query.equal("rrn", rrn)]
+        );
+        if (existingWithRrn.total > 0) {
+          console.log(`Duplicate RRN detected: ${rrn}. Skipping update.`);
+          return null;
+        }
       }
-      const docId = response.documents[0].$id;
       const updatePayload = {
         status: "paid",
-        senderName,
         paidAt: (/* @__PURE__ */ new Date()).toISOString()
       };
+      if (senderName) {
+        updatePayload.senderName = senderName;
+      }
       if (rrn) {
         updatePayload.rrn = rrn;
+      }
+      if (upiId) {
+        updatePayload.upiId = upiId;
       }
       console.log("Sending update to Appwrite for ticket:", ticketId);
       console.log("Update Payload:", JSON.stringify(updatePayload, null, 2));
       const updatedDoc = await this.databases.updateDocument(
         this.env.APPWRITE_DATABASE_ID,
         this.env.APPWRITE_COLLECTION_ID,
-        docId,
+        ticketId,
         updatePayload
       );
       return {
@@ -6958,6 +6830,7 @@ var AppwriteService = class {
         senderName: updatedDoc.senderName,
         rrn: updatedDoc.rrn ?? null,
         paidAt: updatedDoc.paidAt ?? null,
+        upiId: updatedDoc.upiId ?? null,
         createdAt: updatedDoc.$createdAt
       };
     } catch (error3) {
@@ -6967,15 +6840,14 @@ var AppwriteService = class {
   }
   async getTicketStatus(ticketId) {
     try {
-      const response = await this.databases.listDocuments(
+      const doc = await this.databases.getDocument(
         this.env.APPWRITE_DATABASE_ID,
         this.env.APPWRITE_COLLECTION_ID,
-        [Query.equal("ticketId", ticketId)]
-      );
-      if (response.documents.length === 0) {
+        ticketId
+      ).catch(() => null);
+      if (!doc) {
         return null;
       }
-      const doc = response.documents[0];
       let currentStatus = doc.status;
       if (currentStatus === "pending") {
         const ticketTime = new Date(doc.$createdAt).getTime();
@@ -6992,13 +6864,13 @@ var AppwriteService = class {
       }
       return {
         id: doc.$id,
-        // THE SECURE INTERNAL DOCUMENT ID
         ticketId: doc.ticketId,
         status: currentStatus,
         amount: doc.amount,
         senderName: doc.senderName,
         rrn: doc.rrn ?? null,
         paidAt: doc.paidAt ?? null,
+        upiId: doc.upiId ?? null,
         createdAt: doc.$createdAt
         // Appwrite built-in timestamp
       };
@@ -7097,8 +6969,7 @@ var AppwriteService = class {
           ticketId: lockDocId,
           amount: finalAmount,
           status: "pending"
-        },
-        [Permission.read(Role.any())]
+        }
       );
       return true;
     } catch (error3) {
@@ -7178,15 +7049,80 @@ var EmailParser = class {
     }
     return result;
   }
+  /**
+   * Extracts the payment amount, decimal parts, RRN, and Sender Name from a Kotak SMS.
+   * Example: "Confirmed payment for Received Rs.3.00 in your Kotak Bank AC X4959 from drvijayapalliyil@oksbi on 08-03-26.UPI Ref:606703736479."
+   */
+  static parseKotakSms(smsBody) {
+    if (!smsBody.toUpperCase().includes("KOTAK")) {
+      return null;
+    }
+    const result = {
+      paidAmount: null,
+      intPart: null,
+      decPart: null,
+      rrn: null,
+      senderName: "UNKNOWN",
+      upiId: null
+    };
+    const amountMatch = smsBody.match(/Rs\.?\s*(\d+)(?:\.(\d{2}))?/i);
+    if (amountMatch) {
+      result.intPart = parseInt(amountMatch[1], 10);
+      result.decPart = amountMatch[2] ? parseInt(amountMatch[2], 10) : 0;
+      result.paidAmount = parseFloat(`${result.intPart}.${amountMatch[2] || "00"}`);
+    } else {
+      return null;
+    }
+    const upiIdMatch = smsBody.match(/from\s+([a-zA-Z0-9.\-_]+@[a-zA-Z0-9.\-_]+)/i);
+    if (upiIdMatch) {
+      result.upiId = upiIdMatch[1].trim();
+    }
+    const rrnMatch = smsBody.match(/UPI Ref[:\s]*(\d+)/i) || smsBody.match(/Ref\.?No\.?[:\s]*(\d+)/i) || smsBody.match(/RRN[:\s]*(\d+)/i);
+    if (rrnMatch) {
+      result.rrn = rrnMatch[1];
+    }
+    return result;
+  }
 };
 
 // src/worker.ts
 var localDecimalLocks = /* @__PURE__ */ new Set();
+function timingSafeEqual(a3, b) {
+  const aLen = a3.length;
+  const bLen = b.length;
+  let result = aLen ^ bLen;
+  const len = Math.min(aLen, bLen);
+  for (let i3 = 0; i3 < len; i3++) {
+    result |= a3.charCodeAt(i3) ^ b.charCodeAt(i3);
+  }
+  return result === 0;
+}
+__name(timingSafeEqual, "timingSafeEqual");
 var app = new Hono2();
-app.use("/*", cors());
+app.use("/*", async (c, next) => {
+  const allowedOrigin = c.env.ALLOWED_ORIGIN || "*";
+  const corsMiddleware = cors({
+    origin: allowedOrigin.includes(",") ? allowedOrigin.split(",") : allowedOrigin
+  });
+  return corsMiddleware(c, next);
+});
 app.get("/", (c) => {
   return c.text("Payment Gateway API is running!");
 });
+app.get(
+  "/api/ping",
+  upgradeWebSocket((c) => {
+    return {
+      onMessage(event, ws) {
+        console.log("PING RX");
+        ws.send("pong");
+      },
+      onOpen() {
+        console.log("PING WS OPEN");
+      }
+    };
+  })
+);
 app.post("/api/ticket", async (c) => {
   try {
     const body = await c.req.json();
@@ -7199,9 +7135,10 @@ app.post("/api/ticket", async (c) => {
       Math.floor(baseAmount)
     );
     let availableDecimal = -1;
+    const startOffset = Math.floor(Math.random() * 100);
     for (let i3 = 0; i3 < 100; i3++) {
-      const candidateDecimal = i3;
-      const lockKey = `${Math.floor(baseAmount)}_${candidateDecimal} `;
+      const candidateDecimal = (startOffset + i3) % 100;
+      const lockKey = `${Math.floor(baseAmount)}_${candidateDecimal}`;
       if (!dbAllocatedDecimals.includes(candidateDecimal) && !localDecimalLocks.has(lockKey)) {
         const lockAcquired = await appwrite.claimDatabaseLock(
           Math.floor(baseAmount),
@@ -7227,7 +7164,7 @@ app.post("/api/ticket", async (c) => {
     const timestamp = Date.now().toString();
     const prefix = timestamp.slice(0, -2);
     const decimalStr = availableDecimal.toString().padStart(2, "0");
-    const ticketId = `TICKET${prefix}${decimalStr} `;
+    const ticketId = `TICKET${prefix}${decimalStr}`;
     const createdDoc = await appwrite.createTicket(ticketId, finalAmount);
     return c.json({
       ticketId,
@@ -7256,8 +7193,8 @@ app.post("/api/webhook", async (c) => {
       );
       body = { sms: rawBody };
     }
-    const secret = c.req.query("secret") || body.secret_key;
-    if (secret !== c.env.WEBHOOK_SECRET) {
+    const secret = c.req.header("X-Webhook-Secret") || c.req.query("secret") || body.secret_key;
+    if (!secret || !timingSafeEqual(secret, c.env.WEBHOOK_SECRET)) {
       console.log("Unauthorized Webhook Attempt");
       return c.json({ error: "Unauthorized" }, 401);
     }
@@ -7286,7 +7223,7 @@ app.post("/api/webhook", async (c) => {
       } else if (ticket.status === "paid") {
         console.log(`Ticket ${foundId} ALREADY PAID`);
         status = "already_paid";
-      } else if (ticket.amount !== paidAmount) {
+      } else if (toCents(ticket.amount) !== toCents(paidAmount)) {
         console.log(
           `AMOUNT MISMATCH: Ticket requires ${ticket.amount}, but received ${paidAmount} `
         );
@@ -7298,18 +7235,64 @@ app.post("/api/webhook", async (c) => {
           status = "success";
           const baseAmount = Math.floor(ticket.amount);
           const decPart = Math.round((ticket.amount - baseAmount) * 100);
-          localDecimalLocks.delete(`${baseAmount}_${decPart} `);
-          await appwrite.releaseDatabaseLock(baseAmount, decPart).catch(() => null);
+          localDecimalLocks.delete(`${baseAmount}_${decPart}`);
+          c.executionCtx.waitUntil(
+            appwrite.releaseDatabaseLock(baseAmount, decPart).catch(() => null)
+          );
         } else {
           status = "update_failed";
         }
       }
     } else {
-      console.log("INVALID SMS FORMAT: Missing Ticket ID or Payment Details");
-      if (!ticketMatch) console.log(" - Missing Ticket ID");
-      if (!paymentMatch)
-        console.log(" - Missing Payment Details (Name/Amount)");
-      status = "invalid_format";
+      const kotakParsed = EmailParser.parseKotakSms(content);
+      if (kotakParsed && kotakParsed.paidAmount !== null && kotakParsed.intPart !== null && kotakParsed.decPart !== null) {
+        console.log("KOTAK SMS DETECTED WITHOUT EXPLICIT TICKET ID");
+        const { paidAmount, decPart, intPart, rrn, upiId } = kotakParsed;
+        console.log("PAID AMOUNT:", paidAmount, "| DEC PART:", decPart);
+        console.log("UPI ID:", upiId, "| RRN:", rrn);
+        const appwrite = new AppwriteService(c.env);
+        const candidates = await appwrite.listRecentPendingTickets(20);
+        const now = Date.now();
+        const FIVE_MIN_MS = 5 * 60 * 1e3;
+        let matchedTicket = null;
+        let matchedTicketId = null;
+        for (const ticket of candidates) {
+          if (ticket.ticketId.startsWith("lock_")) continue;
+          const ticketTime = new Date(ticket.createdAt).getTime();
+          if (now - ticketTime > FIVE_MIN_MS) continue;
+          const numericPart = ticket.ticketId.replace(/^TICKET/i, "");
+          const ticketSuffix = parseInt(numericPart.slice(-2), 10);
+          if (ticketSuffix !== decPart) continue;
+          if (toCents(Math.floor(ticket.amount)) !== toCents(intPart)) continue;
+          if (ticket.status === "paid") continue;
+          matchedTicket = ticket;
+          matchedTicketId = ticket.ticketId;
+          break;
+        }
+        if (matchedTicket && matchedTicketId) {
+          updatedDoc = await appwrite.markAsPaid(matchedTicketId, void 0, rrn ?? void 0, upiId ?? void 0);
+          if (updatedDoc) {
+            console.log(`Ticket ${matchedTicketId} MARKED AS PAID via Kotak SMS. RRN: ${rrn}`);
+            status = "success";
+            foundId = matchedTicketId;
+            localDecimalLocks.delete(`${intPart}_${decPart}`);
+            c.executionCtx.waitUntil(
+              appwrite.releaseDatabaseLock(intPart, decPart).catch(() => null)
+            );
+          } else {
+            status = "update_failed";
+          }
+        } else {
+          console.log(`No matching pending ticket found for Kotak amount \u20B9${paidAmount} (dec = ${decPart})`);
+          status = "no_matching_ticket";
+        }
+      } else {
+        console.log("INVALID SMS FORMAT: Missing Ticket ID or Payment Details");
+        if (!ticketMatch) console.log(" - Missing Ticket ID");
+        if (!paymentMatch)
+          console.log(" - Missing Payment Details (Name/Amount)");
+        status = "invalid_format";
+      }
     }
     return c.json({
       status: "received",
@@ -7332,8 +7315,8 @@ app.post("/api/email-webhook", async (c) => {
     } catch {
       return c.json({ error: "Invalid JSON" }, 400);
     }
-    const secret = c.req.query("secret") || body.secret;
-    if (!secret || secret !== c.env.EMAIL_SECRET) {
+    const secret = c.req.header("X-Email-Secret") || c.req.query("secret") || body.secret;
+    if (!secret || !timingSafeEqual(secret, c.env.EMAIL_SECRET)) {
       console.log("Unauthorized email webhook attempt");
       return c.json({ error: "Unauthorized" }, 401);
     }
@@ -7355,7 +7338,7 @@ app.post("/api/email-webhook", async (c) => {
     console.log("RRN:", rrn);
     console.log("SENDER NAME:", senderName);
     const appwrite = new AppwriteService(c.env);
-    const candidates = await appwrite.listRecentPendingTickets(6);
+    const candidates = await appwrite.listRecentPendingTickets(20);
     const now = Date.now();
     const FIVE_MIN_MS = 5 * 60 * 1e3;
     let matchedTicket = null;
@@ -7377,7 +7360,7 @@ app.post("/api/email-webhook", async (c) => {
         );
         continue;
       }
-      if (Math.floor(ticket.amount) !== intPart) {
+      if (toCents(Math.floor(ticket.amount)) !== toCents(intPart)) {
         console.log(
           `Ticket ${ticket.ticketId}: integer amount mismatch(expected ${ticket.amount}, got ${intPart}), skipping`
         );
@@ -7411,9 +7394,12 @@ app.post("/api/email-webhook", async (c) => {
       console.log(
         `Ticket ${matchedTicketId} MARKED AS PAID via email. RRN: ${rrn}`
       );
-      localDecimalLocks.delete(`${intPart}_${decPart} `);
-      await appwrite.releaseDatabaseLock(intPart, decPart).catch(() => null);
-      return c.json(updatedDoc);
+      localDecimalLocks.delete(`${intPart}_${decPart}`);
+      c.executionCtx.waitUntil(
+        appwrite.releaseDatabaseLock(intPart, decPart).catch(() => null)
+      );
+      const { id, ...sanitized } = updatedDoc;
+      return c.json(sanitized);
     } else {
       return c.json({ status: "error", reason: "update_failed" }, 500);
     }
@@ -7429,86 +7415,101 @@ app.get("/api/status/:id", async (c) => {
   if (!status) {
     return c.json({ status: "not_found" }, 404);
   }
-  return c.json(status);
+  const { id: internalId, ...sanitized } = status;
+  return c.json(sanitized);
 });
-app.get(
-  "/api/ws",
-  upgradeWebSocket((c) => {
-    const ticketId = c.req.query("ticketId");
-    return {
-      onMessage(event, ws) {
-      },
-      async onOpen(evt, ws) {
-        if (!ticketId) {
-          console.log("WebSocket rejected: No ticketId provided");
-          ws.close(1008, "Ticket ID required");
-          return;
-        }
-        console.log(
-          `Frontend opened secure WebSocket for Ticket: ${ticketId} `
+app.get("/api/ws", async (c) => {
+  const ticketId = (c.req.query("ticketId") || "").trim();
+  if (!ticketId || !/^TICKET\d+$/.test(ticketId)) {
+    return c.text("Invalid ticketId", 400);
+  }
+  const pair = new WebSocketPair();
+  const client = pair[0];
+  const server = pair[1];
+  server.accept();
+  let upstreamWs = null;
+  let closing = false;
+  const safeCloseAll = /* @__PURE__ */ __name(() => {
+    if (closing) return;
+    closing = true;
+    try {
+      server.close();
+    } catch {
+    }
+    try {
+      upstreamWs?.close();
+    } catch {
+    }
+  }, "safeCloseAll");
+  server.addEventListener("close", safeCloseAll);
+  server.addEventListener("error", safeCloseAll);
+  server.addEventListener("message", (event) => {
+    try {
+      if (event.data === "ping") server.send("pong");
+    } catch {
+    }
+  });
+  const appwrite = new AppwriteService(c.env);
+  const snapshotPromise = appwrite.getTicketStatus(ticketId).then((status) => {
+    if (!status) return;
+    try {
+      server.send(
+        JSON.stringify({
+          type: "payment_update",
+          status: status.status,
+          paidAt: status.paidAt || null
+        })
+      );
+    } catch {
+    }
+  }).catch(() => null);
+  c.executionCtx?.waitUntil(snapshotPromise);
+  const appwriteHost = c.env.APPWRITE_ENDPOINT.replace(/^https?:\/\//, "").split("/")[0];
+  const channel2 = `databases.${c.env.APPWRITE_DATABASE_ID}.collections.${c.env.APPWRITE_COLLECTION_ID}.documents.${ticketId}`;
+  const appwriteWsUrl = `wss://${appwriteHost}/v1/realtime?project=${c.env.APPWRITE_PROJECT_ID}&channels[]=${encodeURIComponent(
+    channel2
+  )}`;
+  const upstreamReady = fetch(appwriteWsUrl.replace("wss://", "https://"), {
+    headers: {
+      Upgrade: "websocket",
+      "X-Appwrite-Project": c.env.APPWRITE_PROJECT_ID,
+      "X-Appwrite-Key": c.env.APPWRITE_API_KEY
+    }
+  }).then((res) => {
+    const ws = res.webSocket;
+    if (!ws) throw new Error("Appwrite handshake failed");
+    ws.accept();
+    upstreamWs = ws;
+    return ws;
+  }).then((ws) => {
+    ws.addEventListener("message", (msg) => {
+      try {
+        const envelope = JSON.parse(msg.data);
+        if (envelope?.type !== "event") return;
+        const doc = envelope?.data?.payload;
+        if (!doc) return;
+        const docId = doc.$id || doc.ticketId;
+        const status = doc.status;
+        if (docId !== ticketId || !status) return;
+        server.send(
+          JSON.stringify({
+            type: "payment_update",
+            status,
+            paidAt: doc.paidAt || null
+          })
         );
-        const appwrite = new AppwriteService(c.env);
-        const ticket = await appwrite.getTicketStatus(ticketId);
-        if (!ticket) {
-          console.log(`WebSocket rejected: Ticket ${ticketId} not found`);
-          ws.close(1008, "Ticket not found");
-          return;
-        }
-        const appwriteHost = c.env.APPWRITE_ENDPOINT.replace(
-          /^https?:\/\//,
-          ""
-        ).split("/")[0];
-        const channels = [
-          `databases.${c.env.APPWRITE_DATABASE_ID}.collections.${c.env.APPWRITE_COLLECTION_ID}.documents.${ticket.id}`
-        ];
-        const appwriteWsUrl = `wss://${appwriteHost}/v1/realtime?project=${c.env.APPWRITE_PROJECT_ID}&channels[]=${encodeURIComponent(channels[0])}`;
-        const appwriteSocket = new WebSocket(appwriteWsUrl, {
-          headers: {
-            "X-Appwrite-Key": c.env.APPWRITE_API_KEY
-          }
-        });
-        appwriteSocket.addEventListener("message", (msg) => {
-          try {
-            const payload = JSON.parse(msg.data);
-            if (payload.type === "event" && payload.events && payload.events.length > 0) {
-              const updateEvent = payload.events.find(
-                (e3) => e3.includes(".update")
-              );
-              if (updateEvent && payload.data && payload.data.status) {
-                console.log(
-                  `Forwarding WS Update to Frontend: ${ticketId} -> ${payload.data.status}`
-                );
-                ws.send(
-                  JSON.stringify({
-                    type: "payment_update",
-                    status: payload.data.status,
-                    paidAt: payload.data.paidAt || null
-                  })
-                );
-              }
-            }
-          } catch (e3) {
-            console.error("Failed to parse Appwrite realtime message:", e3);
-          }
-        });
-        appwriteSocket.addEventListener("close", () => {
-          console.log(`Appwrite closed connection for ${ticketId}`);
-          ws.close();
-        });
-        appwriteSocket.addEventListener("error", (err) => {
-          console.error(`Appwrite connection error for ${ticketId}`);
-          ws.close(1011, "Backend error");
-        });
-        ws.addEventListener("close", () => {
-          console.log(
-            `Frontend closed secure WebSocket for Ticket: ${ticketId}`
-          );
-          appwriteSocket.close();
-        });
+      } catch {
       }
-    };
-  })
-);
+    });
+    ws.addEventListener("close", safeCloseAll);
+    ws.addEventListener("error", safeCloseAll);
+  }).catch((err) => {
+    console.error(`[WS-PROXY] Upstream fatal: ${err}`);
+    safeCloseAll();
+  });
+  c.executionCtx?.waitUntil(upstreamReady);
+  return new Response(null, { status: 101, webSocket: client });
+});
 var worker_default = {
   fetch: app.fetch,
   async email(message, env2, ctx) {

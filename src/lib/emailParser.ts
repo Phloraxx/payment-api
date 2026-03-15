@@ -4,6 +4,7 @@ export interface ExtractedEmailData {
   decPart: number | null;
   rrn: string | null;
   senderName: string;
+  upiId?: string | null;
 }
 
 export class EmailParser {
@@ -85,6 +86,7 @@ export class EmailParser {
       decPart: null,
       rrn: null,
       senderName: "UNKNOWN",
+      upiId: null,
     };
 
     // Amount: search for "Rs.3.00"
@@ -98,10 +100,11 @@ export class EmailParser {
       return null;
     }
 
-    // Sender Name: comes after "from " and before "@" or "-"
-    const senderMatch = smsBody.match(/from\s+([a-zA-Z0-9\s]+?)[@-]/i);
-    if (senderMatch) {
-      result.senderName = senderMatch[1].trim();
+    // UPI ID: comes after "from " and ends at the space or period.
+    // E.g., from drvijayapalliyil@oksbi on 08-03-26
+    const upiIdMatch = smsBody.match(/from\s+([a-zA-Z0-9.\-_]+@[a-zA-Z0-9.\-_]+)/i);
+    if (upiIdMatch) {
+      result.upiId = upiIdMatch[1].trim();
     }
 
     // RRN: after "UPI Ref:" or similar
