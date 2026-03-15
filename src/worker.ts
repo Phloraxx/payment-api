@@ -1,91 +1,177 @@
-import { Hono } from 'hono';
-import { cors } from 'hono/cors';
-import { AppwriteService, Env } from './lib/appwrite';
+import { Hono } from "hono";
+import { cors } from "hono/cors";
+import { upgradeWebSocket } from "hono/cloudflare-workers";
+import { AppwriteService, Env } from "./lib/appwrite";
+import { EmailParser } from "./lib/emailParser";
+
+// Temporary in-memory lock to prevent exact same decimal allocation on the same Edge node
+// This provides a "best effort" lock to prevent concurrent requests in the same colo from snagging the same decimal.
+const localDecimalLocks = new Set<string>();
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.use('/*', cors());
+app.use("/*", cors());
 
-app.get('/', (c) => {
-    return c.text('Payment Gateway API is running!');
+app.get("/", (c) => {
+    return c.text("Payment Gateway API is running!");
 });
+
+app.get(
+    "/api/ping",
+    upgradeWebSocket((c) => {
+        return {
+            onMessage(event, ws) {
+                console.log("PING RX");
+                ws.send("pong");
+            },
+            onOpen() {
+                console.log("PING WS OPEN");
+            }
+        };
+    })
+);
 
 // ---------------------------------------------------------------------------
 // POST /api/ticket  — create a new pending payment ticket
 // ---------------------------------------------------------------------------
-app.post('/api/ticket', async (c) => {
+app.post("/api/ticket", async (c) => {
     try {
         const body = await c.req.json();
-        const amount = body.amount;
+        const baseAmount = body.amount;
 
-        if (!amount || typeof amount !== 'number') {
-            return c.json({ error: 'Invalid amount' }, 400);
+        if (!baseAmount || typeof baseAmount !== "number") {
+            return c.json({ error: "Invalid amount" }, 400);
         }
 
-        const timestamp = Date.now();
-        const ticketId = `TICKET${timestamp}`;
-
         const appwrite = new AppwriteService(c.env);
-        await appwrite.createTicket(ticketId, amount);
+
+        // 1. Get currently allocated decimals for this base amount from DB
+        const dbAllocatedDecimals = await appwrite.getPendingDecimalsForAmount(
+            Math.floor(baseAmount),
+        );
+
+        // 2. Find the lowest available decimal sequentially from 00 to 99.
+        // The `localDecimalLocks` in-memory set will prevent race conditions natively
+        // if traffic originates from the same region (hitting the same Cloudflare Edge Node).
+        let availableDecimal = -1;
+
+        for (let i = 0; i < 100; i++) {
+            const candidateDecimal = i;
+            const lockKey = `${Math.floor(baseAmount)}_${candidateDecimal}`;
+
+            if (
+                !dbAllocatedDecimals.includes(candidateDecimal) &&
+                !localDecimalLocks.has(lockKey)
+            ) {
+                // Determine lock via Database (100% atomic constraint on Document ID)
+                const lockAcquired = await appwrite.claimDatabaseLock(
+                    Math.floor(baseAmount),
+                    candidateDecimal,
+                );
+
+                if (lockAcquired) {
+                    availableDecimal = candidateDecimal;
+                    // Temporarily lock this decimal in memory (auto-expire after 5 mins)
+                    localDecimalLocks.add(lockKey);
+                    setTimeout(() => localDecimalLocks.delete(lockKey), 5 * 60 * 1000);
+                    break;
+                }
+            }
+        }
+
+        if (availableDecimal === -1) {
+            return c.json(
+                {
+                    error:
+                        "System busy: Too many concurrent transactions for this amount. Please try again later.",
+                },
+                503,
+            );
+        }
+
+        // 3. Construct final decimal amount (e.g. 3 + 0.02 = 3.02)
+        const finalAmount = Math.floor(baseAmount) + availableDecimal / 100;
+
+        // 4. Construct Ticket ID ending exactly with that 2-digit decimal
+        const timestamp = Date.now().toString();
+        // Chop off the last two digits of the timestamp and replace them with the padded decimal
+        const prefix = timestamp.slice(0, -2);
+        const decimalStr = availableDecimal.toString().padStart(2, "0");
+        const ticketId = `TICKET${prefix}${decimalStr}`;
+
+        // 5. Store ticket
+        const createdDoc = await appwrite.createTicket(ticketId, finalAmount);
 
         return c.json({
-            id: ticketId,
-            amount: amount,
-            status: 'pending'
+            ticketId: ticketId, // THE READABLE TICKET REFERENCE
+            amount: finalAmount,
+            status: "pending",
+            createdAt: createdDoc.$createdAt,
         });
     } catch (error) {
-        console.error('Error creating ticket:', error);
-        return c.json({ error: 'Internal Server Error' }, 500);
+        console.error("Error creating ticket:", error);
+        return c.json({ error: "Internal Server Error" }, 500);
     }
 });
 
 // ---------------------------------------------------------------------------
 // POST /api/webhook  — legacy SMS / generic webhook handler
 // ---------------------------------------------------------------------------
-app.post('/api/webhook', async (c) => {
+app.post("/api/webhook", async (c) => {
     try {
         const rawBody = await c.req.text();
-        console.log('--- WEBHOOK RECEIVED ---');
-        console.log('TIMESTAMP:', new Date().toISOString());
-        console.log('RAW BODY:', rawBody);
+        console.log("--- WEBHOOK RECEIVED ---");
+        console.log("TIMESTAMP:", new Date().toISOString());
+        console.log("RAW BODY:", rawBody);
 
         let body;
         try {
             body = JSON.parse(rawBody);
         } catch (e) {
-            console.log('Could not parse JSON body, assuming raw text or URL encoded.');
+            console.log(
+                "Could not parse JSON body, assuming raw text or URL encoded.",
+            );
             body = { sms: rawBody };
         }
 
-        const secret = c.req.query('secret') || body.secret_key;
+        const secret = c.req.query("secret") || body.secret_key;
         if (secret !== c.env.WEBHOOK_SECRET) {
-            console.log('Unauthorized Webhook Attempt');
-            return c.json({ error: 'Unauthorized' }, 401);
+            console.log("Unauthorized Webhook Attempt");
+            return c.json({ error: "Unauthorized" }, 401);
         }
 
         // Combine potential fields to search for Ticket ID
-        const content = ((body.sms || '') + ' ' + (body.body || '') + ' ' + (body.message || '')).trim() || rawBody;
+        const content =
+            (
+                (body.sms || "") +
+                " " +
+                (body.body || "") +
+                " " +
+                (body.message || "")
+            ).trim() || rawBody;
 
-        console.log('SEARCH CONTENT:', content);
+        console.log("SEARCH CONTENT:", content);
 
         // Regex to find "TICKET" followed by numbers
         const ticketMatch = content.match(/TICKET(\d+)/);
 
         const paymentSource = body.body || content;
-        const paymentMatch = paymentSource.match(/([a-zA-Z0-9\s\.]+?) (?:has )?paid you ₹(\d+(\.\d{1,2})?)/i);
+        const paymentMatch = paymentSource.match(
+            /([a-zA-Z0-9\s\.]+?) (?:has )?paid you ₹(\d+(\.\d{1,2})?)/i,
+        );
 
         let foundId = null;
-        let status = 'ignored';
-        let updated = false;
+        let status = "ignored";
+        let updatedDoc = null;
 
         if (ticketMatch && paymentMatch) {
             foundId = ticketMatch[0];
             const senderName = paymentMatch[1].trim();
             const paidAmount = parseFloat(paymentMatch[2]);
 
-            console.log('FOUND TICKET ID:', foundId);
-            console.log('SENDER:', senderName);
-            console.log('PAID AMOUNT:', paidAmount);
+            console.log("FOUND TICKET ID:", foundId);
+            console.log("SENDER:", senderName);
+            console.log("PAID AMOUNT:", paidAmount);
 
             const appwrite = new AppwriteService(c.env);
 
@@ -93,38 +179,101 @@ app.post('/api/webhook', async (c) => {
 
             if (!ticket) {
                 console.log(`Ticket ${foundId} NOT FOUND`);
-                status = 'ticket_not_found';
-            } else if (ticket.status === 'paid') {
+                status = "ticket_not_found";
+            } else if (ticket.status === "paid") {
                 console.log(`Ticket ${foundId} ALREADY PAID`);
-                status = 'already_paid';
+                status = "already_paid";
             } else if (ticket.amount !== paidAmount) {
-                console.log(`AMOUNT MISMATCH: Ticket requires ${ticket.amount}, but received ${paidAmount}`);
-                status = 'amount_mismatch';
+                console.log(
+                    `AMOUNT MISMATCH: Ticket requires ${ticket.amount}, but received ${paidAmount} `,
+                );
+                status = "amount_mismatch";
             } else {
-                updated = await appwrite.markAsPaid(foundId, senderName);
-                if (updated) {
+                updatedDoc = await appwrite.markAsPaid(foundId, senderName);
+                if (updatedDoc) {
                     console.log(`Ticket ${foundId} MARKED AS PAID`);
-                    status = 'success';
+                    status = "success";
+
+                    // Free the decimal lock immediately so it can be reused
+                    const baseAmount = Math.floor(ticket.amount);
+                    const decPart = Math.round((ticket.amount - baseAmount) * 100);
+                    localDecimalLocks.delete(`${baseAmount}_${decPart}`);
+                    await appwrite
+                        .releaseDatabaseLock(baseAmount, decPart)
+                        .catch(() => null);
                 } else {
-                    status = 'update_failed';
+                    status = "update_failed";
                 }
             }
         } else {
-            console.log('INVALID SMS FORMAT: Missing Ticket ID or Payment Details');
-            if (!ticketMatch) console.log(' - Missing Ticket ID');
-            if (!paymentMatch) console.log(' - Missing Payment Details (Name/Amount)');
-            status = 'invalid_format';
+            const kotakParsed = EmailParser.parseKotakSms(content);
+            if (kotakParsed && kotakParsed.paidAmount !== null && kotakParsed.intPart !== null && kotakParsed.decPart !== null) {
+                console.log("KOTAK SMS DETECTED WITHOUT EXPLICIT TICKET ID");
+                const { paidAmount, decPart, intPart, rrn, senderName } = kotakParsed;
+
+                console.log("PAID AMOUNT:", paidAmount, "| DEC PART:", decPart);
+                console.log("SENDER NAME:", senderName, "| RRN:", rrn);
+
+                const appwrite = new AppwriteService(c.env);
+                const candidates = await appwrite.listRecentPendingTickets(6);
+
+                const now = Date.now();
+                const FIVE_MIN_MS = 5 * 60 * 1000;
+
+                let matchedTicket = null;
+                let matchedTicketId = null;
+
+                for (const ticket of candidates) {
+                    if (ticket.ticketId.startsWith("lock_")) continue;
+
+                    const ticketTime = new Date(ticket.createdAt).getTime();
+                    if (now - ticketTime > FIVE_MIN_MS) continue;
+
+                    const numericPart = ticket.ticketId.replace(/^TICKET/i, "");
+                    const ticketSuffix = parseInt(numericPart.slice(-2), 10);
+
+                    if (ticketSuffix !== decPart) continue;
+                    if (Math.floor(ticket.amount) !== intPart) continue;
+                    if (ticket.status === "paid") continue;
+
+                    matchedTicket = ticket;
+                    matchedTicketId = ticket.ticketId;
+                    break;
+                }
+
+                if (matchedTicket && matchedTicketId) {
+                    updatedDoc = await appwrite.markAsPaid(matchedTicketId, senderName, rrn ?? undefined);
+                    if (updatedDoc) {
+                        console.log(`Ticket ${matchedTicketId} MARKED AS PAID via Kotak SMS. RRN: ${rrn}`);
+                        status = "success";
+                        foundId = matchedTicketId;
+
+                        localDecimalLocks.delete(`${intPart}_${decPart}`);
+                        await appwrite.releaseDatabaseLock(intPart, decPart).catch(() => null);
+                    } else {
+                        status = "update_failed";
+                    }
+                } else {
+                    console.log(`No matching pending ticket found for Kotak amount ₹${paidAmount} (dec = ${decPart})`);
+                    status = "no_matching_ticket";
+                }
+            } else {
+                console.log("INVALID SMS FORMAT: Missing Ticket ID or Payment Details");
+                if (!ticketMatch) console.log(" - Missing Ticket ID");
+                if (!paymentMatch)
+                    console.log(" - Missing Payment Details (Name/Amount)");
+                status = "invalid_format";
+            }
         }
 
         return c.json({
-            status: 'received',
+            status: "received",
             processed_id: foundId,
-            action: status
+            action: status,
         });
-
     } catch (error) {
-        console.error('Webhook error:', error);
-        return c.json({ error: 'Internal Server Error' }, 500);
+        console.error("Webhook error:", error);
+        return c.json({ error: "Internal Server Error" }, 500);
     }
 });
 
@@ -154,76 +303,64 @@ app.post('/api/webhook', async (c) => {
 //   7. Amount integrity check — paid amount integer part must match ticket
 //   8. Mark as paid + store RRN
 // ---------------------------------------------------------------------------
-app.post('/api/email-webhook', async (c) => {
+app.post("/api/email-webhook", async (c) => {
     try {
         const rawBody = await c.req.text();
-        console.log('--- EMAIL WEBHOOK RECEIVED ---');
-        console.log('TIMESTAMP:', new Date().toISOString());
+        console.log("--- EMAIL WEBHOOK RECEIVED ---");
+        console.log("TIMESTAMP:", new Date().toISOString());
 
         let body: Record<string, string>;
         try {
             body = JSON.parse(rawBody);
         } catch {
-            return c.json({ error: 'Invalid JSON' }, 400);
+            return c.json({ error: "Invalid JSON" }, 400);
         }
 
         // ── 1. Shared-secret authentication ──────────────────────────────────
-        const secret = c.req.query('secret') || body.secret;
+        const secret = c.req.query("secret") || body.secret;
         if (!secret || secret !== c.env.EMAIL_SECRET) {
-            console.log('Unauthorized email webhook attempt');
-            return c.json({ error: 'Unauthorized' }, 401);
+            console.log("Unauthorized email webhook attempt");
+            return c.json({ error: "Unauthorized" }, 401);
         }
 
-        const from = (body.from || '').toLowerCase().trim();
-        const subject = (body.subject || '').trim();
-        const text = (body.text || body.html || '').replace(/=\r?\n/g, '').replace(/=3D/g, '=');
+        const from = (body.from || "").toLowerCase().trim();
+        const subject = (body.subject || "").trim();
+        const text = (body.text || body.html || "")
+            .replace(/=\r?\n/g, "")
+            .replace(/=3D/g, "=");
 
-        console.log('FROM:', from, '| SUBJECT:', subject);
+        console.log("FROM:", from, "| SUBJECT:", subject);
 
-        // ── 2. Sender domain check ───────────────────────────────────────────
-        if (!from.endsWith('@slice.bank.in')) {
-            console.log('Rejected: sender domain is not slice.bank.in');
-            return c.json({ status: 'ignored', reason: 'sender_domain_mismatch' });
-        }
+        // ── 2. Sender check (disabled due to Gmail Forwarding) ───────────────
+        // We cannot rely on 'from' because Gmail forwarding changes the envelope sender.
+        // We will rely on Subject and strict Decimal Ticket Matching instead.
 
         // ── 3. Subject check ─────────────────────────────────────────────────
-        if (!subject.toLowerCase().includes('received') || !subject.toLowerCase().includes('via upi')) {
-            console.log('Rejected: subject does not match UPI credit pattern');
-            return c.json({ status: 'ignored', reason: 'subject_mismatch' });
+        if (
+            !subject.toLowerCase().includes("received") ||
+            !subject.toLowerCase().includes("via upi")
+        ) {
+            console.log("Rejected: subject does not match UPI credit pattern");
+            return c.json({ status: "ignored", reason: "subject_mismatch" });
         }
 
-        // ── 4. Extract amount, RRN, and sender name from email body ──────────
-        //
-        //  Amount line: "You have received ₹1.02 via UPI in your slice bank account"
-        //  The unicode ₹ is sometimes encoded as =E2=82=B9 in quoted-printable,
-        //  we normalise it before matching.
-        //
-        const normalised = text
-            .replace(/=E2=82=B9/gi, '₹')  // QP-encoded ₹
-            .replace(/&nbsp;/g, ' ');
+        // ── 4. Use EmailParser to Extract amount, RRN, and sender name ───────
+        const parsedEmail = EmailParser.parseSliceEmail(subject, text);
 
-        // Amount — e.g. ₹1.02
-        const amountMatch = normalised.match(/₹\s*(\d+)\.(\d{2})/);
-        if (!amountMatch) {
-            console.log('Could not extract amount from email body');
-            return c.json({ status: 'ignored', reason: 'amount_not_found' });
+        if (
+            parsedEmail.paidAmount === null ||
+            parsedEmail.decPart === null ||
+            parsedEmail.intPart === null
+        ) {
+            console.log("Could not extract amount from email body or subject");
+            return c.json({ status: "ignored", reason: "amount_not_found" });
         }
-        const intPart = parseInt(amountMatch[1], 10);   // 1
-        const decPart = parseInt(amountMatch[2], 10);   // 02  → 2
-        const paidAmount = parseFloat(`${intPart}.${amountMatch[2]}`); // 1.02
 
-        console.log('PAID AMOUNT:', paidAmount, '| DEC PART:', decPart);
+        const { paidAmount, decPart, intPart, rrn, senderName } = parsedEmail;
 
-        // RRN — appears after "RRN" label in the table
-        const rrnMatch = normalised.match(/RRN\D{0,10}(\d{9,15})/i);
-        const rrn = rrnMatch ? rrnMatch[1] : null;
-        console.log('RRN:', rrn);
-
-        // Sender name — appears after "From" label in the transaction table
-        const senderMatch = normalised.match(/From\s*<\/td>\s*<td[^>]*>\s*([A-Z0-9 ]+)\s*</i)
-            || normalised.match(/From\s*[\|\t:]\s*([A-Z0-9 ]+)/i);
-        const senderName = senderMatch ? senderMatch[1].trim() : 'UNKNOWN';
-        console.log('SENDER NAME:', senderName);
+        console.log("PAID AMOUNT:", paidAmount, "| DEC PART:", decPart);
+        console.log("RRN:", rrn);
+        console.log("SENDER NAME:", senderName);
 
         // ── 5. Decimal ticket-ID check ───────────────────────────────────────
         //
@@ -252,24 +389,33 @@ app.post('/api/email-webhook', async (c) => {
         const now = Date.now();
         const FIVE_MIN_MS = 5 * 60 * 1000;
 
-        let matchedTicket: Awaited<ReturnType<typeof appwrite.listRecentPendingTickets>>[0] | null = null;
+        let matchedTicket:
+            | Awaited<ReturnType<typeof appwrite.listRecentPendingTickets>>[0]
+            | null = null;
         let matchedTicketId: string | null = null;
 
         for (const ticket of candidates) {
+            // Ignore lock documents during ticket matching
+            if (ticket.ticketId.startsWith("lock_")) continue;
+
             // ── 6. 5-minute window check ─────────────────────────────────────
             const ticketTime = new Date(ticket.createdAt).getTime();
             if (now - ticketTime > FIVE_MIN_MS) {
-                console.log(`Ticket ${ticket.ticketId}: outside 5-minute window, skipping`);
+                console.log(
+                    `Ticket ${ticket.ticketId}: outside 5 - minute window, skipping`,
+                );
                 continue;
             }
 
             // ── Decimal suffix check ──────────────────────────────────────────
             //  Extract trailing digits of the ticket numeric part
-            const numericPart = ticket.ticketId.replace(/^TICKET/i, '');
+            const numericPart = ticket.ticketId.replace(/^TICKET/i, "");
             const ticketSuffix = parseInt(numericPart.slice(-2), 10); // last 2 digits
 
             if (ticketSuffix !== decPart) {
-                console.log(`Ticket ${ticket.ticketId}: suffix ${ticketSuffix} !== dec ${decPart}, skipping`);
+                console.log(
+                    `Ticket ${ticket.ticketId}: suffix ${ticketSuffix} !== dec ${decPart}, skipping`,
+                );
                 continue;
             }
 
@@ -277,11 +423,13 @@ app.post('/api/email-webhook', async (c) => {
             //  The ticket stores the full expected amount (integer), e.g. 1.
             //  The paid amount must match (floor-comparing integer part).
             if (Math.floor(ticket.amount) !== intPart) {
-                console.log(`Ticket ${ticket.ticketId}: integer amount mismatch (expected ${ticket.amount}, got ${intPart}), skipping`);
+                console.log(
+                    `Ticket ${ticket.ticketId}: integer amount mismatch(expected ${ticket.amount}, got ${intPart}), skipping`,
+                );
                 continue;
             }
 
-            if (ticket.status === 'paid') {
+            if (ticket.status === "paid") {
                 console.log(`Ticket ${ticket.ticketId}: already paid, skipping`);
                 continue;
             }
@@ -292,50 +440,171 @@ app.post('/api/email-webhook', async (c) => {
         }
 
         if (!matchedTicket || !matchedTicketId) {
-            console.log(`No matching pending ticket found for amount ₹${paidAmount} (dec=${decPart})`);
+            console.log(
+                `No matching pending ticket found for amount ₹${paidAmount} (dec = ${decPart})`,
+            );
             return c.json({
-                status: 'ignored',
-                reason: 'no_matching_ticket',
+                status: "ignored",
+                reason: "no_matching_ticket",
                 paid_amount: paidAmount,
                 dec_part: decPart,
             });
         }
 
         // ── 8. Mark ticket as paid ────────────────────────────────────────────
-        const updated = await appwrite.markAsPaid(matchedTicketId, senderName, rrn ?? undefined);
+        const updatedDoc = await appwrite.markAsPaid(
+            matchedTicketId,
+            senderName,
+            rrn ?? undefined,
+        );
 
-        if (updated) {
-            console.log(`Ticket ${matchedTicketId} MARKED AS PAID via email. RRN: ${rrn}`);
-            return c.json({
-                status: 'success',
-                ticket_id: matchedTicketId,
-                paid_amount: paidAmount,
-                rrn: rrn,
-                sender: senderName,
-            });
+        if (updatedDoc) {
+            console.log(
+                `Ticket ${matchedTicketId} MARKED AS PAID via email. RRN: ${rrn}`,
+            );
+
+            // Free the decimal lock immediately so it can be reused
+            localDecimalLocks.delete(`${intPart}_${decPart}`);
+            await appwrite.releaseDatabaseLock(intPart, decPart).catch(() => null);
+
+            return c.json(updatedDoc);
         } else {
-            return c.json({ status: 'error', reason: 'update_failed' }, 500);
+            return c.json({ status: "error", reason: "update_failed" }, 500);
         }
-
     } catch (error) {
-        console.error('Email webhook error:', error);
-        return c.json({ error: 'Internal Server Error' }, 500);
+        console.error("Email webhook error:", error);
+        return c.json({ error: "Internal Server Error" }, 500);
     }
 });
 
 // ---------------------------------------------------------------------------
 // GET /api/status/:id  — poll ticket status
 // ---------------------------------------------------------------------------
-app.get('/api/status/:id', async (c) => {
-    const id = c.req.param('id');
+app.get("/api/status/:id", async (c) => {
+    const id = c.req.param("id");
     const appwrite = new AppwriteService(c.env);
     const status = await appwrite.getTicketStatus(id);
 
     if (!status) {
-        return c.json({ status: 'not_found' }, 404);
+        return c.json({ status: "not_found" }, 404);
     }
 
     return c.json(status);
+});
+
+// ---------------------------------------------------------------------------
+// 🌟 SECURE WEBSOCKET PROXY (CLOUDFLARE -> APPWRITE REALTIME)
+// Prevents frontend from connecting directly to the database.
+//
+// Endpoint: wss://payment-api.nerdpixel.workers.dev/api/ws?ticketId=TICKET...
+// ---------------------------------------------------------------------------
+app.get("/api/ws", async (c) => {
+    const ticketId = (c.req.query("ticketId") || "").trim();
+    if (!ticketId || !/^TICKET\d+$/.test(ticketId)) {
+        return c.text("Invalid ticketId", 400);
+    }
+
+    // Use WebSocketPair so we can attach immediately.
+    // Hono's Cloudflare WS helper does not support an onOpen event.
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    server.accept();
+
+    let upstreamWs: WebSocket | null = null;
+    let closing = false;
+
+    const safeCloseAll = () => {
+        if (closing) return;
+        closing = true;
+        try {
+            server.close();
+        } catch { }
+        try {
+            upstreamWs?.close();
+        } catch { }
+    };
+
+    server.addEventListener("close", safeCloseAll);
+    server.addEventListener("error", safeCloseAll);
+    server.addEventListener("message", (event) => {
+        try {
+            if (event.data === "ping") server.send("pong");
+        } catch { }
+    });
+
+    // Immediately send a status snapshot so the frontend can connect even after payment is already paid.
+    const appwrite = new AppwriteService(c.env);
+    const snapshotPromise = appwrite
+        .getTicketStatus(ticketId)
+        .then((status) => {
+            if (!status) return;
+            try {
+                server.send(
+                    JSON.stringify({
+                        type: "payment_update",
+                        status: status.status,
+                        paidAt: status.paidAt || null,
+                    }),
+                );
+            } catch { }
+        })
+        .catch(() => null);
+    c.executionCtx?.waitUntil(snapshotPromise);
+
+    const appwriteHost = c.env.APPWRITE_ENDPOINT.replace(/^https?:\/\//, "").split("/")[0];
+    const channel = `databases.${c.env.APPWRITE_DATABASE_ID}.collections.${c.env.APPWRITE_COLLECTION_ID}.documents.${ticketId}`;
+    const appwriteWsUrl = `wss://${appwriteHost}/v1/realtime?project=${c.env.APPWRITE_PROJECT_ID}&channels[]=${encodeURIComponent(
+        channel,
+    )}`;
+
+    const upstreamReady = fetch(appwriteWsUrl.replace("wss://", "https://"), {
+        headers: {
+            Upgrade: "websocket",
+            "X-Appwrite-Project": c.env.APPWRITE_PROJECT_ID,
+            "X-Appwrite-Key": c.env.APPWRITE_API_KEY,
+        },
+    })
+        .then((res) => {
+            const ws = res.webSocket;
+            if (!ws) throw new Error("Appwrite handshake failed");
+            ws.accept();
+            upstreamWs = ws;
+            return ws;
+        })
+        .then((ws) => {
+            ws.addEventListener("message", (msg) => {
+                try {
+                    const envelope = JSON.parse(msg.data as string);
+                    if (envelope?.type !== "event") return;
+
+                    const doc = envelope?.data?.payload;
+                    if (!doc) return;
+
+                    const docId = doc.$id || doc.ticketId;
+                    const status = doc.status;
+                    if (docId !== ticketId || !status) return;
+
+                    server.send(
+                        JSON.stringify({
+                            type: "payment_update",
+                            status,
+                            paidAt: doc.paidAt || null,
+                        }),
+                    );
+                } catch { }
+            });
+            ws.addEventListener("close", safeCloseAll);
+            ws.addEventListener("error", safeCloseAll);
+        })
+        .catch((err) => {
+            console.error(`[WS-PROXY] Upstream fatal: ${err}`);
+            safeCloseAll();
+        });
+
+    c.executionCtx?.waitUntil(upstreamReady);
+
+    return new Response(null, { status: 101, webSocket: client });
 });
 
 export default {
@@ -349,13 +618,13 @@ export default {
                 secret: env.EMAIL_SECRET,
                 from: message.from,
                 subject: message.headers.get("Subject") || "",
-                text: rawEmail
+                text: rawEmail,
             };
 
             const req = new Request("http://localhost/api/email-webhook", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload)
+                body: JSON.stringify(payload),
             });
 
             const res = await app.fetch(req, env, ctx);
@@ -365,5 +634,5 @@ export default {
         } catch (e) {
             console.error("Email worker error:", e);
         }
-    }
+    },
 };

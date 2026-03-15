@@ -4,12 +4,12 @@
   "private": true,
   "scripts": {
     "dev": "wrangler dev",
-    "build": "next build",
-    "start": "next start",
-    "lint": "eslint"
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "lint": "eslint",
+    "test:e2e": "node e2e/realtime.e2e.js"
   },
   "dependencies": {
-    "hono": "^4.11.5",
+    "hono": "^4.12.5",
     "node-appwrite": "^21.1.0",
     "react-qr-code": "^2.0.18",
     "wrangler": "^4.60.0"
@@ -19,6 +19,7 @@
     "@types/node": "^20",
     "eslint": "^9",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "ws": "^8.18.3"
   }
 }

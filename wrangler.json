@@ -1,5 +1,5 @@
 {
-    "name": "payment-gateway-worker",
+    "name": "payment-api",
     "main": "src/worker.ts",
     "compatibility_date": "2024-09-23",
     "compatibility_flags": [
@@ -7,5 +7,13 @@
     ],
     "observability": {
         "enabled": true
+    },
+    "vars": {
+        "APPWRITE_API_KEY": "REDACTED",
+        "APPWRITE_COLLECTION_ID": "payment",
+        "APPWRITE_DATABASE_ID": "697522750025b8e28c32",
+        "APPWRITE_ENDPOINT": "https://backend.mulearnscet.in/v1",
+        "APPWRITE_PROJECT_ID": "6948e3640018a902b864",
+        "WEBHOOK_SECRET": "REDACTED"
     }
 }
