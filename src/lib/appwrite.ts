@@ -26,6 +26,7 @@ export interface Ticket {
   senderName?: string;
   rrn?: string; // Reference Retrieval Number from UPI credit mail
   paidAt?: string; // ISO timestamp when email-based payment was confirmed
+  upiId?: string; // The full UPI ID, e.g. souravpbijoy-2@sbis2
 }
 
 export interface TicketDocument extends Models.Document {
@@ -35,6 +36,7 @@ export interface TicketDocument extends Models.Document {
   senderName?: string;
   rrn?: string;
   paidAt?: string;
+  upiId?: string;
 }
 
 export function toCents(amount: number): number {
@@ -75,9 +77,9 @@ export class AppwriteService {
 
   /**
    * Mark a ticket as paid, optionally persisting the sender name, RRN,
-   * and the timestamp at which payment was confirmed.
+   * UPI ID, and the timestamp at which payment was confirmed.
    */
-  async markAsPaid(ticketId: string, senderName?: string, rrn?: string) {
+  async markAsPaid(ticketId: string, senderName?: string, rrn?: string, upiId?: string) {
     try {
       if (rrn) {
         // Prevent duplicate payment processing by checking RRN uniqueness
@@ -95,12 +97,19 @@ export class AppwriteService {
 
       const updatePayload: Record<string, unknown> = {
         status: "paid",
-        senderName: senderName,
         paidAt: new Date().toISOString(),
       };
 
+      if (senderName) {
+        updatePayload.senderName = senderName;
+      }
+
       if (rrn) {
         updatePayload.rrn = rrn;
+      }
+
+      if (upiId) {
+        updatePayload.upiId = upiId;
       }
 
       console.log("Sending update to Appwrite for ticket:", ticketId);
@@ -122,6 +131,7 @@ export class AppwriteService {
         senderName: updatedDoc.senderName,
         rrn: updatedDoc.rrn ?? null,
         paidAt: updatedDoc.paidAt ?? null,
+        upiId: updatedDoc.upiId ?? null,
         createdAt: updatedDoc.$createdAt,
       };
     } catch (error) {
@@ -171,6 +181,7 @@ export class AppwriteService {
         senderName: doc.senderName,
         rrn: doc.rrn ?? null,
         paidAt: doc.paidAt ?? null,
+        upiId: doc.upiId ?? null,
         createdAt: doc.$createdAt, // Appwrite built-in timestamp
       };
     } catch (error) {
