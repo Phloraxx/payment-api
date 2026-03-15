@@ -8,6 +8,7 @@ export interface Env {
     APPWRITE_COLLECTION_ID: string;
     WEBHOOK_SECRET: string;
     EMAIL_SECRET: string;   // shared secret for the Cloudflare email worker webhook
+    ALLOWED_ORIGIN?: string; // Optional: comma-separated list of allowed origins
 }
 
 export interface Ticket {
@@ -28,6 +29,11 @@ export class AppwriteService {
 
     constructor(env: Env) {
         this.env = env;
+
+        if (!env.APPWRITE_ENDPOINT || !env.APPWRITE_PROJECT_ID || !env.APPWRITE_API_KEY) {
+            throw new Error('Missing Appwrite configuration environment variables');
+        }
+
         this.client = new Client()
             .setEndpoint(env.APPWRITE_ENDPOINT)
             .setProject(env.APPWRITE_PROJECT_ID)
@@ -122,16 +128,22 @@ export class AppwriteService {
         }
     }
 
-    async listRecentPendingTickets(limit: number = 20) {
+    async listRecentPendingTickets(limit: number = 100, since?: Date) {
         try {
+            const queries = [
+                Query.equal('status', 'pending'),
+                Query.orderDesc('$createdAt'),
+                Query.limit(limit)
+            ];
+
+            if (since) {
+                queries.push(Query.greaterThan('$createdAt', since.toISOString()));
+            }
+
             const response = await this.databases.listDocuments(
                 this.env.APPWRITE_DATABASE_ID,
                 this.env.APPWRITE_COLLECTION_ID,
-                [
-                    Query.equal('status', 'pending'),
-                    Query.orderDesc('$createdAt'),
-                    Query.limit(limit)
-                ]
+                queries
             );
 
             return response.documents.map(doc => ({

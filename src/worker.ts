@@ -1,10 +1,47 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { secureHeaders } from 'hono/secure-headers';
 import { AppwriteService, Env } from './lib/appwrite';
+
+/**
+ * Constant-time string comparison to prevent timing attacks.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+    const encoder = new TextEncoder();
+    const aBuf = encoder.encode(a);
+    const bBuf = encoder.encode(b);
+    if (aBuf.byteLength !== bBuf.byteLength) {
+        return false;
+    }
+    return crypto.subtle.timingSafeEqual(aBuf, bBuf);
+}
+
+/**
+ * Converts a numeric amount (e.g. 10.50) to an integer cents value (1050)
+ * to avoid floating-point comparison issues.
+ */
+function toCents(amount: number): number {
+    return Math.round(amount * 100);
+}
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.use('/*', cors());
+app.use('*', secureHeaders());
+
+app.use('/*', async (c, next) => {
+    const allowedOrigins = (c.env.ALLOWED_ORIGIN || '*').split(',').map(o => o.trim());
+    return cors({
+        origin: (origin) => {
+            if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+                return origin;
+            }
+            return allowedOrigins[0];
+        },
+        allowMethods: ['GET', 'POST', 'OPTIONS'],
+        allowHeaders: ['Content-Type', 'Authorization', 'X-Webhook-Secret', 'X-Email-Secret'],
+        maxAge: 86400,
+    })(c, next);
+});
 
 app.get('/', (c) => {
     return c.text('Payment Gateway API is running!');
@@ -18,12 +55,15 @@ app.post('/api/ticket', async (c) => {
         const body = await c.req.json();
         const amount = body.amount;
 
-        if (!amount || typeof amount !== 'number') {
+        if (!amount || typeof amount !== 'number' || amount <= 0) {
             return c.json({ error: 'Invalid amount' }, 400);
         }
 
         const timestamp = Date.now();
-        const ticketId = `TICKET${timestamp}`;
+        const randomBuffer = new Uint32Array(1);
+        crypto.getRandomValues(randomBuffer);
+        const randomPart = randomBuffer[0].toString(16).padStart(8, '0');
+        const ticketId = `TICKET${randomPart}${timestamp}`;
 
         const appwrite = new AppwriteService(c.env);
         await appwrite.createTicket(ticketId, amount);
@@ -47,7 +87,8 @@ app.post('/api/webhook', async (c) => {
         const rawBody = await c.req.text();
         console.log('--- WEBHOOK RECEIVED ---');
         console.log('TIMESTAMP:', new Date().toISOString());
-        console.log('RAW BODY:', rawBody);
+        // Truncate raw body in logs to prevent accidental PII leakage
+        console.log('RAW BODY (truncated):', rawBody.substring(0, 100) + (rawBody.length > 100 ? '...' : ''));
 
         let body;
         try {
@@ -57,22 +98,36 @@ app.post('/api/webhook', async (c) => {
             body = { sms: rawBody };
         }
 
-        const secret = c.req.query('secret') || body.secret_key;
-        if (secret !== c.env.WEBHOOK_SECRET) {
+        const webhookSecret = c.env.WEBHOOK_SECRET;
+        if (!webhookSecret) {
+            console.error('WEBHOOK_SECRET is not configured');
+            return c.json({ error: 'Internal Server Error' }, 500);
+        }
+
+        const authHeader = c.req.header('Authorization');
+        const headerSecret = (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) ? authHeader.substring(7) : c.req.header('X-Webhook-Secret');
+        const secret = headerSecret || c.req.query('secret') || body.secret_key;
+
+        if (!secret || !timingSafeEqual(secret, webhookSecret)) {
             console.log('Unauthorized Webhook Attempt');
             return c.json({ error: 'Unauthorized' }, 401);
         }
 
         // Combine potential fields to search for Ticket ID
-        const content = ((body.sms || '') + ' ' + (body.body || '') + ' ' + (body.message || '')).trim() || rawBody;
+        const content = (
+            (typeof body.sms === 'string' ? body.sms : '') + ' ' +
+            (typeof body.body === 'string' ? body.body : '') + ' ' +
+            (typeof body.message === 'string' ? body.message : '')
+        ).trim() || rawBody;
 
         console.log('SEARCH CONTENT:', content);
 
-        // Regex to find "TICKET" followed by numbers
-        const ticketMatch = content.match(/TICKET(\d+)/);
+        // Regex to find "TICKET" followed by hex characters (random part) and digits (timestamp)
+        const ticketMatch = content.match(/TICKET([a-f0-9]*\d+)/i);
 
         const paymentSource = body.body || content;
-        const paymentMatch = paymentSource.match(/([a-zA-Z0-9\s\.]+?) (?:has )?paid you ₹(\d+(\.\d{1,2})?)/i);
+        // Using word boundaries and more specific patterns for payment matching
+        const paymentMatch = paymentSource.match(/\b([a-zA-Z0-9\s\.]+?)\b (?:has )?paid you ₹(\d+(\.\d{1,2})?)/i);
 
         let foundId = null;
         let status = 'ignored';
@@ -97,7 +152,7 @@ app.post('/api/webhook', async (c) => {
             } else if (ticket.status === 'paid') {
                 console.log(`Ticket ${foundId} ALREADY PAID`);
                 status = 'already_paid';
-            } else if (ticket.amount !== paidAmount) {
+            } else if (toCents(ticket.amount) !== toCents(paidAmount)) {
                 console.log(`AMOUNT MISMATCH: Ticket requires ${ticket.amount}, but received ${paidAmount}`);
                 status = 'amount_mismatch';
             } else {
@@ -168,15 +223,24 @@ app.post('/api/email-webhook', async (c) => {
         }
 
         // ── 1. Shared-secret authentication ──────────────────────────────────
-        const secret = c.req.query('secret') || body.secret;
-        if (!secret || secret !== c.env.EMAIL_SECRET) {
+        const emailSecret = c.env.EMAIL_SECRET;
+        if (!emailSecret) {
+            console.error('EMAIL_SECRET is not configured');
+            return c.json({ error: 'Internal Server Error' }, 500);
+        }
+
+        const authHeader = c.req.header('Authorization');
+        const headerSecret = (authHeader && typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) ? authHeader.substring(7) : c.req.header('X-Email-Secret');
+        const secret = headerSecret || c.req.query('secret') || body.secret;
+
+        if (!secret || !timingSafeEqual(secret, emailSecret)) {
             console.log('Unauthorized email webhook attempt');
             return c.json({ error: 'Unauthorized' }, 401);
         }
 
-        const from = (body.from || '').toLowerCase().trim();
-        const subject = (body.subject || '').trim();
-        const text = (body.text || body.html || '').replace(/=\r?\n/g, '').replace(/=3D/g, '=');
+        const from = (typeof body.from === 'string' ? body.from : '').toLowerCase().trim();
+        const subject = (typeof body.subject === 'string' ? body.subject : '').trim();
+        const text = (typeof body.text === 'string' ? body.text : (typeof body.html === 'string' ? body.html : '')).replace(/=\r?\n/g, '').replace(/=3D/g, '=');
 
         console.log('FROM:', from, '| SUBJECT:', subject);
 
@@ -203,7 +267,7 @@ app.post('/api/email-webhook', async (c) => {
             .replace(/&nbsp;/g, ' ');
 
         // Amount — e.g. ₹1.02
-        const amountMatch = normalised.match(/₹\s*(\d+)\.(\d{2})/);
+        const amountMatch = normalised.match(/₹\s*(\d+)\.(\d{2})\b/);
         if (!amountMatch) {
             console.log('Could not extract amount from email body');
             return c.json({ status: 'ignored', reason: 'amount_not_found' });
@@ -220,8 +284,8 @@ app.post('/api/email-webhook', async (c) => {
         console.log('RRN:', rrn);
 
         // Sender name — appears after "From" label in the transaction table
-        const senderMatch = normalised.match(/From\s*<\/td>\s*<td[^>]*>\s*([A-Z0-9 ]+)\s*</i)
-            || normalised.match(/From\s*[\|\t:]\s*([A-Z0-9 ]+)/i);
+        const senderMatch = normalised.match(/From\s*<\/td>\s*<td[^>]*>\s*([A-Z0-9\s\.\-_]+?)\s*</i)
+            || normalised.match(/From\s*[\|\t:]\s*([A-Z0-9\s\.\-_]+?)(?:\s*\||\s*<\/|\s*\r?\n|$)/i);
         const senderName = senderMatch ? senderMatch[1].trim() : 'UNKNOWN';
         console.log('SENDER NAME:', senderName);
 
@@ -242,14 +306,12 @@ app.post('/api/email-webhook', async (c) => {
         // We don't know the ticket ID yet — look up all recently-created
         // pending tickets and find the one whose suffix matches the decimal.
         //
-        // Strategy: query Appwrite for pending tickets created in last 6 min,
+        // Strategy: query Appwrite for pending tickets created in last 10 min,
         // then filter by decimal suffix match.
-        //
-        // Because Appwrite free tier may not support range queries on $createdAt
-        // easily, we fetch recent pending tickets (limit 20) and filter in-code.
-        const candidates = await appwrite.listRecentPendingTickets(6);
-
         const now = Date.now();
+        const lookbackWindow = new Date(now - 10 * 60 * 1000);
+        const candidates = await appwrite.listRecentPendingTickets(100, lookbackWindow);
+
         const FIVE_MIN_MS = 5 * 60 * 1000;
 
         let matchedTicket: Awaited<ReturnType<typeof appwrite.listRecentPendingTickets>>[0] | null = null;
@@ -274,10 +336,11 @@ app.post('/api/email-webhook', async (c) => {
             }
 
             // ── 7. Amount integer check ───────────────────────────────────────
-            //  The ticket stores the full expected amount (integer), e.g. 1.
-            //  The paid amount must match (floor-comparing integer part).
-            if (Math.floor(ticket.amount) !== intPart) {
-                console.log(`Ticket ${ticket.ticketId}: integer amount mismatch (expected ${ticket.amount}, got ${intPart}), skipping`);
+            //  The ticket stores the full expected amount (e.g. 1.89).
+            //  The paid amount (e.g. 1.89) must match the ticket amount.
+            //  We compare using cents to avoid floating point issues.
+            if (toCents(ticket.amount) !== toCents(paidAmount)) {
+                console.log(`Ticket ${ticket.ticketId}: amount mismatch (expected ${ticket.amount}, got ${paidAmount}), skipping`);
                 continue;
             }
 
@@ -328,6 +391,12 @@ app.post('/api/email-webhook', async (c) => {
 // ---------------------------------------------------------------------------
 app.get('/api/status/:id', async (c) => {
     const id = c.req.param('id');
+
+    // Basic validation of ticketId format
+    if (!id || !/^TICKET[a-f0-9]*\d+$/i.test(id)) {
+        return c.json({ error: 'Invalid Ticket ID format' }, 400);
+    }
+
     const appwrite = new AppwriteService(c.env);
     const status = await appwrite.getTicketStatus(id);
 
