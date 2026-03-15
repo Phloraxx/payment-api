@@ -12,11 +12,11 @@ const localDecimalLocks = new Set<string>();
  * Constant-time string comparison to prevent timing attacks.
  */
 function timingSafeEqual(a: string, b: string): boolean {
-    if (a.length !== b.length) {
-        return false;
-    }
-    let result = 0;
-    for (let i = 0; i < a.length; i++) {
+    const aLen = a.length;
+    const bLen = b.length;
+    let result = aLen ^ bLen;
+    const len = Math.min(aLen, bLen);
+    for (let i = 0; i < len; i++) {
         result |= a.charCodeAt(i) ^ b.charCodeAt(i);
     }
     return result === 0;
@@ -24,7 +24,13 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 const app = new Hono<{ Bindings: Env }>();
 
-app.use("/*", cors());
+app.use("/*", async (c, next) => {
+    const allowedOrigin = c.env.ALLOWED_ORIGIN || "*";
+    const corsMiddleware = cors({
+        origin: allowedOrigin.includes(",") ? allowedOrigin.split(",") : allowedOrigin,
+    });
+    return corsMiddleware(c, next);
+});
 
 app.get("/", (c) => {
     return c.text("Payment Gateway API is running!");
@@ -64,13 +70,13 @@ app.post("/api/ticket", async (c) => {
             Math.floor(baseAmount),
         );
 
-        // 2. Find the lowest available decimal sequentially from 00 to 99.
-        // The `localDecimalLocks` in-memory set will prevent race conditions natively
-        // if traffic originates from the same region (hitting the same Cloudflare Edge Node).
+        // 2. Find the lowest available decimal from 00 to 99.
+        // We start at a random index to reduce DB lock contention.
         let availableDecimal = -1;
+        const startOffset = Math.floor(Math.random() * 100);
 
         for (let i = 0; i < 100; i++) {
-            const candidateDecimal = i;
+            const candidateDecimal = (startOffset + i) % 100;
             const lockKey = `${Math.floor(baseAmount)}_${candidateDecimal}`;
 
             if (
@@ -148,7 +154,7 @@ app.post("/api/webhook", async (c) => {
             body = { sms: rawBody };
         }
 
-        const secret = c.req.query("secret") || body.secret_key;
+        const secret = c.req.header("X-Webhook-Secret") || c.req.query("secret") || body.secret_key;
         if (!secret || !timingSafeEqual(secret, c.env.WEBHOOK_SECRET)) {
             console.log("Unauthorized Webhook Attempt");
             return c.json({ error: "Unauthorized" }, 401);
@@ -333,7 +339,7 @@ app.post("/api/email-webhook", async (c) => {
         }
 
         // ── 1. Shared-secret authentication ──────────────────────────────────
-        const secret = c.req.query("secret") || body.secret;
+        const secret = c.req.header("X-Email-Secret") || c.req.query("secret") || body.secret;
         if (!secret || !timingSafeEqual(secret, c.env.EMAIL_SECRET)) {
             console.log("Unauthorized email webhook attempt");
             return c.json({ error: "Unauthorized" }, 401);
