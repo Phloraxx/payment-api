@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { secureHeaders } from 'hono/secure-headers';
 import { AppwriteService, Env } from './lib/appwrite';
 
 /**
@@ -15,12 +16,27 @@ function timingSafeEqual(a: string, b: string): boolean {
     return crypto.subtle.timingSafeEqual(aBuf, bBuf);
 }
 
+/**
+ * Converts a numeric amount (e.g. 10.50) to an integer cents value (1050)
+ * to avoid floating-point comparison issues.
+ */
+function toCents(amount: number): number {
+    return Math.round(amount * 100);
+}
+
 const app = new Hono<{ Bindings: Env }>();
 
+app.use('*', secureHeaders());
+
 app.use('/*', async (c, next) => {
-    const origin = c.env.ALLOWED_ORIGIN || '*';
+    const allowedOrigins = (c.env.ALLOWED_ORIGIN || '*').split(',').map(o => o.trim());
     return cors({
-        origin: origin,
+        origin: (origin) => {
+            if (allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+                return origin;
+            }
+            return allowedOrigins[0];
+        },
         allowMethods: ['GET', 'POST', 'OPTIONS'],
         allowHeaders: ['Content-Type', 'Authorization', 'X-Webhook-Secret', 'X-Email-Secret'],
         maxAge: 86400,
@@ -126,7 +142,7 @@ app.post('/api/webhook', async (c) => {
             } else if (ticket.status === 'paid') {
                 console.log(`Ticket ${foundId} ALREADY PAID`);
                 status = 'already_paid';
-            } else if (ticket.amount !== paidAmount) {
+            } else if (toCents(ticket.amount) !== toCents(paidAmount)) {
                 console.log(`AMOUNT MISMATCH: Ticket requires ${ticket.amount}, but received ${paidAmount}`);
                 status = 'amount_mismatch';
             } else {
@@ -252,8 +268,8 @@ app.post('/api/email-webhook', async (c) => {
         console.log('RRN:', rrn);
 
         // Sender name — appears after "From" label in the transaction table
-        const senderMatch = normalised.match(/From\s*<\/td>\s*<td[^>]*>\s*([A-Z0-9 ]+)\s*</i)
-            || normalised.match(/From\s*[\|\t:]\s*([A-Z0-9 ]+)/i);
+        const senderMatch = normalised.match(/From\s*<\/td>\s*<td[^>]*>\s*([A-Z0-9\s\.\-_]+?)\s*</i)
+            || normalised.match(/From\s*[\|\t:]\s*([A-Z0-9\s\.\-_]+?)(?:\s*\||\s*<\/|\s*\r?\n|$)/i);
         const senderName = senderMatch ? senderMatch[1].trim() : 'UNKNOWN';
         console.log('SENDER NAME:', senderName);
 
@@ -274,14 +290,12 @@ app.post('/api/email-webhook', async (c) => {
         // We don't know the ticket ID yet — look up all recently-created
         // pending tickets and find the one whose suffix matches the decimal.
         //
-        // Strategy: query Appwrite for pending tickets created in last 6 min,
+        // Strategy: query Appwrite for pending tickets created in last 10 min,
         // then filter by decimal suffix match.
-        //
-        // Because Appwrite free tier may not support range queries on $createdAt
-        // easily, we fetch recent pending tickets (limit 20) and filter in-code.
-        const candidates = await appwrite.listRecentPendingTickets(6);
-
         const now = Date.now();
+        const lookbackWindow = new Date(now - 10 * 60 * 1000);
+        const candidates = await appwrite.listRecentPendingTickets(100, lookbackWindow);
+
         const FIVE_MIN_MS = 5 * 60 * 1000;
 
         let matchedTicket: Awaited<ReturnType<typeof appwrite.listRecentPendingTickets>>[0] | null = null;
@@ -306,10 +320,11 @@ app.post('/api/email-webhook', async (c) => {
             }
 
             // ── 7. Amount integer check ───────────────────────────────────────
-            //  The ticket stores the full expected amount (integer), e.g. 1.
-            //  The paid amount must match (floor-comparing integer part).
-            if (Math.floor(ticket.amount) !== intPart) {
-                console.log(`Ticket ${ticket.ticketId}: integer amount mismatch (expected ${ticket.amount}, got ${intPart}), skipping`);
+            //  The ticket stores the full expected amount (e.g. 1.89).
+            //  The paid amount (e.g. 1.89) must match the ticket amount.
+            //  We compare using cents to avoid floating point issues.
+            if (toCents(ticket.amount) !== toCents(paidAmount)) {
+                console.log(`Ticket ${ticket.ticketId}: amount mismatch (expected ${ticket.amount}, got ${paidAmount}), skipping`);
                 continue;
             }
 
@@ -360,6 +375,12 @@ app.post('/api/email-webhook', async (c) => {
 // ---------------------------------------------------------------------------
 app.get('/api/status/:id', async (c) => {
     const id = c.req.param('id');
+
+    // Basic validation of ticketId format
+    if (!id || !/^TICKET[a-f0-9]*\d+$/i.test(id)) {
+        return c.json({ error: 'Invalid Ticket ID format' }, 400);
+    }
+
     const appwrite = new AppwriteService(c.env);
     const status = await appwrite.getTicketStatus(id);
 

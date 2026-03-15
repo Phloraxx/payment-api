@@ -122,16 +122,22 @@ export class AppwriteService {
         }
     }
 
-    async listRecentPendingTickets(limit: number = 20) {
+    async listRecentPendingTickets(limit: number = 100, since?: Date) {
         try {
+            const queries = [
+                Query.equal('status', 'pending'),
+                Query.orderDesc('$createdAt'),
+                Query.limit(limit)
+            ];
+
+            if (since) {
+                queries.push(Query.greaterThan('$createdAt', since.toISOString()));
+            }
+
             const response = await this.databases.listDocuments(
                 this.env.APPWRITE_DATABASE_ID,
                 this.env.APPWRITE_COLLECTION_ID,
-                [
-                    Query.equal('status', 'pending'),
-                    Query.orderDesc('$createdAt'),
-                    Query.limit(limit)
-                ]
+                queries
             );
 
             return response.documents.map(doc => ({
