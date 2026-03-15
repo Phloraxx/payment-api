@@ -6902,6 +6902,28 @@ var AppwriteService = class {
       return [];
     }
   }
+  async listRecentTickets(limit = 20) {
+    try {
+      const response = await this.databases.listDocuments(
+        this.env.APPWRITE_DATABASE_ID,
+        this.env.APPWRITE_COLLECTION_ID,
+        [
+          Query.orderDesc("$createdAt"),
+          Query.limit(limit)
+        ]
+      );
+      return response.documents.map((doc) => ({
+        id: doc.$id,
+        ticketId: doc.ticketId,
+        status: doc.status,
+        amount: doc.amount,
+        createdAt: doc.$createdAt
+      }));
+    } catch (error3) {
+      console.error("Appwrite listRecentTickets error:", error3);
+      return [];
+    }
+  }
   async getPendingDecimalsForAmount(baseAmount) {
     try {
       const candidates = await this.listRecentPendingTickets(100);
@@ -7220,15 +7242,15 @@ app.post("/api/webhook", async (c) => {
       if (!ticket) {
         console.log(`Ticket ${foundId} NOT FOUND`);
         status = "ticket_not_found";
-      } else if (ticket.status === "paid") {
-        console.log(`Ticket ${foundId} ALREADY PAID`);
-        status = "already_paid";
       } else if (toCents(ticket.amount) !== toCents(paidAmount)) {
         console.log(
           `AMOUNT MISMATCH: Ticket requires ${ticket.amount}, but received ${paidAmount} `
         );
         status = "amount_mismatch";
       } else {
+        if (ticket.status === "paid") {
+          console.log(`Ticket ${foundId} ALREADY PAID, updating sender name anyway`);
+        }
         updatedDoc = await appwrite.markAsPaid(foundId, senderName);
         if (updatedDoc) {
           console.log(`Ticket ${foundId} MARKED AS PAID`);
@@ -7251,7 +7273,7 @@ app.post("/api/webhook", async (c) => {
         console.log("PAID AMOUNT:", paidAmount, "| DEC PART:", decPart);
         console.log("UPI ID:", upiId, "| RRN:", rrn);
         const appwrite = new AppwriteService(c.env);
-        const candidates = await appwrite.listRecentPendingTickets(20);
+        const candidates = await appwrite.listRecentTickets(20);
         const now = Date.now();
         const FIVE_MIN_MS = 5 * 60 * 1e3;
         let matchedTicket = null;
@@ -7264,7 +7286,6 @@ app.post("/api/webhook", async (c) => {
           const ticketSuffix = parseInt(numericPart.slice(-2), 10);
           if (ticketSuffix !== decPart) continue;
           if (toCents(Math.floor(ticket.amount)) !== toCents(intPart)) continue;
-          if (ticket.status === "paid") continue;
           matchedTicket = ticket;
           matchedTicketId = ticket.ticketId;
           break;
