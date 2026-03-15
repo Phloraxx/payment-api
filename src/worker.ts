@@ -229,10 +229,10 @@ app.post("/api/webhook", async (c) => {
             const kotakParsed = EmailParser.parseKotakSms(content);
             if (kotakParsed && kotakParsed.paidAmount !== null && kotakParsed.intPart !== null && kotakParsed.decPart !== null) {
                 console.log("KOTAK SMS DETECTED WITHOUT EXPLICIT TICKET ID");
-                const { paidAmount, decPart, intPart, rrn, senderName } = kotakParsed;
+                const { paidAmount, decPart, intPart, rrn, upiId } = kotakParsed;
 
                 console.log("PAID AMOUNT:", paidAmount, "| DEC PART:", decPart);
-                console.log("SENDER NAME:", senderName, "| RRN:", rrn);
+                console.log("UPI ID:", upiId, "| RRN:", rrn);
 
                 const appwrite = new AppwriteService(c.env);
                 const candidates = await appwrite.listRecentPendingTickets(20);
@@ -262,7 +262,7 @@ app.post("/api/webhook", async (c) => {
                 }
 
                 if (matchedTicket && matchedTicketId) {
-                    updatedDoc = await appwrite.markAsPaid(matchedTicketId, senderName, rrn ?? undefined);
+                    updatedDoc = await appwrite.markAsPaid(matchedTicketId, undefined, rrn ?? undefined, upiId ?? undefined);
                     if (updatedDoc) {
                         console.log(`Ticket ${matchedTicketId} MARKED AS PAID via Kotak SMS. RRN: ${rrn}`);
                         status = "success";
