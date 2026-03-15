@@ -1,12 +1,26 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { upgradeWebSocket } from "hono/cloudflare-workers";
-import { AppwriteService, Env } from "./lib/appwrite";
+import { AppwriteService, Env, toCents } from "./lib/appwrite";
 import { EmailParser } from "./lib/emailParser";
 
 // Temporary in-memory lock to prevent exact same decimal allocation on the same Edge node
 // This provides a "best effort" lock to prevent concurrent requests in the same colo from snagging the same decimal.
 const localDecimalLocks = new Set<string>();
+
+/**
+ * Constant-time string comparison to prevent timing attacks.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+    if (a.length !== b.length) {
+        return false;
+    }
+    let result = 0;
+    for (let i = 0; i < a.length; i++) {
+        result |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    }
+    return result === 0;
+}
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -135,7 +149,7 @@ app.post("/api/webhook", async (c) => {
         }
 
         const secret = c.req.query("secret") || body.secret_key;
-        if (secret !== c.env.WEBHOOK_SECRET) {
+        if (!secret || !timingSafeEqual(secret, c.env.WEBHOOK_SECRET)) {
             console.log("Unauthorized Webhook Attempt");
             return c.json({ error: "Unauthorized" }, 401);
         }
@@ -183,7 +197,7 @@ app.post("/api/webhook", async (c) => {
             } else if (ticket.status === "paid") {
                 console.log(`Ticket ${foundId} ALREADY PAID`);
                 status = "already_paid";
-            } else if (ticket.amount !== paidAmount) {
+            } else if (toCents(ticket.amount) !== toCents(paidAmount)) {
                 console.log(
                     `AMOUNT MISMATCH: Ticket requires ${ticket.amount}, but received ${paidAmount} `,
                 );
@@ -198,9 +212,9 @@ app.post("/api/webhook", async (c) => {
                     const baseAmount = Math.floor(ticket.amount);
                     const decPart = Math.round((ticket.amount - baseAmount) * 100);
                     localDecimalLocks.delete(`${baseAmount}_${decPart}`);
-                    await appwrite
-                        .releaseDatabaseLock(baseAmount, decPart)
-                        .catch(() => null);
+                    c.executionCtx.waitUntil(
+                        appwrite.releaseDatabaseLock(baseAmount, decPart).catch(() => null)
+                    );
                 } else {
                     status = "update_failed";
                 }
@@ -215,7 +229,7 @@ app.post("/api/webhook", async (c) => {
                 console.log("SENDER NAME:", senderName, "| RRN:", rrn);
 
                 const appwrite = new AppwriteService(c.env);
-                const candidates = await appwrite.listRecentPendingTickets(6);
+                const candidates = await appwrite.listRecentPendingTickets(20);
 
                 const now = Date.now();
                 const FIVE_MIN_MS = 5 * 60 * 1000;
@@ -233,7 +247,7 @@ app.post("/api/webhook", async (c) => {
                     const ticketSuffix = parseInt(numericPart.slice(-2), 10);
 
                     if (ticketSuffix !== decPart) continue;
-                    if (Math.floor(ticket.amount) !== intPart) continue;
+                    if (toCents(Math.floor(ticket.amount)) !== toCents(intPart)) continue;
                     if (ticket.status === "paid") continue;
 
                     matchedTicket = ticket;
@@ -249,7 +263,9 @@ app.post("/api/webhook", async (c) => {
                         foundId = matchedTicketId;
 
                         localDecimalLocks.delete(`${intPart}_${decPart}`);
-                        await appwrite.releaseDatabaseLock(intPart, decPart).catch(() => null);
+                        c.executionCtx.waitUntil(
+                            appwrite.releaseDatabaseLock(intPart, decPart).catch(() => null)
+                        );
                     } else {
                         status = "update_failed";
                     }
@@ -318,7 +334,7 @@ app.post("/api/email-webhook", async (c) => {
 
         // ── 1. Shared-secret authentication ──────────────────────────────────
         const secret = c.req.query("secret") || body.secret;
-        if (!secret || secret !== c.env.EMAIL_SECRET) {
+        if (!secret || !timingSafeEqual(secret, c.env.EMAIL_SECRET)) {
             console.log("Unauthorized email webhook attempt");
             return c.json({ error: "Unauthorized" }, 401);
         }
@@ -384,7 +400,7 @@ app.post("/api/email-webhook", async (c) => {
         //
         // Because Appwrite free tier may not support range queries on $createdAt
         // easily, we fetch recent pending tickets (limit 20) and filter in-code.
-        const candidates = await appwrite.listRecentPendingTickets(6);
+        const candidates = await appwrite.listRecentPendingTickets(20);
 
         const now = Date.now();
         const FIVE_MIN_MS = 5 * 60 * 1000;
@@ -422,7 +438,7 @@ app.post("/api/email-webhook", async (c) => {
             // ── 7. Amount integer check ───────────────────────────────────────
             //  The ticket stores the full expected amount (integer), e.g. 1.
             //  The paid amount must match (floor-comparing integer part).
-            if (Math.floor(ticket.amount) !== intPart) {
+            if (toCents(Math.floor(ticket.amount)) !== toCents(intPart)) {
                 console.log(
                     `Ticket ${ticket.ticketId}: integer amount mismatch(expected ${ticket.amount}, got ${intPart}), skipping`,
                 );
@@ -465,9 +481,12 @@ app.post("/api/email-webhook", async (c) => {
 
             // Free the decimal lock immediately so it can be reused
             localDecimalLocks.delete(`${intPart}_${decPart}`);
-            await appwrite.releaseDatabaseLock(intPart, decPart).catch(() => null);
+            c.executionCtx.waitUntil(
+                appwrite.releaseDatabaseLock(intPart, decPart).catch(() => null)
+            );
 
-            return c.json(updatedDoc);
+            const { id, ...sanitized } = updatedDoc as any;
+            return c.json(sanitized);
         } else {
             return c.json({ status: "error", reason: "update_failed" }, 500);
         }
@@ -489,7 +508,8 @@ app.get("/api/status/:id", async (c) => {
         return c.json({ status: "not_found" }, 404);
     }
 
-    return c.json(status);
+    const { id: internalId, ...sanitized } = status as any;
+    return c.json(sanitized);
 });
 
 // ---------------------------------------------------------------------------

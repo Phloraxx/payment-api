@@ -36,6 +36,10 @@ export interface TicketDocument extends Models.Document {
   paidAt?: string;
 }
 
+export function toCents(amount: number): number {
+  return Math.round(amount * 100);
+}
+
 export class AppwriteService {
   client: Client;
   databases: Databases;
@@ -146,7 +150,7 @@ export class AppwriteService {
       }
 
       return {
-        id: doc.$id, // THE SECURE INTERNAL DOCUMENT ID
+        id: doc.$id,
         ticketId: doc.ticketId,
         status: currentStatus,
         amount: doc.amount,
