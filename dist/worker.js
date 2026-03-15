@@ -7242,15 +7242,15 @@ app.post("/api/webhook", async (c) => {
       if (!ticket) {
         console.log(`Ticket ${foundId} NOT FOUND`);
         status = "ticket_not_found";
-      } else if (ticket.status === "paid") {
-        console.log(`Ticket ${foundId} ALREADY PAID`);
-        status = "already_paid";
       } else if (toCents(ticket.amount) !== toCents(paidAmount)) {
         console.log(
           `AMOUNT MISMATCH: Ticket requires ${ticket.amount}, but received ${paidAmount} `
         );
         status = "amount_mismatch";
       } else {
+        if (ticket.status === "paid") {
+          console.log(`Ticket ${foundId} ALREADY PAID, updating sender name anyway`);
+        }
         updatedDoc = await appwrite.markAsPaid(foundId, senderName);
         if (updatedDoc) {
           console.log(`Ticket ${foundId} MARKED AS PAID`);
