@@ -6,32 +6,32 @@ export const ADMIN_HTML = `<!DOCTYPE html>
   <title>Payment Admin</title>
   <style>
     :root {
-      --bg-app: #000000;
-      --bg-card: rgba(255,255,255,0.04);
-      --bg-card-hover: rgba(255,255,255,0.07);
-      --bg-input: rgba(255,255,255,0.06);
+      --bg-app: #050505;
+      --bg-card: rgba(255,255,255,0.03);
+      --bg-card-hover: rgba(255,255,255,0.06);
+      --bg-input: rgba(255,255,255,0.05);
       --bg-input-focus: rgba(255,255,255,0.09);
-      --bg-modal: rgba(12,12,12,0.98);
-      --bg-header: rgba(0,0,0,0.85);
+      --bg-modal: rgba(18,18,18,0.95);
+      --bg-header: rgba(5,5,5,0.75);
       --border-default: rgba(255,255,255,0.08);
-      --border-bright: rgba(255,255,255,0.16);
-      --border-focus: rgba(10,132,255,0.55);
-      --text-primary: #f5f5f7;
-      --text-secondary: rgba(235,235,245,0.60);
-      --text-tertiary: rgba(235,235,245,0.30);
+      --border-bright: rgba(255,255,255,0.15);
+      --border-focus: rgba(10,132,255,0.6);
+      --text-primary: #fcfcfc;
+      --text-secondary: rgba(235,235,245,0.65);
+      --text-tertiary: rgba(235,235,245,0.35);
       --blue: #0a84ff;
       --green: #30d158;
       --orange: #ff9f0a;
       --red: #ff453a;
       --purple: #bf5af2;
-      --teal: #40c8e0;
+      --teal: #64d2ff;
       --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", system-ui, "Helvetica Neue", Arial, sans-serif;
       --font-mono: "SF Mono", ui-monospace, "Cascadia Code", "Fira Code", Menlo, Monaco, Consolas, monospace;
-      --r-sm: 6px; --r-md: 10px; --r-lg: 14px; --r-xl: 20px; --r-2xl: 28px; --r-full: 9999px;
-      --shadow-sm: 0 2px 8px rgba(0,0,0,0.30);
-      --shadow-md: 0 8px 24px rgba(0,0,0,0.45);
-      --shadow-lg: 0 20px 48px rgba(0,0,0,0.55);
-      --shadow-xl: 0 32px 80px rgba(0,0,0,0.65);
+      --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-xl: 24px; --r-2xl: 32px; --r-full: 9999px;
+      --shadow-sm: 0 4px 12px rgba(0,0,0,0.25);
+      --shadow-md: 0 12px 32px rgba(0,0,0,0.40);
+      --shadow-lg: 0 24px 64px rgba(0,0,0,0.50);
+      --shadow-xl: 0 40px 100px rgba(0,0,0,0.60);
       --ease-spring: cubic-bezier(0.34,1.56,0.64,1);
       --ease-out: cubic-bezier(0.16,1,0.3,1);
       --ease-default: cubic-bezier(0.25,0.46,0.45,0.94);
@@ -47,10 +47,12 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       font-family: var(--font-ui);
       color: var(--text-primary);
       background:
-        radial-gradient(ellipse at 15% 40%, rgba(10,132,255,0.055) 0%, transparent 55%),
-        radial-gradient(ellipse at 80% 20%, rgba(191,90,242,0.04) 0%, transparent 50%),
-        radial-gradient(ellipse at 60% 85%, rgba(48,209,88,0.035) 0%, transparent 50%),
-        #000000;
+        radial-gradient(circle at 10% 20%, rgba(10,132,255,0.08) 0%, transparent 40%),
+        radial-gradient(circle at 90% 10%, rgba(191,90,242,0.07) 0%, transparent 40%),
+        radial-gradient(circle at 80% 80%, rgba(48,209,88,0.06) 0%, transparent 50%),
+        radial-gradient(circle at 20% 80%, rgba(255,159,10,0.05) 0%, transparent 50%),
+        var(--bg-app);
+      background-attachment: fixed;
       min-height: 100vh;
       -webkit-font-smoothing: antialiased;
     }
@@ -77,16 +79,17 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       width: 100%; padding: 12px 14px; font-size: 15px; font-family: var(--font-ui);
       background: var(--bg-input); border: 1px solid var(--border-default);
       border-radius: var(--r-md); color: var(--text-primary); outline: none;
-      transition: border-color 0.2s, background 0.2s;
+      transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
     }
-    .login-input:focus { background: var(--bg-input-focus); border-color: var(--border-focus); }
+    .login-input:focus { background: var(--bg-input-focus); border-color: var(--border-focus); box-shadow: 0 0 0 3px rgba(10,132,255,0.25); }
     .login-btn {
       width: 100%; margin-top: 20px; padding: 13px; font-size: 15px; font-weight: 600;
       background: var(--blue); color: #fff; border: none; border-radius: var(--r-md);
-      cursor: pointer; transition: opacity 0.15s, transform 0.15s;
+      cursor: pointer; transition: all 0.2s;
+      box-shadow: 0 2px 8px rgba(10,132,255,0.3);
     }
-    .login-btn:hover { opacity: 0.88; }
-    .login-btn:active { transform: scale(0.98); }
+    .login-btn:hover { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(10,132,255,0.4); }
+    .login-btn:active { transform: scale(0.98) translateY(0); box-shadow: 0 2px 4px rgba(10,132,255,0.3); }
     .login-err { color: var(--red); font-size: 13px; margin-top: 10px; min-height: 18px; text-align: center; }
     @keyframes shake {
       0%,100% { transform: translateX(0); }
@@ -119,21 +122,32 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     .nav-tab.active { background: rgba(255,255,255,0.12); color: var(--text-primary); }
     .nav-tab:hover:not(.active) { color: var(--text-primary); background: rgba(255,255,255,0.06); }
     .header-spacer { flex: 1; }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(48,209,88,0.4); }
+      70% { box-shadow: 0 0 0 6px rgba(48,209,88,0); }
+      100% { box-shadow: 0 0 0 0 rgba(48,209,88,0); }
+    }
     .rt-dot {
       width: 8px; height: 8px; border-radius: 50%; transition: background 0.3s;
     }
-    .rt-dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
-    .rt-dot.disconnected { background: rgba(255,255,255,0.2); }
+    .rt-dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); animation: pulse 2s infinite; }
+    .rt-dot.disconnected { background: rgba(255,255,255,0.2); animation: none; }
     .rt-label { font-size: 11px; color: var(--text-tertiary); margin-right: 4px; }
     .header-btn {
       padding: 6px 12px; font-size: 12px; font-weight: 500;
       background: rgba(255,255,255,0.07); border: 1px solid var(--border-default);
-      border-radius: var(--r-sm); color: var(--text-secondary); cursor: pointer; transition: all 0.15s;
+      border-radius: var(--r-sm); color: var(--text-secondary); cursor: pointer; transition: all 0.2s;
     }
-    .header-btn:hover { color: var(--text-primary); background: rgba(255,255,255,0.11); }
+    .header-btn:hover { color: var(--text-primary); background: rgba(255,255,255,0.12); border-color: var(--border-bright); transform: translateY(-1px); }
+    .header-btn:active { transform: scale(0.97); }
+
+    @keyframes slideUpFade {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
 
     /* Main content */
-    main { flex: 1; padding: 24px; max-width: 1400px; margin: 0 auto; width: 100%; }
+    main { flex: 1; padding: 24px; max-width: 1400px; margin: 0 auto; width: 100%; animation: slideUpFade 0.4s var(--ease-out) forwards; }
 
     /* Stats */
     .stats-grid {
@@ -144,7 +158,12 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       border-top-color: var(--border-bright); border-radius: var(--r-xl);
       padding: 18px 20px; cursor: pointer; transition: all 0.2s;
       position: relative; overflow: hidden;
+      animation: slideUpFade 0.4s var(--ease-out) backwards;
     }
+    .stat-card:nth-child(1) { animation-delay: 0.05s; }
+    .stat-card:nth-child(2) { animation-delay: 0.1s; }
+    .stat-card:nth-child(3) { animation-delay: 0.15s; }
+    .stat-card:nth-child(4) { animation-delay: 0.2s; }
     .stat-card::before {
       content: ''; position: absolute; inset: 0; opacity: 0;
       transition: opacity 0.2s; border-radius: inherit;
@@ -171,7 +190,7 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       background: var(--bg-input); border: 1px solid var(--border-default); border-radius: var(--r-md);
       color: var(--text-primary); outline: none; transition: all 0.2s;
     }
-    .search-input:focus { background: var(--bg-input-focus); border-color: var(--border-focus); }
+    .search-input:focus { background: var(--bg-input-focus); border-color: var(--border-focus); box-shadow: 0 0 0 2px rgba(10,132,255,0.2); }
     .filter-pills { display: flex; gap: 6px; flex-wrap: wrap; }
     .pill {
       padding: 5px 12px; font-size: 12px; font-weight: 500; border-radius: var(--r-full);
@@ -199,6 +218,8 @@ export const ADMIN_HTML = `<!DOCTYPE html>
       background: var(--bg-card); border: 1px solid var(--border-default);
       border-top-color: var(--border-bright); border-radius: var(--r-xl);
       overflow: hidden; box-shadow: var(--shadow-sm);
+      animation: slideUpFade 0.5s var(--ease-out) backwards;
+      animation-delay: 0.3s;
     }
     .table-scroll { overflow-x: auto; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -210,7 +231,13 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     tbody tr {
       border-bottom: 1px solid rgba(255,255,255,0.04); cursor: pointer;
       transition: background 0.14s;
+      animation: slideUpFade 0.3s var(--ease-out) backwards;
     }
+    tbody tr:nth-child(1) { animation-delay: 0.35s; }
+    tbody tr:nth-child(2) { animation-delay: 0.4s; }
+    tbody tr:nth-child(3) { animation-delay: 0.45s; }
+    tbody tr:nth-child(4) { animation-delay: 0.5s; }
+    tbody tr:nth-child(5) { animation-delay: 0.55s; }
     tbody tr:last-child { border-bottom: none; }
     tbody tr:hover { background: rgba(10,132,255,0.04); }
     tbody td { padding: 12px 14px; color: var(--text-secondary); font-feature-settings: "tnum"; }
@@ -261,7 +288,15 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     .test-card {
       background: var(--bg-card); border: 1px solid var(--border-default);
       border-top-color: var(--border-bright); border-radius: var(--r-xl); overflow: hidden;
+      animation: slideUpFade 0.4s var(--ease-out) backwards;
     }
+    .test-card:nth-child(1) { animation-delay: 0.1s; }
+    .test-card:nth-child(2) { animation-delay: 0.15s; }
+    .test-card:nth-child(3) { animation-delay: 0.2s; }
+    .test-card:nth-child(4) { animation-delay: 0.25s; }
+    .test-card:nth-child(5) { animation-delay: 0.3s; }
+    .test-card:nth-child(6) { animation-delay: 0.35s; }
+    .test-card:nth-child(7) { animation-delay: 0.4s; }
     .test-card-header {
       display: flex; align-items: center; gap: 10px;
       padding: 14px 16px; border-bottom: 1px solid var(--border-default);
@@ -282,17 +317,19 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     .test-input, .test-textarea {
       width: 100%; padding: 8px 10px; font-size: 12px; font-family: var(--font-mono);
       background: var(--bg-input); border: 1px solid var(--border-default); border-radius: var(--r-sm);
-      color: var(--text-primary); outline: none; transition: border-color 0.2s, background 0.2s;
+      color: var(--text-primary); outline: none; transition: all 0.2s;
     }
-    .test-input:focus, .test-textarea:focus { background: var(--bg-input-focus); border-color: var(--border-focus); }
+    .test-input:focus, .test-textarea:focus { background: var(--bg-input-focus); border-color: var(--border-focus); box-shadow: 0 0 0 2px rgba(10,132,255,0.2); }
     .test-textarea { resize: vertical; min-height: 60px; max-height: 200px; }
     .test-actions { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
     .test-run-btn {
       padding: 7px 16px; font-size: 12px; font-weight: 600; border-radius: var(--r-sm);
-      background: var(--blue); color: #fff; border: none; cursor: pointer; transition: opacity 0.15s; flex-shrink: 0;
+      background: var(--blue); color: #fff; border: none; cursor: pointer; transition: all 0.2s; flex-shrink: 0;
+      box-shadow: 0 2px 6px rgba(10,132,255,0.3);
     }
-    .test-run-btn:hover { opacity: 0.85; }
-    .test-run-btn.running { opacity: 0.6; cursor: not-allowed; }
+    .test-run-btn:hover { opacity: 0.9; transform: translateY(-1px); box-shadow: 0 4px 10px rgba(10,132,255,0.4); }
+    .test-run-btn:active { transform: scale(0.96) translateY(0); box-shadow: 0 2px 4px rgba(10,132,255,0.3); }
+    .test-run-btn.running { opacity: 0.6; cursor: not-allowed; transform: none; box-shadow: none; }
     .ws-btn {
       padding: 7px 14px; font-size: 12px; font-weight: 600; border-radius: var(--r-sm);
       border: 1px solid var(--border-default); color: var(--text-secondary); background: transparent;
@@ -353,17 +390,22 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     /* ── MODAL ── */
     #modal-overlay {
       position: fixed; inset: 0; z-index: 200;
-      background: rgba(0,0,0,0.65); backdrop-filter: blur(8px);
+      background: rgba(0,0,0,0.65); backdrop-filter: blur(12px);
       display: flex; align-items: center; justify-content: center; padding: 20px;
+      animation: overlayIn 0.3s var(--ease-out) forwards;
+    }
+    @keyframes overlayIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
     }
     .modal {
-      background: var(--bg-modal); border: 1px solid var(--border-bright);
+      background: var(--bg-modal); border: 1px solid rgba(255,255,255,0.1);
       border-radius: var(--r-2xl); width: 100%; max-width: 520px;
-      box-shadow: var(--shadow-xl); overflow: hidden;
-      animation: modalIn 0.28s var(--ease-out) forwards;
+      box-shadow: 0 0 0 1px rgba(255,255,255,0.05), var(--shadow-xl); overflow: hidden;
+      animation: modalIn 0.4s var(--ease-spring) forwards;
     }
     @keyframes modalIn {
-      from { opacity: 0; transform: scale(0.94) translateY(12px); }
+      from { opacity: 0; transform: scale(0.92) translateY(20px); }
       to { opacity: 1; transform: scale(1) translateY(0); }
     }
     .modal-header {
@@ -409,15 +451,15 @@ export const ADMIN_HTML = `<!DOCTYPE html>
     #toast-stack { position: fixed; bottom: 24px; right: 24px; display: flex; flex-direction: column; gap: 8px; z-index: 500; pointer-events: none; }
     .toast {
       padding: 12px 16px; border-radius: var(--r-md); font-size: 13px; font-weight: 500;
-      box-shadow: var(--shadow-lg); backdrop-filter: blur(20px);
-      animation: toastIn 0.25s var(--ease-spring) forwards;
-      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4), 0 0 0 1px rgba(255,255,255,0.05); backdrop-filter: blur(24px) saturate(150%);
+      animation: toastIn 0.4s var(--ease-spring) forwards;
+      border: 1px solid rgba(255,255,255,0.12);
     }
-    .toast-success { background: rgba(30,62,28,0.94); color: var(--green); }
-    .toast-error { background: rgba(62,20,18,0.94); color: var(--red); }
-    .toast-info { background: rgba(12,30,60,0.94); color: var(--blue); }
-    @keyframes toastIn { from { opacity: 0; transform: translateY(12px) scale(0.96); } to { opacity: 1; transform: translateY(0) scale(1); } }
-    @keyframes toastOut { to { opacity: 0; transform: translateY(8px) scale(0.95); } }
+    .toast-success { background: rgba(48,209,88,0.15); color: var(--green); border-color: rgba(48,209,88,0.3); }
+    .toast-error { background: rgba(255,69,58,0.15); color: var(--red); border-color: rgba(255,69,58,0.3); }
+    .toast-info { background: rgba(10,132,255,0.15); color: var(--blue); border-color: rgba(10,132,255,0.3); }
+    @keyframes toastIn { from { opacity: 0; transform: translateX(30px) scale(0.96); } to { opacity: 1; transform: translateX(0) scale(1); } }
+    @keyframes toastOut { to { opacity: 0; transform: translateX(30px) scale(0.96); } }
 
     @media (max-width: 768px) {
       .stats-grid { grid-template-columns: repeat(2, 1fr); }
