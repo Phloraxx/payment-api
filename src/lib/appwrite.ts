@@ -245,13 +245,13 @@ export class AppwriteService {
       const candidates = await this.listRecentPendingTickets(100);
       const now = Date.now();
       const FIVE_MIN_MS = 5 * 60 * 1000;
+      const cutoff = now - FIVE_MIN_MS;
       const decimalsAllocated: number[] = [];
       let cancellationsLeft = 5; // Limit concurrent background cancellations
 
       for (const ticket of candidates) {
         // Check if within 5 minute window
-        const ticketTime = new Date(ticket.createdAt).getTime();
-        if (now - ticketTime > FIVE_MIN_MS) {
+        if (Date.parse(ticket.createdAt) < cutoff) {
           // --- Lazy Cancellation Check ---
           // Limit background updates to avoid Cloudflare "Too many subrequests" error
           if (cancellationsLeft > 0) {
