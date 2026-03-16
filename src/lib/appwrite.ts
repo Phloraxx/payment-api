@@ -140,6 +140,23 @@ export class AppwriteService {
     }
   }
 
+  /**
+   * Mark a ticket as cancelled.
+   */
+  async cancelTicket(id: string) {
+    try {
+      return await this.databases.updateDocument<TicketDocument>(
+        this.env.APPWRITE_DATABASE_ID,
+        this.env.APPWRITE_COLLECTION_ID,
+        id,
+        { status: "cancelled" },
+      );
+    } catch (error) {
+      console.error("Appwrite cancelTicket error:", error);
+      throw error;
+    }
+  }
+
   async getTicketStatus(ticketId: string) {
     try {
       // Use getDocument directly since ticketId is mapped to document $id
@@ -162,14 +179,9 @@ export class AppwriteService {
         if (Date.now() - ticketTime > FIVE_MIN_MS) {
           currentStatus = "cancelled";
           // Fire-and-forget update to clean the database
-          this.databases
-            .updateDocument(
-              this.env.APPWRITE_DATABASE_ID,
-              this.env.APPWRITE_COLLECTION_ID,
-              doc.$id,
-              { status: "cancelled" },
-            )
-            .catch((err) => console.error("Lazy cancel DB update error:", err));
+          this.cancelTicket(doc.$id).catch((err) =>
+            console.error("Lazy cancel DB update error:", err),
+          );
         }
       }
 
@@ -271,19 +283,12 @@ export class AppwriteService {
                   ),
                 );
             } else {
-              this.databases
-                .updateDocument(
-                  this.env.APPWRITE_DATABASE_ID,
-                  this.env.APPWRITE_COLLECTION_ID,
-                  ticket.id,
-                  { status: "cancelled" },
-                )
-                .catch((err) =>
-                  console.log(
-                    "Lazy cancel batch error (ignorable):",
-                    err.message,
-                  ),
-                );
+              this.cancelTicket(ticket.id).catch((err) =>
+                console.log(
+                  "Lazy cancel batch error (ignorable):",
+                  err.message,
+                ),
+              );
             }
           }
           continue;
