@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { upgradeWebSocket } from "hono/cloudflare-workers";
-import { AppwriteService, Env, toCents } from "./lib/appwrite";
+import { AppwriteService, AdminUpdateFields, Env, toCents } from "./lib/appwrite";
+import { ADMIN_HTML } from "./admin-html";
 import { EmailParser } from "./lib/emailParser";
 
 // Temporary in-memory lock to prevent exact same decimal allocation on the same Edge node
@@ -20,6 +21,15 @@ function timingSafeEqual(a: string, b: string): boolean {
         result |= a.charCodeAt(i) ^ b.charCodeAt(i);
     }
     return result === 0;
+}
+
+async function requireAdminAuth(c: any, next: any) {
+    const password = c.req.header("X-Admin-Password") || "";
+    const adminPassword: string = (c.env as Env).ADMIN_PASSWORD || "";
+    if (!adminPassword || !timingSafeEqual(password, adminPassword)) {
+        return c.json({ error: "Unauthorized" }, 401);
+    }
+    return next();
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -630,6 +640,246 @@ app.get("/api/ws", async (c) => {
     c.executionCtx?.waitUntil(upstreamReady);
 
     return new Response(null, { status: 101, webSocket: client });
+});
+
+// ---------------------------------------------------------------------------
+// GET /admin  — Admin Dashboard HTML
+// ---------------------------------------------------------------------------
+app.get("/admin", (c) => {
+    return c.html(ADMIN_HTML);
+});
+
+// ---------------------------------------------------------------------------
+// ADMIN API — all routes protected by X-Admin-Password header
+// ---------------------------------------------------------------------------
+
+// GET /api/admin/tickets?page=0&pageSize=10&search=X&status=paid&dateFrom=2024-01-01&dateTo=2024-01-31
+app.get("/api/admin/tickets", requireAdminAuth, async (c) => {
+    try {
+        const page     = Math.max(0, parseInt(c.req.query("page") || "0"));
+        const pageSize = Math.min(Math.max(1, parseInt(c.req.query("pageSize") || "10")), 100);
+        const search   = (c.req.query("search") || "").toLowerCase().trim();
+        const statusFilter = c.req.query("status") || "";
+        const dateFrom = c.req.query("dateFrom") || "";
+        const dateTo   = c.req.query("dateTo") || "";
+
+        // Convert date strings to ISO bounds (treat as UTC)
+        const isoFrom = dateFrom ? new Date(dateFrom + "T00:00:00.000Z").toISOString() : undefined;
+        const isoTo   = dateTo   ? new Date(dateTo   + "T23:59:59.999Z").toISOString() : undefined;
+
+        const appwrite = new AppwriteService(c.env);
+        let tickets = await appwrite.listAllTickets({
+            statusFilter: statusFilter || undefined,
+            dateFrom: isoFrom,
+            dateTo: isoTo,
+        });
+
+        // Text search in memory (no full-text index required)
+        if (search) {
+            tickets = tickets.filter((t) =>
+                t.ticketId.toLowerCase().includes(search) ||
+                (t.senderName || "").toLowerCase().includes(search) ||
+                (t.upiId || "").toLowerCase().includes(search) ||
+                (t.rrn || "").toLowerCase().includes(search) ||
+                t.amount.toString().includes(search)
+            );
+        }
+
+        const total     = tickets.length;
+        const paid      = tickets.filter((t) => t.status === "paid").length;
+        const pending   = tickets.filter((t) => t.status === "pending").length;
+        const cancelled = tickets.filter((t) => t.status === "cancelled").length;
+
+        const start      = page * pageSize;
+        const pageSlice  = tickets.slice(start, start + pageSize);
+        const hasMore    = start + pageSize < total;
+
+        return c.json({
+            tickets: pageSlice,
+            stats:   { total, paid, pending, cancelled },
+            hasMore,
+            page,
+            pageSize,
+        });
+    } catch (error) {
+        console.error("Admin list tickets error:", error);
+        return c.json({ error: "Internal Server Error" }, 500);
+    }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/admin/ws  — Admin collection-wide realtime WebSocket
+// Auth via ?pw= query param (WebSocket clients cannot send custom headers)
+// ---------------------------------------------------------------------------
+app.get("/api/admin/ws", async (c) => {
+    const pw = c.req.query("pw") || "";
+    const adminPassword: string = (c.env as Env).ADMIN_PASSWORD || "";
+    if (!adminPassword || !timingSafeEqual(pw, adminPassword)) {
+        return c.text("Unauthorized", 401);
+    }
+
+    const pair   = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+    server.accept();
+
+    let upstreamWs: WebSocket | null = null;
+    let closing = false;
+
+    const safeCloseAll = () => {
+        if (closing) return;
+        closing = true;
+        try { server.close(); } catch { /* ignore */ }
+        try { upstreamWs?.close(); } catch { /* ignore */ }
+    };
+
+    server.addEventListener("close", safeCloseAll);
+    server.addEventListener("error", safeCloseAll);
+    server.addEventListener("message", (event) => {
+        try { if (event.data === "ping") server.send("pong"); } catch { /* ignore */ }
+    });
+
+    const appwriteHost = c.env.APPWRITE_ENDPOINT.replace(/^https?:\/\//, "").split("/")[0];
+    // Subscribe to all document events in the payment collection
+    const channel = `databases.${c.env.APPWRITE_DATABASE_ID}.collections.${c.env.APPWRITE_COLLECTION_ID}.documents`;
+    const appwriteWsUrl = `wss://${appwriteHost}/v1/realtime?project=${c.env.APPWRITE_PROJECT_ID}&channels[]=${encodeURIComponent(channel)}`;
+
+    const upstreamReady = fetch(appwriteWsUrl.replace("wss://", "https://"), {
+        headers: {
+            Upgrade: "websocket",
+            "X-Appwrite-Project": c.env.APPWRITE_PROJECT_ID,
+            "X-Appwrite-Key": c.env.APPWRITE_API_KEY,
+        },
+    })
+        .then((res) => {
+            const ws = res.webSocket;
+            if (!ws) throw new Error("Appwrite admin WS handshake failed");
+            ws.accept();
+            upstreamWs = ws;
+            return ws;
+        })
+        .then((ws) => {
+            ws.addEventListener("message", (msg) => {
+                try {
+                    const envelope = JSON.parse(msg.data as string);
+                    if (envelope?.type !== "event") return;
+
+                    const doc    = envelope?.data?.payload;
+                    if (!doc) return;
+
+                    // Filter out internal lock documents
+                    if (doc.ticketId?.startsWith("lock_")) return;
+
+                    const events: string[] = envelope?.data?.events || [];
+                    let action = "update";
+                    if (events.some((e: string) => e.endsWith(".create"))) action = "create";
+                    else if (events.some((e: string) => e.endsWith(".delete"))) action = "delete";
+
+                    server.send(JSON.stringify({
+                        type: "ticket_update",
+                        action,
+                        ticket: {
+                            id:         doc.$id,
+                            ticketId:   doc.ticketId,
+                            amount:     doc.amount,
+                            status:     doc.status,
+                            createdAt:  doc.$createdAt,
+                            senderName: doc.senderName ?? null,
+                            rrn:        doc.rrn ?? null,
+                            paidAt:     doc.paidAt ?? null,
+                            upiId:      doc.upiId ?? null,
+                        },
+                    }));
+                } catch { /* ignore parse errors */ }
+            });
+            ws.addEventListener("close", safeCloseAll);
+            ws.addEventListener("error", safeCloseAll);
+        })
+        .catch((err) => {
+            console.error(`[ADMIN-WS] Upstream fatal: ${err}`);
+            safeCloseAll();
+        });
+
+    c.executionCtx?.waitUntil(upstreamReady);
+    return new Response(null, { status: 101, webSocket: client });
+});
+
+// POST /api/admin/tickets/:id/mark-paid  (must be before /:id GET/PATCH to avoid route conflict)
+app.post("/api/admin/tickets/:id/mark-paid", requireAdminAuth, async (c) => {
+    try {
+        const id = c.req.param("id");
+        const body = await c.req.json().catch(() => ({})) as Record<string, string>;
+        const fields: AdminUpdateFields = {
+            status: "paid",
+            paidAt: new Date().toISOString(),
+        };
+        if (body.senderName) fields.senderName = body.senderName;
+        if (body.rrn)        fields.rrn = body.rrn;
+        if (body.upiId)      fields.upiId = body.upiId;
+
+        const appwrite = new AppwriteService(c.env);
+        const updated = await appwrite.updateTicket(id, fields);
+        if (!updated) return c.json({ error: "Update failed" }, 500);
+        return c.json(updated);
+    } catch (error) {
+        console.error("Admin mark-paid error:", error);
+        return c.json({ error: "Internal Server Error" }, 500);
+    }
+});
+
+// POST /api/admin/tickets/:id/cancel
+app.post("/api/admin/tickets/:id/cancel", requireAdminAuth, async (c) => {
+    try {
+        const id = c.req.param("id");
+        const appwrite = new AppwriteService(c.env);
+        const updated = await appwrite.updateTicket(id, { status: "cancelled" });
+        if (!updated) return c.json({ error: "Update failed" }, 500);
+        return c.json(updated);
+    } catch (error) {
+        console.error("Admin cancel error:", error);
+        return c.json({ error: "Internal Server Error" }, 500);
+    }
+});
+
+// GET /api/admin/tickets/:id
+app.get("/api/admin/tickets/:id", requireAdminAuth, async (c) => {
+    try {
+        const id = c.req.param("id");
+        const appwrite = new AppwriteService(c.env);
+        const ticket = await appwrite.getTicketStatus(id);
+        if (!ticket) return c.json({ error: "Not found" }, 404);
+        return c.json(ticket);
+    } catch (error) {
+        console.error("Admin get ticket error:", error);
+        return c.json({ error: "Internal Server Error" }, 500);
+    }
+});
+
+// PATCH /api/admin/tickets/:id
+app.patch("/api/admin/tickets/:id", requireAdminAuth, async (c) => {
+    try {
+        const id = c.req.param("id");
+        let body: Record<string, unknown>;
+        try {
+            body = await c.req.json();
+        } catch {
+            return c.json({ error: "Invalid JSON body" }, 400);
+        }
+
+        const allowedKeys = ["status", "senderName", "rrn", "upiId", "amount", "paidAt"];
+        const fields: AdminUpdateFields = {};
+        for (const key of allowedKeys) {
+            if (key in body) (fields as any)[key] = body[key];
+        }
+
+        const appwrite = new AppwriteService(c.env);
+        const updated = await appwrite.updateTicket(id, fields);
+        if (!updated) return c.json({ error: "Update failed or no fields provided" }, 400);
+        return c.json(updated);
+    } catch (error) {
+        console.error("Admin patch ticket error:", error);
+        return c.json({ error: "Internal Server Error" }, 500);
+    }
 });
 
 export default {
