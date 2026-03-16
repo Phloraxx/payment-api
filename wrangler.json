@@ -14,6 +14,7 @@
         "APPWRITE_DATABASE_ID": "697522750025b8e28c32",
         "APPWRITE_ENDPOINT": "https://backend.mulearnscet.in/v1",
         "APPWRITE_PROJECT_ID": "6948e3640018a902b864",
-        "WEBHOOK_SECRET": "Chamaka123@@"
+        "WEBHOOK_SECRET": "Chamaka123@@",
+        "ADMIN_PASSWORD": "IEEE@Sahrdaya"
     }
-}
+}

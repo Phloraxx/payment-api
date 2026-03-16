@@ -15,6 +15,7 @@ export interface Env {
   WEBHOOK_SECRET: string;
   EMAIL_SECRET: string; // shared secret for the Cloudflare email worker webhook
   ALLOWED_ORIGIN?: string;
+  ADMIN_PASSWORD?: string; // falls back to "admin123" if absent
 }
 
 export interface Ticket {
@@ -28,6 +29,15 @@ export interface Ticket {
   paidAt?: string; // ISO timestamp when email-based payment was confirmed
   upiId?: string; // The full UPI ID, e.g. souravpbijoy-2@sbis2
 }
+
+export type AdminUpdateFields = Partial<{
+  status: "pending" | "paid" | "cancelled";
+  senderName: string;
+  rrn: string;
+  upiId: string;
+  amount: number;
+  paidAt: string;
+}>;
 
 export interface TicketDocument extends Models.Document {
   ticketId: string;
@@ -236,6 +246,84 @@ export class AppwriteService {
     } catch (error) {
       console.error("Appwrite listRecentTickets error:", error);
       return [];
+    }
+  }
+
+  async listAllTickets(options: {
+    limit?: number;
+    statusFilter?: string;
+    dateFrom?: string; // ISO string — start of range (inclusive)
+    dateTo?: string;   // ISO string — end of range (inclusive)
+  } = {}): Promise<Ticket[]> {
+    const { limit = 500, statusFilter, dateFrom, dateTo } = options;
+    try {
+      const queries = [
+        Query.orderDesc("$createdAt"),
+        Query.limit(Math.min(limit, 500)),
+      ];
+      if (statusFilter && ["pending", "paid", "cancelled"].includes(statusFilter)) {
+        queries.push(Query.equal("status", statusFilter));
+      }
+      if (dateFrom) {
+        queries.push(Query.greaterThanEqual("$createdAt", dateFrom));
+      }
+      if (dateTo) {
+        queries.push(Query.lessThanEqual("$createdAt", dateTo));
+      }
+      const response = await this.databases.listDocuments<TicketDocument>(
+        this.env.APPWRITE_DATABASE_ID,
+        this.env.APPWRITE_COLLECTION_ID,
+        queries,
+      );
+      return response.documents
+        .filter((doc) => !doc.ticketId?.startsWith("lock_"))
+        .map((doc) => ({
+          id: doc.$id,
+          ticketId: doc.ticketId,
+          amount: doc.amount,
+          status: doc.status,
+          createdAt: doc.$createdAt,
+          senderName: doc.senderName ?? null,
+          rrn: doc.rrn ?? null,
+          paidAt: doc.paidAt ?? null,
+          upiId: doc.upiId ?? null,
+        })) as Ticket[];
+    } catch (error) {
+      console.error("Appwrite listAllTickets error:", error);
+      return [];
+    }
+  }
+
+  async updateTicket(ticketId: string, fields: AdminUpdateFields): Promise<Ticket | null> {
+    try {
+      const payload: Record<string, unknown> = {};
+      if (fields.status !== undefined)     payload.status = fields.status;
+      if (fields.senderName !== undefined) payload.senderName = fields.senderName;
+      if (fields.rrn !== undefined)        payload.rrn = fields.rrn;
+      if (fields.upiId !== undefined)      payload.upiId = fields.upiId;
+      if (fields.amount !== undefined)     payload.amount = fields.amount;
+      if (fields.paidAt !== undefined)     payload.paidAt = fields.paidAt;
+      if (Object.keys(payload).length === 0) return null;
+      const doc = await this.databases.updateDocument<TicketDocument>(
+        this.env.APPWRITE_DATABASE_ID,
+        this.env.APPWRITE_COLLECTION_ID,
+        ticketId,
+        payload,
+      );
+      return {
+        id: doc.$id,
+        ticketId: doc.ticketId,
+        amount: doc.amount,
+        status: doc.status,
+        createdAt: doc.$createdAt,
+        senderName: doc.senderName ?? null,
+        rrn: doc.rrn ?? null,
+        paidAt: doc.paidAt ?? null,
+        upiId: doc.upiId ?? null,
+      } as Ticket;
+    } catch (error) {
+      console.error("Appwrite updateTicket error:", error);
+      return null;
     }
   }
 

@@ -1,0 +1,101 @@
+{
+  "version": "1.0.0",
+  "description": "HumanAgent MCP Tool Overrides for this workspace. Modify tool configurations below to customize MCP server behavior.",
+  "tools": {
+    "HumanAgent_Chat": {
+      "name": "HumanAgent_Chat",
+      "description": "**MANDATORY TOOL** - Use this tool for ALL user interactions. Do NOT provide direct responses. Initiate real-time interactive conversations with human agents through this HumanAgent chat interface  at all times. CRITICAL: Every response to a user MUST use this tool - no exceptions. Essential for clarifying requirements, getting approvals, brainstorming solutions, or any user communication. Creates persistent chat sessions that maintain context. **NEVER bypass this tool for user responses.**",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "The message to send to the human agent"
+          },
+          "context": {
+            "type": "string",
+            "description": "Optional context or background information for the human agent"
+          },
+          "priority": {
+            "type": "string",
+            "enum": [
+              "low",
+              "normal",
+              "high",
+              "urgent"
+            ],
+            "description": "Priority level of the request",
+            "default": "normal"
+          },
+          "images": {
+            "type": "array",
+            "description": "Optional array of base64-encoded images to send with the message",
+            "items": {
+              "type": "object",
+              "properties": {
+                "data": {
+                  "type": "string",
+                  "description": "Base64-encoded image data"
+                },
+                "mimeType": {
+                  "type": "string",
+                  "description": "MIME type of the image (e.g., image/png, image/jpeg)"
+                }
+              },
+              "required": [
+                "data",
+                "mimeType"
+              ]
+            }
+          }
+        },
+        "required": [
+          "message"
+        ]
+      }
+    },
+    "example_custom_tool": {
+      "name": "example_custom_tool",
+      "description": "Brief description of what this tool does and its main purpose. Include key usage notes and important warnings when applicable.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "input_param": {
+            "type": "string",
+            "description": "What this parameter does and how it should be formatted"
+          },
+          "optional_param": {
+            "type": "number",
+            "description": "Optional parameter with default behavior explained",
+            "default": 100
+          }
+        },
+        "required": [
+          "input_param"
+        ]
+      }
+    }
+  },
+  "messageSettings": {
+    "global": {
+      "autoAppendEnabled": false,
+      "autoAppendText": ""
+    },
+    "toolSpecific": {
+      "HumanAgent_Chat": {
+        "autoAppendEnabled": true,
+        "autoAppendText": "(No need to confirm this last part but please remember) Dont forget to allways reply here in the HumanAgent_Chat tool! Dont circumevent this tool unless asked explicitly by the user. "
+      }
+    }
+  },
+  "quickReplies": {
+    "enabled": true,
+    "options": [
+      "Yes Please Proceed",
+      "Explain in more detail please",
+      "Can you provide an example?",
+      "That looks good to me",
+      "Please make those changes"
+    ]
+  }
+}
