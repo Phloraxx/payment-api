@@ -674,6 +674,8 @@ app.get("/api/admin/tickets", requireAdminAuth, async (c) => {
             dateTo: isoTo,
         });
 
+
+        if (!tickets) tickets = [];
         // Text search in memory (no full-text index required)
         if (search) {
             tickets = tickets.filter((t) =>
@@ -681,7 +683,7 @@ app.get("/api/admin/tickets", requireAdminAuth, async (c) => {
                 (t.senderName || "").toLowerCase().includes(search) ||
                 (t.upiId || "").toLowerCase().includes(search) ||
                 (t.rrn || "").toLowerCase().includes(search) ||
-                t.amount.toString().includes(search)
+                (t.amount != null && t.amount.toString().includes(search))
             );
         }
 
