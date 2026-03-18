@@ -249,7 +249,7 @@ app.post("/api/webhook", async (c) => {
 
                 const now = Date.now();
                 const FIVE_MIN_MS = 5 * 60 * 1000;
-                const cutoff = now - FIVE_MIN_MS;
+                const cutoffIso = new Date(now - FIVE_MIN_MS).toISOString();
 
                 let matchedTicket = null;
                 let matchedTicketId = null;
@@ -257,7 +257,7 @@ app.post("/api/webhook", async (c) => {
                 for (const ticket of candidates) {
                     if (ticket.ticketId.startsWith("lock_")) continue;
 
-                    if (Date.parse(ticket.createdAt) < cutoff) continue;
+                    if (ticket.createdAt < cutoffIso) continue;
 
                     const numericPart = ticket.ticketId.replace(/^TICKET/i, "");
                     const ticketSuffix = parseInt(numericPart.slice(-2), 10);
@@ -419,7 +419,7 @@ app.post("/api/email-webhook", async (c) => {
 
         const now = Date.now();
         const FIVE_MIN_MS = 5 * 60 * 1000;
-        const cutoff = now - FIVE_MIN_MS;
+        const cutoffIso = new Date(now - FIVE_MIN_MS).toISOString();
 
         let matchedTicket:
             | Awaited<ReturnType<typeof appwrite.listRecentPendingTickets>>[0]
@@ -431,7 +431,7 @@ app.post("/api/email-webhook", async (c) => {
             if (ticket.ticketId.startsWith("lock_")) continue;
 
             // ── 6. 5-minute window check ─────────────────────────────────────
-            if (Date.parse(ticket.createdAt) < cutoff) {
+            if (ticket.createdAt < cutoffIso) {
                 console.log(
                     `Ticket ${ticket.ticketId}: outside 5 - minute window, skipping`,
                 );
