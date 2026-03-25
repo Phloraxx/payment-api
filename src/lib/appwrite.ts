@@ -348,6 +348,7 @@ export class AppwriteService {
       const cutoffIso = new Date(now - FIVE_MIN_MS).toISOString();
       const decimalsAllocated: number[] = [];
       let cancellationsLeft = 5; // Limit concurrent background cancellations
+      const cancellationPromises: Promise<any>[] = [];
 
       for (const ticket of candidates) {
         // Check if within 5 minute window
@@ -358,23 +359,27 @@ export class AppwriteService {
             cancellationsLeft--;
 
             if (ticket.ticketId.startsWith("lock_")) {
-              this.databases
-                .deleteDocument(
-                  this.env.APPWRITE_DATABASE_ID,
-                  this.env.APPWRITE_COLLECTION_ID,
-                  ticket.id,
-                )
-                .catch((err) =>
+              cancellationPromises.push(
+                this.databases
+                  .deleteDocument(
+                    this.env.APPWRITE_DATABASE_ID,
+                    this.env.APPWRITE_COLLECTION_ID,
+                    ticket.id,
+                  )
+                  .catch((err) =>
+                    console.log(
+                      "Lazy cancel batch error (ignorable):",
+                      err.message,
+                    ),
+                  ),
+              );
+            } else {
+              cancellationPromises.push(
+                this.cancelTicket(ticket.id).catch((err) =>
                   console.log(
                     "Lazy cancel batch error (ignorable):",
                     err.message,
                   ),
-                );
-            } else {
-              this.cancelTicket(ticket.id).catch((err) =>
-                console.log(
-                  "Lazy cancel batch error (ignorable):",
-                  err.message,
                 ),
               );
             }
@@ -387,6 +392,11 @@ export class AppwriteService {
           const decPart = Math.round((ticket.amount - baseAmount) * 100);
           decimalsAllocated.push(decPart);
         }
+      }
+
+      // Parallelize background cancellations and await them together
+      if (cancellationPromises.length > 0) {
+        await Promise.all(cancellationPromises);
       }
 
       return decimalsAllocated;
