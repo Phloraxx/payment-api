@@ -1,10 +1,10 @@
-# 💳 Stateless UPI Payment Gateway API
+# Stateless UPI Payment Gateway API
 
 A high-performance, stateless, and secure payment gateway PoC built on **Cloudflare Workers** (Hono) and **Appwrite**. Designed for high-concurrency event registration where traditional payment gateway fees or infrastructure costs are a barrier.
 
 ---
 
-## 🚀 Unique Features
+## Unique Features
 
 ### 1. Dynamic Decimal Matching (DDM)
 
@@ -30,7 +30,7 @@ Zero-cost cleanup of expired tickets.
 
 ---
 
-## 🔒 Security Architecture
+## Security Architecture
 
 ### Edge-Proxied WebSockets (Zero Backend Exposure)
 
@@ -43,7 +43,7 @@ Most Appwrite implementations use collection-level permissions which are insecur
 
 ---
 
-## 📡 API Reference
+## API Reference
 
 ### 1. Create Payment Ticket
 
@@ -68,7 +68,7 @@ Most Appwrite implementations use collection-level permissions which are insecur
 
 ---
 
-## ⚡ Frontend Integration Pattern
+## Frontend Integration Pattern
 
 The frontend heavily relies on Cloudflare's Edge WebSockets. You do **not** need the Appwrite SDK on the frontend.
 
@@ -110,7 +110,7 @@ async function startPayment() {
 
 ---
 
-## 🛠️ Environment Setup
+## Environment Setup
 
 Required variables for the Worker (`.dev.vars` or Wrangler:
 
@@ -121,7 +121,7 @@ Required variables for the Worker (`.dev.vars` or Wrangler:
 
 ---
 
-## 🚀 Deployment
+## Deployment
 
 ```bash
 npx wrangler deploy
@@ -129,4 +129,4 @@ npx wrangler deploy
 
 ---
 
-_Built with ❤️ for Mulearn SCET & IEEESahrdaya_
+_Built for Mulearn SCET & IEEESahrdaya_
