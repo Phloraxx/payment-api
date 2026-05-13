@@ -15,7 +15,7 @@ export interface Env {
   WEBHOOK_SECRET: string;
   EMAIL_SECRET: string; // shared secret for the Cloudflare email worker webhook
   ALLOWED_ORIGIN?: string;
-  ADMIN_PASSWORD?: string; // falls back to "admin123" if absent
+  ADMIN_PASSWORD?: string; // admin password for dashboard auth
 }
 
 export interface Ticket {

@@ -651,7 +651,7 @@ Test Sender paid you &#8377;500</textarea>
             <div class="autofill-hint" id="hint-email"></div>
             <div class="test-field">
               <div class="test-field-label">Email Secret</div>
-              <input class="test-input" id="te-secret" type="text" value="your-email-secret">
+              <input class="test-input" id="te-secret" type="text" placeholder="your-email-secret">
             </div>
             <div class="test-field">
               <div class="test-field-label">From</div>

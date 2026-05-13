@@ -56,7 +56,7 @@ function connectProxyWs(wsBaseUrl, ticketId) {
 }
 
 async function simulatePaymentViaWebhook(baseUrl, ticketId, amount) {
-  const secret = process.env.WEBHOOK_SECRET || "REDACTED";
+  const secret = process.env.WEBHOOK_SECRET || "<your-webhook-secret>";
   const numeric = ticketId.replace(/^TICKET/i, "").trim();
   const body = `TICKET${numeric} SOURAV paid you ₹${amount}`;
 

@@ -81,7 +81,7 @@ async function startPayment() {
 
   // 1. Fetch current state (Stateless Resume)
   const res = await fetch(
-    `https://payment-api.nerdpixel.workers.dev/api/status/${ticketId}`,
+    `/api/status/${ticketId}`,
   );
   const data = await res.json();
 
@@ -93,7 +93,7 @@ async function startPayment() {
   renderQR(upiStr);
 
   // 3. Connect to the Cloudflare WebSocket Proxy
-  const wsUrl = `wss://payment-api.nerdpixel.workers.dev/api/ws?ticketId=${ticketId}`;
+  const wsUrl = `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/api/ws?ticketId=${ticketId}`;
   const socket = new WebSocket(wsUrl);
 
   socket.onmessage = (event) => {

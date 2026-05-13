@@ -531,7 +531,7 @@ app.get("/api/status/:id", async (c) => {
 // 🌟 SECURE WEBSOCKET PROXY (CLOUDFLARE -> APPWRITE REALTIME)
 // Prevents frontend from connecting directly to the database.
 //
-// Endpoint: wss://payment-api.nerdpixel.workers.dev/api/ws?ticketId=TICKET...
+// Endpoint: wss://<your-worker>/api/ws?ticketId=TICKET...
 // ---------------------------------------------------------------------------
 app.get("/api/ws", async (c) => {
     const ticketId = (c.req.query("ticketId") || "").trim();

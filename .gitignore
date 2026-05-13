@@ -44,6 +44,12 @@ next-env.d.ts
 .dev.vars
 .wrangler
 
+# build artifacts
+/dist
+
+# test files
+test*.js
+
 # logs & test output
 *.log
 e2e_error.txt

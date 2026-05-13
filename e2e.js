@@ -1,6 +1,8 @@
 const WebSocket = require("ws");
 
-fetch("https://payment-api.nerdpixel.workers.dev/api/ticket", {
+const BASE_URL = process.env.E2E_BASE_URL || "http://localhost:8787";
+
+fetch(`${BASE_URL}/api/ticket`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ amount: 100 }),
@@ -9,7 +11,7 @@ fetch("https://payment-api.nerdpixel.workers.dev/api/ticket", {
     .then((data) => {
         console.log("Created Ticket:", data);
 
-        const wsUrl = "wss://payment-api.nerdpixel.workers.dev/api/ws?ticketId=" + data.ticketId;
+        const wsUrl = `${BASE_URL.replace("http", "ws").replace("https", "wss")}/api/ws?ticketId=${data.ticketId}`;
         console.log("Connecting to WebSocket:", wsUrl);
         const ws = new WebSocket(wsUrl);
 
@@ -22,7 +24,7 @@ fetch("https://payment-api.nerdpixel.workers.dev/api/ticket", {
                     body: `TICKET${data.ticketId.replace("TICKET", "").trim()} SOURAV paid you ₹${data.amount}`,
                 };
                 console.log("Firing webhook payload:", payload);
-                fetch("https://payment-api.nerdpixel.workers.dev/api/webhook", {
+                fetch(`${BASE_URL}/api/webhook`, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload),
