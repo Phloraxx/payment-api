@@ -43,3 +43,10 @@ next-env.d.ts
 
 .dev.vars
 .wrangler
+
+# logs & test output
+*.log
+e2e_error.txt
+test-out.txt
+mail.txt
+e2e_log*.txt

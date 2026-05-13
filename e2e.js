@@ -18,7 +18,7 @@ fetch("https://payment-api.nerdpixel.workers.dev/api/ticket", {
 
             setTimeout(() => {
                 const payload = {
-                    secret_key: "REDACTED",
+                    secret_key: process.env.WEBHOOK_SECRET,
                     body: `TICKET${data.ticketId.replace("TICKET", "").trim()} SOURAV paid you ₹${data.amount}`,
                 };
                 console.log("Firing webhook payload:", payload);
