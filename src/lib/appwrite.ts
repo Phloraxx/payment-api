@@ -434,7 +434,7 @@ export class AppwriteService {
           if (Date.now() - lockTime > 5 * 60 * 1000) {
             try {
               await this.releaseDatabaseLock(baseAmount, decimal);
-            } catch (e) { } // best effort release
+            } catch (e) { /* best effort release */ }
 
             // Retry lock acquisition
             return await this.claimDatabaseLock(baseAmount, decimal);

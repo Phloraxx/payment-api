@@ -855,6 +855,7 @@ var Util = {
   },
   colorizeJson: function(obj) {
     var json = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+    json = json.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     return json.split('\\n').map(function(line) {
       // Key: leading "word":
       line = line.replace(/^(\s*)("(?:[^"]*)")(\s*:)/, function(m, sp, k, c) {

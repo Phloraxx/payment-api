@@ -35,7 +35,7 @@ async function requireAdminAuth(c: any, next: any) {
 const app = new Hono<{ Bindings: Env }>();
 
 app.use("/*", async (c, next) => {
-    const allowedOrigin = c.env.ALLOWED_ORIGIN || "*";
+    const allowedOrigin = c.env.ALLOWED_ORIGIN || "";
     const corsMiddleware = cors({
         origin: allowedOrigin.includes(",") ? allowedOrigin.split(",") : allowedOrigin,
     });
