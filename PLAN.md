@@ -53,7 +53,7 @@ A zero-fee UPI payment gateway for college events using **Dynamic Decimal Matchi
 | WebSocket | **@fastify/websocket** | In-process pub/sub per ticket room |
 | Validation | **TypeBox** | Schema → JSON Schema → validation + TypeScript types |
 | Logging | **Pino** (Fastify default) | Structured JSON, fast, SQLite + WS stream |
-| Admin auth | **JWT** in signed HttpOnly cookie via `@fastify/cookie` | Stateless, XSS-proof, WS-compatible |
+| Admin auth | **Passkey (WebAuthn)** via `@simplewebauthn/server` + session cookie via `@fastify/cookie` | Biometric/PIN login. No password to leak, no brute-force. Cookie set after successful WebAuthn assertion. |
 | Admin UI | **React + Vite + TypeScript** | Build step → static files served by Fastify |
 | Container | **Docker** + Portainer | Portainer webhook for CI/CD |
 | Testing | **Vitest** | Fast, native ESM |
@@ -90,6 +90,22 @@ CREATE INDEX idx_tickets_status   ON tickets(status);
 CREATE INDEX idx_tickets_amount   ON tickets(amount);
 CREATE INDEX idx_tickets_rrn      ON tickets(rrn);
 CREATE INDEX idx_tickets_decimal  ON tickets(base_amount, decimal_val, status);
+
+CREATE TABLE authenticators (
+    id          TEXT PRIMARY KEY,           -- Base64URL credential ID
+    public_key  TEXT NOT NULL,              -- Base64URL public key (COSEPublicKey)
+    counter     INTEGER NOT NULL DEFAULT 0, -- Signature counter
+    device_name TEXT,                       -- e.g. "Chrome on Windows"
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Single-use one-time code for first-time registration
+CREATE TABLE one_time_codes (
+    code        TEXT PRIMARY KEY,
+    used        INTEGER NOT NULL DEFAULT 0, -- 0 = unused, 1 = used
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
 ```
 
 ### `data/logs.db` — Separate Database for Logs
@@ -108,13 +124,7 @@ CREATE TABLE logs (
 CREATE INDEX idx_logs_level   ON logs(level);
 CREATE INDEX idx_logs_created ON logs(created_at);
 
--- Ring buffer: keep max 10k rows
-CREATE TRIGGER logs_ring_buffer AFTER INSERT ON logs
-BEGIN
-    DELETE FROM logs WHERE id <= (
-        SELECT id FROM logs ORDER BY id DESC LIMIT 1 OFFSET 10000
-    );
-END;
+-- Ring buffer via periodic cleanup (not a trigger): every 500 inserts, keep max 10k rows
 ```
 
 ## 4. Decimal Allocation Engine (DDM Core)
@@ -208,7 +218,7 @@ SMS lookup:  "₹101.01" → toPaisa(101.01) → 10101 → WHERE amount = 10101
 
 | Method | Path | Auth | Request | Response |
 |---|---|---|---|---|
-| `POST` | `/api/webhook` | `X-Webhook-Secret` or `secret` field | `{ sms: "..." }` | `{ status, ticketId, action }` |
+| `POST` | `/api/webhook` | `X-Webhook-Secret` header | `{ sms: "..." }` | `{ status, ticketId, action }` |
 
 **Generic SMS:**
 ```
@@ -226,12 +236,32 @@ Confirmed payment for Received Rs.100.03 in your Kotak Bank AC X4959 from user@o
 3. Verify RRN not duplicate (UNIQUE constraint)
 4. Mark paid, push WS event, free decimal, fire-and-forget Appwrite sync
 
-### Admin (cookie-based auth)
+### Admin (passkey + cookie-based auth)
+
+First-time setup:
+1. Admin visits `/admin` — no authenticators registered → redirects to `/admin/setup`
+2. `GET /api/admin/setup/status` returns `{ needs_setup: true, has_one_time_code: true }`
+3. Admin enters `ONE_TIME_CODE` → `POST /api/admin/setup/verify-code { code }` validates it
+4. `GET /api/admin/register/begin` returns WebAuthn registration options (challenge, rp, user)
+5. Browser calls `navigator.credentials.create(options)` → biometric/PIN prompt
+6. `POST /api/admin/register/complete { credential }` verifies and stores public key → sets session cookie
+7. One-time code is marked used
+
+Subsequent logins:
+1. `GET /api/admin/login/begin` returns WebAuthn authentication options (challenge + allowCredentials)
+2. Browser calls `navigator.credentials.get(options)` → biometric/PIN prompt
+3. `POST /api/admin/login/complete { assertion }` verifies signature → sets signed HttpOnly session cookie
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/admin/login` | `{ password }` → sets signed HttpOnly cookie |
-| `POST` | `/api/admin/logout` | Clears the cookie |
+| `GET` | `/api/admin/setup/status` | Check if setup is needed |
+| `POST` | `/api/admin/setup/verify-code` | `{ code }` → validates one-time code |
+| `GET` | `/api/admin/register/begin` | WebAuthn registration options (after code verified) |
+| `POST` | `/api/admin/register/complete` | `{ credential }` → stores public key |
+| `GET` | `/api/admin/login/begin` | WebAuthn assertion options |
+| `POST` | `/api/admin/login/complete` | `{ assertion }` → verifies → sets cookie |
+| `POST` | `/api/admin/logout` | Clears session cookie |
+| `GET` | `/api/admin/session` | Check if cookie is valid (used by SPA on load) |
 | `GET` | `/api/admin/tickets` | List + filter + paginate + export |
 | `GET` | `/api/admin/tickets/:id` | Ticket detail |
 | `PATCH` | `/api/admin/tickets/:id` | Update fields |
@@ -259,7 +289,7 @@ Confirmed payment for Received Rs.100.03 in your Kotak Bank AC X4959 from user@o
 | **Webhook** | 30/min/IP | Single phone sending SMS — generous buffer |
 | **Status polling** | 60/min/IP | Prevents polling abuse |
 | **Admin endpoints** | 30/min/IP (per session) | Admin dashboard |
-| **Admin login** | 5/min/IP | Brute-force protection |
+| **Admin login / register** | 10/min/IP | Passkey auth — rate limit on WebAuthn challenge endpoints |
 | **WebSocket connects** | 20/min/IP | Connection flood prevention |
 | **Health check** | No limit | Required for Docker health checks |
 
@@ -304,12 +334,14 @@ No queue, no worker, no polling. On crash, SQLite has all the data. Admin uses `
 ## 9. Server Lifecycle
 
 ### Startup
-1. Open SQLite, run migrations
-2. Crash recovery: if any `pending` tickets exist → expire them
-3. Build DecimalPool from scratch (all decimals free)
-4. Register routes, WS handlers
-5. Listen on PORT 3000
-6. Health check returns 200 → Portainer marks healthy
+1. Open SQLite, run `PRAGMA integrity_check`
+2. Run migrations (CREATE TABLE IF NOT EXISTS)
+3. Crash recovery: if any `pending` tickets exist → expire them
+4. Build DecimalPool from scratch (all decimals free)
+5. Seed `one_time_codes` from env if not already seeded (auto-generate if not set)
+6. Register routes, WS handlers
+7. Listen on PORT 3000
+8. Health check returns 200 → Portainer marks healthy
 
 ### Graceful Shutdown
 ```
@@ -333,6 +365,7 @@ GET /health → 200
   "status": "healthy",
   "uptime": 3600,
   "db": "ok",
+  "appwrite_reachable": true,
   "pool": { "base_amount": 100, "pending": 23, "free": 77 }
 }
 ```
@@ -358,7 +391,7 @@ GET /health → 200
 | `AMOUNT_MISMATCH` | 400 | Webhook amount doesn't match ticket |
 | `TICKET_ALREADY_RESOLVED` | 409 | Ticket already paid/cancelled/expired |
 | `WEBHOOK_UNAUTHORIZED` | 401 | Bad webhook secret |
-| `ADMIN_UNAUTHORIZED` | 401 | Bad password or missing/invalid cookie |
+| `ADMIN_UNAUTHORIZED` | 401 | Invalid/missing/expired session cookie |
 | `RATE_LIMITED` | 429 | Rate limit exceeded |
 | `INTERNAL_ERROR` | 500 | Unexpected server error |
 
@@ -388,36 +421,88 @@ Errors:
 ```
 Pino logger
   ├── Console (stdout, structured JSON) → Docker log collector
-  ├── data/logs.db (separate DB, ring-buffer 10k rows) → Admin API
+  ├── data/logs.db (separate DB, ring-buffer via periodic cleanup: every 500 inserts, keep max 10k rows) → Admin API
   └── WebSocket broadcast → Admin dashboard real-time stream
 ```
 
-## 12. Admin Dashboard (React + Vite)
+## 12. Admin Dashboard (React + Vite SPA)
+
+Apple-like aesthetic with Tailwind CSS + Framer Motion. Inter font, dark mode default, frosted glass panels, spring animations.
 
 ### Pages
 
-| Page | Features |
-|---|---|
-| **Login** | Password → server sets signed HttpOnly cookie |
-| **Dashboard** | Stats cards. Decimal pool gauge. Recent activity feed. |
-| **Tickets** | Searchable table with filters, sort, paginate. Row click → detail. Export CSV/JSON. |
-| **Ticket Detail** | View/edit all fields. Mark-paid, cancel buttons. Status timeline. |
-| **Decimal Pool** | Heat map of active decimals per base amount. Color-coded by status. |
-| **Logs** | Log table with level badges, search, filters. Real-time stream via WS. |
-| **Test Harness** | Create ticket, simulate webhook, test WS. Uses real API endpoints. |
-| **Settings** | Config display. Appwrite sync status + "Re-sync All" button. |
+| Page | Route | Features |
+|---|---|---|
+| **Login** | `/` | Passkey WebAuthn authentication. Auto-redirect if cookie valid. |
+| **Setup** | `/setup` | First-time passkey registration. One-time code entry → biometric/PIN prompt. |
+| **Overview** | `/overview` | Stats cards (total tickets, pending, paid today, revenue). Decimal pool gauge (ring chart). Recent activity feed. |
+| **Tickets** | `/tickets` | Searchable, filterable, sortable table with pagination. Row click → drawer with detail view. Export CSV/JSON. |
+| **Decimal Pool** | `/pool` | Gauge visualization (count of free/pending/paid decimals). Table of all active decimals with status badges. |
+| **Test Harness** | `/test` | Create ticket, simulate webhook, test WebSocket — all against real API endpoints. |
+| **Logs** | `/logs` | Log table with level badges. Search + filter. Real-time stream via WebSocket. |
+| **Settings** | `/settings` | Environment config display. Appwrite sync status + "Re-sync All" button. |
+
+### Design System
+
+```
+Colors:
+  bg-primary:    #0a0a0f  (deep black-blue)
+  bg-secondary:  #12121a  (card backgrounds)
+  bg-tertiary:   #1a1a2e  (hover states)
+  accent:        #6366f1  (indigo-500 - primary action)
+  accent-glow:   #818cf8  (indigo-400 - hover glow)
+  text:          #f1f5f9  (slate-50)
+  text-secondary:#94a3b8  (slate-400)
+  border:        #1e293b  (slate-800)
+  success:       #22c55e  (green-500)
+  warning:       #f59e0b  (amber-500)
+  error:         #ef4444  (red-500)
+
+Typography:
+  font-family: 'Inter', system-ui, sans-serif
+  scale: 12 / 14 / 16 / 18 / 20 / 24 / 30
+
+Components (Tailwind + Framer Motion):
+  GlassCard:    bg-secondary/80 backdrop-blur-xl border border-white/5
+  Button:       px-4 py-2 rounded-xl bg-accent hover:bg-accent-glow transition-all
+                spring animation on tap (scale: 0.97)
+  Input:        bg-tertiary/50 border-border rounded-xl focus:ring-accent
+  Badge:        px-2 py-0.5 rounded-full text-xs font-medium
+  Table:        glass card with sticky header, row hover bg-tertiary
+  Sidebar:      fixed left, w-64, glass effect, animated icons (spring)
+  Drawer:       slide-in from right, backdrop blur, spring animation
+  Skeleton:     shimmer animation for loading states
+```
 
 ### Build
 
 ```
 # Dev
-cd src/admin && vite dev           → localhost:5173 (proxied to :3000)
+cd admin && vite dev              → localhost:5173 (proxied to :3000)
 
 # Production
-cd src/admin && vite build         → output: src/server/admin/public/
+cd admin && vite build            → output: server/admin/public/
 
 # Fastify serves it
 app.register(fastifyStatic, { root: join(__dirname, 'admin/public') });
+```
+
+### WebAuthn Flow (Setup)
+
+```
+1. GET  /api/admin/setup/status          → { needs_setup: true }
+2. POST /api/admin/setup/verify-code     → { code: "XXXX-XXXX" }
+3. GET  /api/admin/register/begin        → { publicKey: CreationOptions }
+4. Browser: navigator.credentials.create(publicKey)
+5. POST /api/admin/register/complete     → { credential: ... } → sets cookie
+```
+
+### WebAuthn Flow (Login)
+
+```
+1. GET  /api/admin/login/begin           → { publicKey: RequestOptions }
+2. Browser: navigator.credentials.get(publicKey)
+3. POST /api/admin/login/complete        → { assertion: ... } → sets cookie
 ```
 
 ## 13. Project Structure
@@ -445,7 +530,8 @@ payment-gateway/
 │   │   │   ├── payment.service.ts    # SMS parsing + matching
 │   │   │   ├── appwrite.service.ts   # Fire-and-forget + full re-sync
 │   │   │   ├── expiry.service.ts     # TTL scheduling + cleanup
-│   │   │   └── logger.service.ts     # Pino → logs.db + WS
+│   │   │   ├── logger.service.ts     # Pino → logs.db + WS
+│   │   │   └── auth.service.ts       # WebAuthn registration, verification, passkey management
 │   │   ├── ws/
 │   │   │   ├── manager.ts            # Connection pools, heartbeat
 │   │   │   └── handlers.ts           # Ticket + Admin WS handlers
@@ -471,15 +557,23 @@ payment-gateway/
 │   │       │   └── auth.ts
 │   │       ├── pages/
 │   │       │   ├── Login.tsx
-│   │       │   ├── Dashboard.tsx
+│   │       │   ├── Setup.tsx
+│   │       │   ├── Overview.tsx
 │   │       │   ├── Tickets.tsx
-│   │       │   ├── TicketDetail.tsx
 │   │       │   ├── DecimalPool.tsx
 │   │       │   ├── Logs.tsx
 │   │       │   ├── TestHarness.tsx
 │   │       │   └── Settings.tsx
 │   │       ├── components/
+│   │       │   ├── GlassCard.tsx
+│   │       │   ├── Sidebar.tsx
+│   │       │   ├── StatsCard.tsx
+│   │       │   ├── PoolGauge.tsx
+│   │       │   ├── StatusBadge.tsx
+│   │       │   └── DataTable.tsx
 │   │       └── hooks/
+│   │           ├── useWebSocket.ts
+│   │           └── useWebAuthn.ts
 │   └── types/
 │       └── index.ts
 ├── data/                             # Docker volume (gitignored)
@@ -543,7 +637,7 @@ services:
     environment:
       - PORT=3000
       - TICKET_TTL_MINUTES=2
-      - PASSWORD=${PASSWORD}
+      - ONE_TIME_CODE=${ONE_TIME_CODE}
       - COOKIE_SECRET=${COOKIE_SECRET}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
       - APPWRITE_ENDPOINT=${APPWRITE_ENDPOINT}
@@ -596,7 +690,8 @@ jobs:
 | **Timing attacks** | `crypto.timingSafeEqual` for all secret comparisons |
 | **XSS** | React's default escaping + CSP headers |
 | **Session theft** | HttpOnly + signed + SameSite=Strict cookie. Not accessible to JS. |
-| **Webhook auth** | Shared secret, constant-time comparison |
+| **Webhook auth** | Shared secret via `X-Webhook-Secret` header only, constant-time comparison |
+| **Passkey (WebAuthn)** | No password to leak. Biometric/PIN bound to device. Phishing-resistant. Public key stored in `authenticators` table. |
 | **Decimal exhaustion** | 5/min/IP rate limit + 100-slot pool + 2min TTL |
 | **Server crash** | WAL mode, expiry on restart, SQLite volume persists |
 | **Dependencies** | Minimal surface: Fastify + plugins + better-sqlite3 + React |
@@ -608,9 +703,9 @@ jobs:
 | `PORT` | No | 3000 | HTTP server port |
 | `HOST` | No | 0.0.0.0 | Bind address |
 | `TICKET_TTL_MINUTES` | No | 2 | How long a pending ticket lives |
-| `PASSWORD` | Yes | — | Admin login password |
+| `ONE_TIME_CODE` | Yes* | Auto-generated | One-time setup code for passkey registration (printed to logs on first start) |
 | `COOKIE_SECRET` | Yes | — | Secret for signing admin session cookie |
-| `WEBHOOK_SECRET` | Yes | — | Shared secret for SMS webhook |
+| `WEBHOOK_SECRET` | Yes | — | Shared secret for SMS webhook (`X-Webhook-Secret` header) |
 | `APPWRITE_ENDPOINT` | No | — | Appwrite server URL (if sync enabled) |
 | `APPWRITE_PROJECT_ID` | No* | — | Appwrite project ID |
 | `APPWRITE_API_KEY` | No* | — | Appwrite API key |
