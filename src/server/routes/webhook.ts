@@ -16,8 +16,7 @@ export async function registerWebhookRoute(app: FastifyInstance, config: Config,
     },
     async (request) => {
       const header = request.headers["x-webhook-secret"];
-      const querySecret = (request.query as { secret?: string }).secret;
-      const secret = Array.isArray(header) ? header[0] : (header ?? querySecret);
+      const secret = Array.isArray(header) ? header[0] : header;
       if (!secret || !safeEqual(config.webhookSecret, secret)) {
         services.logger.warn("Webhook auth failure", { ip: request.ip, reason: "bad_secret" });
         throw new AppError("WEBHOOK_UNAUTHORIZED", "Invalid webhook secret.");
