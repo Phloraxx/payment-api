@@ -24,18 +24,30 @@ jobs:
       - name: Get latest deployment ID before trigger
         id: before
         run: |
-          ID=$(curl -s "${{ secrets.DOKPLOY_URL }}/api/compose.one?composeId=${{ secrets.DOKPLOY_APP_ID }}" \
-            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
-            | jq -r '[.deployments[].deploymentId][0] // "none"')
+          RESPONSE=$(curl -s -w "\n%{http_code}" "${{ secrets.DOKPLOY_URL }}/api/compose.one?composeId=${{ secrets.DOKPLOY_APP_ID }}" \
+            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Failed to get compose status (HTTP $HTTP_CODE)"
+            exit 1
+          fi
+          ID=$(echo "$BODY" | jq -r '[.deployments[].deploymentId][0] // "none"')
           echo "before=$ID" >> "$GITHUB_OUTPUT"
 
       - name: Trigger Dokploy deployment
         run: |
-          curl -s -X POST "${{ secrets.DOKPLOY_URL }}/api/compose.deploy" \
+          RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "${{ secrets.DOKPLOY_URL }}/api/compose.deploy" \
             -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
             -H "Content-Type: application/json" \
-            -d '{"composeId": "${{ secrets.DOKPLOY_APP_ID }}"}' \
-            -w "\nHTTP %{http_code}"
+            -d '{"composeId": "${{ secrets.DOKPLOY_APP_ID }}"}' )
+          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+          BODY=$(echo "$RESPONSE" | sed '$d')
+          echo "Response: $BODY (HTTP $HTTP_CODE)"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "Trigger failed"
+            exit 1
+          fi
 
       - name: Poll for completion
         shell: bash
