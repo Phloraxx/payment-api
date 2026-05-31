@@ -19,7 +19,7 @@ RUN npm run build
 FROM node:22-alpine
 RUN apk add --no-cache dumb-init
 WORKDIR /app
-COPY --from=admin-build /app/dist/ ./admin/public/
+COPY --from=admin-build /server/admin/public/ ./admin/public/
 COPY --from=server-build /app/dist/ ./dist/
 COPY --from=server-build /app/node_modules/ ./node_modules/
 COPY package*.json ./
