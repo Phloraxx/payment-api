@@ -23,43 +23,50 @@ jobs:
     steps:
       - name: Get latest deployment ID before trigger
         id: before
+        env:
+          URL: ${{ secrets.DOKPLOY_URL }}
+          COMPOSE_ID: ${{ secrets.DOKPLOY_APP_ID }}
+          TOKEN: ${{ secrets.DOKPLOY_API_TOKEN }}
         run: |
-          JSON=$(curl -s "${{ secrets.DOKPLOY_URL }}/api/compose.one?composeId=${{ secrets.DOKPLOY_APP_ID }}" \
-            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}")
+          JSON=$(curl -s "${URL}/api/compose.one?composeId=${COMPOSE_ID}" -H "x-api-key: ${TOKEN}")
           ID=$(echo "$JSON" | jq -r '[.deployments[].deploymentId][0] // "none"')
-          echo "before=$ID" >> "$GITHUB_OUTPUT"
+          echo "before=${ID}" >> "${GITHUB_OUTPUT}"
 
       - name: Trigger Dokploy deployment
+        env:
+          URL: ${{ secrets.DOKPLOY_URL }}
+          COMPOSE_ID: ${{ secrets.DOKPLOY_APP_ID }}
+          TOKEN: ${{ secrets.DOKPLOY_API_TOKEN }}
         run: |
-          curl -fs -X POST "${{ secrets.DOKPLOY_URL }}/api/compose.deploy" \
-            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
+          curl -fs -X POST "${URL}/api/compose.deploy" \
+            -H "x-api-key: ${TOKEN}" \
             -H "Content-Type: application/json" \
-            -d '{"composeId": "${{ secrets.DOKPLOY_APP_ID }}"}'
+            -d "{\"composeId\": \"${COMPOSE_ID}\"}"
 
       - name: Poll for completion
         shell: bash
+        env:
+          URL: ${{ secrets.DOKPLOY_URL }}
+          COMPOSE_ID: ${{ secrets.DOKPLOY_APP_ID }}
+          TOKEN: ${{ secrets.DOKPLOY_API_TOKEN }}
+          BEFORE: ${{ steps.before.outputs.before }}
         run: |
-          URL="${{ secrets.DOKPLOY_URL }}/api/compose.one?composeId=${{ secrets.DOKPLOY_APP_ID }}"
-          AUTH="x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}"
-          BEFORE="${{ steps.before.outputs.before }}"
-
           for i in $(seq 1 30); do
             sleep 10
-            DATA=$(curl -s "$URL" -H "$AUTH")
+            DATA=$(curl -s "${URL}/api/compose.one?composeId=${COMPOSE_ID}" -H "x-api-key: ${TOKEN}")
             LATEST_ID=$(echo "$DATA" | jq -r '[.deployments[].deploymentId][0] // "none"')
             LATEST_STATUS=$(echo "$DATA" | jq -r '[.deployments[].status][0] // "unknown"')
-
-            if [ "$LATEST_ID" != "$BEFORE" ]; then
-              echo "Attempt $i: deployment $LATEST_ID status = $LATEST_STATUS"
-              if [ "$LATEST_STATUS" = "done" ]; then
+            if [ "${LATEST_ID}" != "${BEFORE}" ]; then
+              echo "Attempt ${i}: deployment ${LATEST_ID} status = ${LATEST_STATUS}"
+              if [ "${LATEST_STATUS}" = "done" ]; then
                 echo "Deployment succeeded"
                 exit 0
-              elif [ "$LATEST_STATUS" = "error" ]; then
+              elif [ "${LATEST_STATUS}" = "error" ]; then
                 echo "Deployment failed"
                 exit 1
               fi
             else
-              echo "Attempt $i: waiting for new deployment to appear..."
+              echo "Attempt ${i}: waiting for new deployment to appear..."
             fi
           done
           echo "Timed out waiting for deployment"
