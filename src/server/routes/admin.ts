@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
+import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 import { Type } from "@sinclair/typebox";
 import type { Config } from "../config.js";
 import type { Services } from "../container.js";
@@ -28,7 +29,7 @@ export async function registerAdminRoutes(app: FastifyInstance, _config: Config,
     "/api/admin/register/complete",
     { schema: { body: Type.Object({ credential: Type.Any() }) } },
     async (request, reply) => {
-      const token = await services.auth.completeRegistration(request.body.credential);
+      const token = await services.auth.completeRegistration(request.body.credential as RegistrationResponseJSON);
       setSession(reply, token);
       return { ok: true };
     },
@@ -43,7 +44,7 @@ export async function registerAdminRoutes(app: FastifyInstance, _config: Config,
     "/api/admin/login/complete",
     { schema: { body: Type.Object({ requestId: Type.String(), assertion: Type.Any() }) } },
     async (request, reply) => {
-      const token = await services.auth.completeLogin(request.body.requestId, request.body.assertion);
+      const token = await services.auth.completeLogin(request.body.requestId, request.body.assertion as AuthenticationResponseJSON);
       setSession(reply, token);
       return { ok: true };
     },
