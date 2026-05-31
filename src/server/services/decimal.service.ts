@@ -126,8 +126,13 @@ export class DecimalPoolService {
   private scheduleRelease(ticket: Pick<Ticket, "base_amount" | "amount" | "created_at">, now: number): void {
     const createdMs = new Date(ticket.created_at + "Z").getTime();
     const releaseAt = createdMs + PENDING_RELEASE_MS;
-    if (releaseAt <= now) return;
     const base = ticket.base_amount;
+    if (releaseAt <= now) {
+      const pool = this.pools.get(base) ?? [];
+      if (!pool.includes(ticket.amount)) pool.push(ticket.amount);
+      this.pools.set(base, pool);
+      return;
+    }
     const queue = this.pendingRelease.get(base) ?? [];
     if (!queue.some((e) => e.amount === ticket.amount)) {
       queue.push({ amount: ticket.amount, releaseAt });
