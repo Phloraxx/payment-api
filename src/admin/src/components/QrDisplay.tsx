@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import QRCode from "qrcode";
 
-const UPI_ID = "souravpbijoy-2@okcici";
+const UPI_ID = "souravpbijoy-2@okicici";
 const PAYEE_NAME = "MuLearn SCET";
 
 interface QrDisplayProps {
