@@ -21,9 +21,9 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: nhridoy/dokploy-deploy-action@v1
+      - uses: benbristow/dokploy-deploy-action@0.2.2
         with:
-          auth_token: ${{ secrets.DOKPLOY_API_TOKEN }}
-          app_id: ${{ secrets.DOKPLOY_APP_ID }}
           dokploy_url: https://docker.mulearnscet.in
-          deployment_type: compose
+          api_token: ${{ secrets.DOKPLOY_API_TOKEN }}
+          application_id: ${{ secrets.DOKPLOY_APP_ID }}
+          service_type: compose
