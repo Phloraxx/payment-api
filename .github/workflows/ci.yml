@@ -27,19 +27,26 @@ jobs:
           URL: ${{ secrets.DOKPLOY_URL }}
           COMPOSE_ID: ${{ secrets.DOKPLOY_APP_ID }}
           TOKEN: ${{ secrets.DOKPLOY_API_TOKEN }}
+          SHA: ${{ github.sha }}
         run: |
+          echo "Waiting for Dokploy deployment for commit ${SHA}..."
+          sleep 30
           for i in $(seq 1 30); do
-            sleep 10
             DATA=$(curl -s "${URL}/api/compose.one?composeId=${COMPOSE_ID}" -H "x-api-key: ${TOKEN}")
-            LATEST_STATUS=$(echo "$DATA" | jq -r '[.deployments[].status][0] // "unknown"')
-            echo "Attempt ${i}: latest deployment status = ${LATEST_STATUS}"
-            if [ "${LATEST_STATUS}" = "done" ]; then
+            STATUS=$(echo "$DATA" | jq -r --arg sha "${SHA}" '
+              [.deployments[] | select(.description | contains($sha)) | .status][0] // "not_found"
+            ')
+            echo "Attempt ${i}: commit ${SHA} deployment status = ${STATUS}"
+            if [ "${STATUS}" = "done" ]; then
               echo "Deployment succeeded"
               exit 0
-            elif [ "${LATEST_STATUS}" = "error" ]; then
+            elif [ "${STATUS}" = "error" ]; then
               echo "Deployment failed"
               exit 1
+            elif [ "${STATUS}" = "not_found" ]; then
+              echo "Deployment not yet created by Dokploy..."
             fi
+            sleep 10
           done
           echo "Timed out waiting for deployment"
           exit 1
