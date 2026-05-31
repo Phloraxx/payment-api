@@ -3,8 +3,6 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
 jobs:
   test:
@@ -18,3 +16,14 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: nhridoy/dokploy-deploy-action@v1
+        with:
+          auth_token: ${{ secrets.DOKPLOY_API_TOKEN }}
+          app_id: ${{ secrets.DOKPLOY_APP_ID }}
+          dokploy_url: https://docker.mulearnscet.in
+          deployment_type: compose
