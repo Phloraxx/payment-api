@@ -1,0 +1,37 @@
+import { buildApp } from "./app.js";
+import { loadConfig } from "./config.js";
+import { createServices } from "./container.js";
+import { closeDatabases, openDatabases } from "./db/connection.js";
+
+const config = loadConfig();
+const db = openDatabases(config);
+const services = createServices(config, db);
+
+services.logger.info("Setup one-time code seeded", { code: config.oneTimeCode });
+const expired = services.tickets.expirePending();
+if (expired > 0) services.logger.warn("Expired stale pending tickets on startup", { count: expired });
+services.decimalPool.rebuild();
+services.expiry.start();
+
+const app = await buildApp(config, services);
+
+const close = async () => {
+  try {
+    services.logger.warn("Graceful shutdown started");
+    services.ws.shutdown();
+    services.expiry.stop();
+    services.tickets.expirePending();
+    await app.close();
+    closeDatabases(db);
+  } catch (err) {
+    services.logger.error("Shutdown error", { error: String(err) });
+    process.exit(1);
+  }
+  process.exit(0);
+};
+
+process.on("SIGTERM", () => void close());
+process.on("SIGINT", () => void close());
+
+await app.listen({ port: config.port, host: config.host });
+services.logger.info("Server listening", { port: config.port, host: config.host });
