@@ -1,0 +1,49 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { Config } from "../src/server/config.js";
+import { createServices } from "../src/server/container.js";
+import { closeDatabases, openDatabases } from "../src/server/db/connection.js";
+
+export function withServices() {
+  const dir = mkdtempSync(join(tmpdir(), "pg-v2-"));
+  const config: Config = {
+    port: 0,
+    host: "127.0.0.1",
+    publicBaseUrl: "http://localhost:3000",
+    rpId: "localhost",
+    dataDir: dir,
+    ticketTtlMinutes: 2,
+    oneTimeCode: "SETUP-TEST",
+    cookieSecret: "test-cookie-secret-test-cookie-secret",
+    webhookSecret: "test-webhook-secret",
+    appwrite: { enabled: false },
+  };
+  const db = openDatabases(config);
+  const services = createServices(config, db);
+  services.decimalPool.rebuild();
+  return {
+    config,
+    db,
+    services,
+    cleanup: () => {
+      closeDatabases(db);
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+export async function withApp() {
+  const context = withServices();
+  const { buildApp } = await import("../src/server/app.js");
+  const app = await buildApp(context.config, context.services);
+  await app.ready();
+  return {
+    ...context,
+    app,
+    cleanup: async () => {
+      await app.close();
+      context.cleanup();
+    },
+  };
+}
