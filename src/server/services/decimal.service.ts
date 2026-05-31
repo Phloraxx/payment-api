@@ -74,7 +74,14 @@ export class DecimalPoolService {
     this.scheduleRelease(ticket, Date.now());
   }
 
+  sweepAll(): void {
+    for (const base of this.pendingRelease.keys()) {
+      this.sweepPending(base);
+    }
+  }
+
   getSnapshot(): PoolSnapshot[] {
+    this.sweepAll();
     const rows = this.db.prepare("SELECT * FROM tickets").all() as Ticket[];
     const bases = new Set<number>([...rows.map((row) => row.base_amount), ...this.pools.keys()]);
     return [...bases].sort((a, b) => a - b).map((base) => {
