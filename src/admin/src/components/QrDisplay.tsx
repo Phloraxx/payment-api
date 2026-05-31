@@ -23,7 +23,7 @@ export function QrDisplay({ ticketId, amount }: QrDisplayProps) {
     QRCode.toCanvas(canvasRef.current, link, {
       width: 200,
       margin: 2,
-      color: { dark: "#e2e8f0", light: "#12121a" },
+      color: { dark: "#000000", light: "#ffffff" },
     });
   }, [link]);
 
