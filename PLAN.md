@@ -163,10 +163,10 @@ class DecimalPool {
   paid ▼   expired ▼  cancelled ▼
 ┌──────┐  ┌────────┐ ┌──────────┐
 │ PAID │  │EXPIRED │ │CANCELLED │
-└──┬───┘  └───┬────┘ └────┬─────┘
-   │          │           │
-   └──────────┼───────────┘
-              │ push back to pool
+└──────┘  └───┬────┘ └────┬─────┘
+              │           │
+              └─────┬─────┘
+                    │ push back to pool
          ┌────▼─────┐
          │  FREE    │
          └──────────┘
@@ -178,9 +178,12 @@ class DecimalPool {
 |---|---|
 | Free queue non-empty | Pop from front (e.g., `10003`) |
 | Free queue empty | Increment integer by 100 paisa, add new block of 100 |
-| Ticket paid/expired/cancelled | Push amount to back of free queue |
+| Ticket expired/cancelled | Push amount to back of free queue |
+| Ticket paid | Do not immediately return amount to free queue; keep it reserved permanently by default, or release only after a configurable cooldown/manual admin action |
 | Server restart | Mark all pending as expired, rebuild free queues |
 | Pool full (all 100 in use) | New integer block created as safety valve |
+
+Paid decimal amounts are treated as consumed so delayed, duplicated, or re-sent bank SMS messages cannot accidentally confirm a newer pending ticket that reused the same amount. This trades a small amount drift over time for safer matching. If reuse is needed later, add a `PAID_REUSE_COOLDOWN_HOURS` setting and only return paid decimals after the bank SMS duplication window has clearly passed.
 
 ### Lifecycle Example
 
@@ -193,8 +196,9 @@ t=1:  Create → pop 10001 → pool: [10002..10099]
 ...
 t=99: Create → pop 10099 → pool: []
 t=100: Pool empty → new block: 10100..10199 → pop 10100
-t=101: Pay for 10000 → push back → pool: [10101..10199, 10000]
-t=102: Create → pop 10101 → pool: [10102..10199, 10000]
+t=101: Pay for 10000 → mark paid; keep 10000 reserved
+t=102: Create → pop 10101 → pool: [10102..10199]
+t=103: Expire 10001 → push back → pool: [10102..10199, 10001]
 
 API returns: fromPaisa(10101) → 101.01
 SMS lookup:  "₹101.01" → toPaisa(101.01) → 10101 → WHERE amount = 10101
@@ -427,7 +431,7 @@ Pino logger
 
 ## 12. Admin Dashboard (React + Vite SPA)
 
-Apple-like aesthetic with Tailwind CSS + Framer Motion. Inter font, dark mode default, frosted glass panels, spring animations.
+Operational dashboard style with Tailwind CSS. Inter font, dark mode default, dense tables, clear status colors, restrained motion, and high-contrast controls. The UI should feel calm, fast, and built for repeated admin work rather than decorative. Use subtle transitions only where they clarify state changes.
 
 ### Pages
 
@@ -435,9 +439,9 @@ Apple-like aesthetic with Tailwind CSS + Framer Motion. Inter font, dark mode de
 |---|---|---|
 | **Login** | `/` | Passkey WebAuthn authentication. Auto-redirect if cookie valid. |
 | **Setup** | `/setup` | First-time passkey registration. One-time code entry → biometric/PIN prompt. |
-| **Overview** | `/overview` | Stats cards (total tickets, pending, paid today, revenue). Decimal pool gauge (ring chart). Recent activity feed. |
+| **Overview** | `/overview` | Compact stats cards (total tickets, pending, paid today, revenue). Decimal pool usage gauge. Recent activity feed. |
 | **Tickets** | `/tickets` | Searchable, filterable, sortable table with pagination. Row click → drawer with detail view. Export CSV/JSON. |
-| **Decimal Pool** | `/pool` | Gauge visualization (count of free/pending/paid decimals). Table of all active decimals with status badges. |
+| **Decimal Pool** | `/pool` | Usage visualization for free, pending, expired/cancelled reusable, and paid-reserved decimals. Table of active decimals with status badges. |
 | **Test Harness** | `/test` | Create ticket, simulate webhook, test WebSocket — all against real API endpoints. |
 | **Logs** | `/logs` | Log table with level badges. Search + filter. Real-time stream via WebSocket. |
 | **Settings** | `/settings` | Environment config display. Appwrite sync status + "Re-sync All" button. |
@@ -462,15 +466,14 @@ Typography:
   font-family: 'Inter', system-ui, sans-serif
   scale: 12 / 14 / 16 / 18 / 20 / 24 / 30
 
-Components (Tailwind + Framer Motion):
-  GlassCard:    bg-secondary/80 backdrop-blur-xl border border-white/5
-  Button:       px-4 py-2 rounded-xl bg-accent hover:bg-accent-glow transition-all
-                spring animation on tap (scale: 0.97)
-  Input:        bg-tertiary/50 border-border rounded-xl focus:ring-accent
+Components (Tailwind CSS):
+  Panel:        bg-secondary border border-border rounded-lg
+  Button:       h-9 px-3 rounded-md bg-accent hover:bg-accent-glow transition-colors
+  Input:        h-9 bg-tertiary/50 border-border rounded-md focus:ring-accent
   Badge:        px-2 py-0.5 rounded-full text-xs font-medium
-  Table:        glass card with sticky header, row hover bg-tertiary
-  Sidebar:      fixed left, w-64, glass effect, animated icons (spring)
-  Drawer:       slide-in from right, backdrop blur, spring animation
+  Table:        compact rows, sticky header, row hover bg-tertiary, visible empty/error states
+  Sidebar:      fixed left, w-60, clear active state, icon + label navigation
+  Drawer:       slide-in from right for ticket detail and admin actions
   Skeleton:     shimmer animation for loading states
 ```
 
@@ -682,7 +685,47 @@ jobs:
         run: curl -X POST "${{ secrets.PORTAINER_WEBHOOK_URL }}"
 ```
 
-## 15. Security Checklist
+## 15. Testing Plan
+
+Testing uses Vitest for backend unit/integration coverage and focused React component tests for admin workflows. Critical payment behavior should be tested before UI polish.
+
+### Backend Tests
+
+| Area | Coverage |
+|---|---|
+| Decimal allocation | Allocates unique paisa amounts per base amount, exhausts 100 slots into the next block, returns only expired/cancelled amounts, and does not immediately reuse paid amounts |
+| Ticket lifecycle | Create → pending, expiry timer → expired, cancel → cancelled, mark-paid → paid, already-resolved tickets reject duplicate transitions |
+| SMS parsing | Generic ticket SMS and Kotak SMS parse amount, ticket ID, sender, UPI ID, and RRN correctly |
+| Payment matching | Exact amount lookup, RRN duplicate rejection, amount mismatch rejection, ambiguous amount match refusal if more than one pending ticket is found |
+| Restart recovery | Startup expires stale pending tickets and rebuilds decimal pools from SQLite state |
+| Webhook security | Missing/bad `X-Webhook-Secret` returns 401 and uses constant-time secret comparison |
+| Admin auth | WebAuthn challenges are single-use, expire correctly, and session cookies gate all admin routes |
+| Appwrite sync | SQLite write succeeds even when Appwrite fails; failures are logged and full re-sync can be triggered |
+| Rate limits | Ticket, webhook, status, login, and WebSocket limits return 429 at expected thresholds |
+
+### Admin UI Tests
+
+| Area | Coverage |
+|---|---|
+| Auth flow | Setup, login, logout, expired session redirect |
+| Tickets table | Search, filters, sorting, pagination, export buttons, detail drawer |
+| Test harness | Creates a real test ticket, simulates webhook, observes WebSocket update |
+| Logs | Filters by level/text and appends real-time log entries |
+| Pool view | Shows free, pending, paid-reserved, and reusable decimal states clearly |
+| Responsive layout | Main dashboard pages remain usable on desktop and mobile widths |
+
+### End-to-End Smoke Tests
+
+1. Start server against a temporary SQLite data directory.
+2. Create a ticket for `100`.
+3. Confirm the returned amount is exact and unique.
+4. Post a matching webhook SMS.
+5. Verify ticket status changes to `paid`.
+6. Verify WebSocket receives `payment_update`.
+7. Create another ticket and verify the previously paid decimal is not reused.
+8. Restart the server and verify stale pending tickets become `expired`.
+
+## 16. Security Checklist
 
 | Concern | Mitigation |
 |---|---|
@@ -692,11 +735,11 @@ jobs:
 | **Session theft** | HttpOnly + signed + SameSite=Strict cookie. Not accessible to JS. |
 | **Webhook auth** | Shared secret via `X-Webhook-Secret` header only, constant-time comparison |
 | **Passkey (WebAuthn)** | No password to leak. Biometric/PIN bound to device. Phishing-resistant. Public key stored in `authenticators` table. |
-| **Decimal exhaustion** | 5/min/IP rate limit + 100-slot pool + 2min TTL |
+| **Decimal exhaustion** | 5/min/IP rate limit + 100-slot pool + 2min TTL + next-block safety valve |
 | **Server crash** | WAL mode, expiry on restart, SQLite volume persists |
 | **Dependencies** | Minimal surface: Fastify + plugins + better-sqlite3 + React |
 
-## 16. Environment Variables
+## 17. Environment Variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
