@@ -1,0 +1,30 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - payment_data:/app/data
+    environment:
+      - PORT=3000
+      - HOST=0.0.0.0
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-http://localhost:3000}
+      - RP_ID=${RP_ID:-localhost}
+      - TICKET_TTL_MINUTES=${TICKET_TTL_MINUTES:-2}
+      - ONE_TIME_CODE=${ONE_TIME_CODE}
+      - COOKIE_SECRET=${COOKIE_SECRET}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - APPWRITE_ENDPOINT=${APPWRITE_ENDPOINT}
+      - APPWRITE_API_KEY=${APPWRITE_API_KEY}
+      - APPWRITE_PROJECT_ID=${APPWRITE_PROJECT_ID}
+      - APPWRITE_DATABASE_ID=${APPWRITE_DATABASE_ID}
+      - APPWRITE_COLLECTION_ID=${APPWRITE_COLLECTION_ID}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  payment_data:
