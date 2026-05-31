@@ -27,9 +27,10 @@ jobs:
             -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{"composeId": "${{ secrets.DOKPLOY_APP_ID }}"}' \
-            -w "\nHTTP %{http_code}" 
+            -w "\nHTTP %{http_code}"
 
       - name: Poll for completion
+        shell: bash
         run: |
           SHA="${{ github.sha }}"
           URL="https://docker.mulearnscet.in/api/compose.one?composeId=${{ secrets.DOKPLOY_APP_ID }}"
@@ -38,29 +39,17 @@ jobs:
           for i in $(seq 1 30); do
             sleep 10
             DATA=$(curl -s "$URL" -H "$AUTH")
-            STATUS=$(echo "$DATA" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-target = f'Commit: {sys.argv[1]}'
-for dep in data.get('deployments', []):
-    if target in dep.get('description', ''):
-        print(dep.get('status', 'unknown'))
-        sys.exit(0)
-print('pending')
-" "$SHA")
+            STATUS=$(echo "$DATA" | jq -r --arg sha "$SHA" '
+              [.deployments[] | select(.description | contains("Commit: \($sha)")) | .status][0] // "pending"
+            ')
             echo "Attempt $i: deployment status = $STATUS"
             if [ "$STATUS" = "done" ]; then
               echo "Deployment succeeded"
               exit 0
             elif [ "$STATUS" = "error" ]; then
-              ERROR_MSG=$(echo "$DATA" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-target = f'Commit: {sys.argv[1]}'
-for dep in data.get('deployments', []):
-    if target in dep.get('description', ''):
-        print(dep.get('errorMessage', 'Unknown error'))
-" "$SHA")
+              ERROR_MSG=$(echo "$DATA" | jq -r --arg sha "$SHA" '
+                [.deployments[] | select(.description | contains("Commit: \($sha)")) | .errorMessage][0] // "Unknown error"
+              ')
               echo "Deployment failed: $ERROR_MSG"
               exit 1
             fi
