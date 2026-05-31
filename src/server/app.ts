@@ -22,10 +22,10 @@ export async function buildApp(config: Config, services: Services) {
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
-        scriptSrc: ["'self'"],
+        scriptSrc: ["'self'", "https://static.cloudflareinsights.com"],
         styleSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", "data:"],
-        connectSrc: ["'self'", "ws:", "wss:"],
+        connectSrc: ["'self'", "ws:", "wss:", "https://static.cloudflareinsights.com"],
         frameAncestors: ["'none'"],
       },
     },

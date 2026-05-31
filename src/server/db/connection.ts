@@ -27,6 +27,7 @@ export function openDatabases(config: Config): DbBundle {
     throw new Error(`payments.db integrity_check failed: ${integrity}`);
   }
 
+  payments.prepare("DELETE FROM one_time_codes WHERE used = 0").run();
   payments
     .prepare("INSERT OR IGNORE INTO one_time_codes (code, used) VALUES (?, 0)")
     .run(config.oneTimeCode);
