@@ -10,14 +10,8 @@ interface QrDisplayProps {
 }
 
 function upiLink(ticketId: string, amount: number): string {
-  const params = new URLSearchParams({
-    pa: UPI_ID,
-    pn: PAYEE_NAME,
-    am: amount.toFixed(2),
-    cu: "INR",
-    tn: ticketId,
-  });
-  return `upi://pay?${params}`;
+  const am = amount.toFixed(2);
+  return `upi://pay?pa=${UPI_ID}&pn=${encodeURIComponent(PAYEE_NAME)}&am=${am}&cu=INR&tn=${ticketId}`;
 }
 
 export function QrDisplay({ ticketId, amount }: QrDisplayProps) {
