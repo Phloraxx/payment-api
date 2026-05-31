@@ -21,10 +21,49 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: benbristow/dokploy-deploy-action@0.2.2
-        with:
-          dokploy_url: https://docker.mulearnscet.in
-          api_token: ${{ secrets.DOKPLOY_API_TOKEN }}
-          application_id: ${{ secrets.DOKPLOY_APP_ID }}
-          service_type: compose
+      - name: Trigger Dokploy deployment
+        run: |
+          curl -s -X POST "https://docker.mulearnscet.in/api/compose.deploy" \
+            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"composeId": "${{ secrets.DOKPLOY_APP_ID }}"}' \
+            -w "\nHTTP %{http_code}" 
 
+      - name: Poll for completion
+        run: |
+          SHA="${{ github.sha }}"
+          URL="https://docker.mulearnscet.in/api/compose.one?composeId=${{ secrets.DOKPLOY_APP_ID }}"
+          AUTH="x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}"
+
+          for i in $(seq 1 30); do
+            sleep 10
+            DATA=$(curl -s "$URL" -H "$AUTH")
+            STATUS=$(echo "$DATA" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+target = f'Commit: {sys.argv[1]}'
+for dep in data.get('deployments', []):
+    if target in dep.get('description', ''):
+        print(dep.get('status', 'unknown'))
+        sys.exit(0)
+print('pending')
+" "$SHA")
+            echo "Attempt $i: deployment status = $STATUS"
+            if [ "$STATUS" = "done" ]; then
+              echo "Deployment succeeded"
+              exit 0
+            elif [ "$STATUS" = "error" ]; then
+              ERROR_MSG=$(echo "$DATA" | python3 -c "
+import sys, json
+data = json.load(sys.stdin)
+target = f'Commit: {sys.argv[1]}'
+for dep in data.get('deployments', []):
+    if target in dep.get('description', ''):
+        print(dep.get('errorMessage', 'Unknown error'))
+" "$SHA")
+              echo "Deployment failed: $ERROR_MSG"
+              exit 1
+            fi
+          done
+          echo "Timed out waiting for deployment"
+          exit 1
