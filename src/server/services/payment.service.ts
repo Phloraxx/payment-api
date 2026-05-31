@@ -34,7 +34,7 @@ export class PaymentService {
       };
     }
 
-    throw new AppError("INVALID_AMOUNT", "Could not parse a supported payment SMS.");
+    throw new AppError("INVALID_AMOUNT", 'Unrecognized SMS format. Expected: "TICKET123 paid ₹500 by Name" or "Received Rs. 500 from Name".');
   }
 
   confirmFromSms(sms: string): { ticket: Ticket; action: string; parsed: ParsedSms } {

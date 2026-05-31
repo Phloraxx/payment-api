@@ -22,7 +22,7 @@ export function TestHarness() {
       </section>
       <section className="panel form-panel">
         <h2>Simulate SMS Webhook</h2>
-        <textarea value={sms} onChange={(event) => setSms(event.target.value)} placeholder="Paste bank SMS" />
+        <textarea value={sms} onChange={(event) => setSms(event.target.value)} placeholder={'Generic: TICKET123456 paid ₹500.00 by John\nKotak: Received Rs. 500.00 from John (UPI Ref 12345678)'} />
         <button onClick={() => void simulateWebhook(sms).then((res) => setResult(`${res.action}: ${res.ticketId}`))}>Submit SMS</button>
         {result && <div className="result">{result}</div>}
       </section>
