@@ -8,6 +8,7 @@ import type { DecimalPoolService } from "./decimal.service.js";
 import type { LoggerService } from "./logger.service.js";
 
 export class TicketService {
+  private idCounter = 0;
   private readonly createStmt;
   private readonly getStmt;
   private readonly listStmt;
@@ -62,7 +63,7 @@ export class TicketService {
   createTicket(rawAmount: number | string): Ticket {
     const requested = toPaisa(rawAmount);
     const allocation = this.decimalPool.allocate(requested);
-    const id = `TICKET${Date.now()}${Math.floor(Math.random() * 1000).toString().padStart(3, "0")}`;
+    const id = `TICKET${Date.now()}${(this.idCounter++ % 10000).toString().padStart(4, "0")}`;
     const expiresAt = new Date(Date.now() + this.config.ticketTtlMinutes * 60_000).toISOString();
     this.createStmt.run(id, allocation.amount, allocation.baseAmount, allocation.decimalVal, expiresAt);
     const ticket = this.getTicket(id);
