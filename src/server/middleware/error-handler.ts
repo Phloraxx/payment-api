@@ -23,6 +23,8 @@ export function errorHandler(error: FastifyError | AppError, _request: FastifyRe
     return;
   }
 
+  const message = error instanceof Error ? error.stack ?? error.message : String(error);
+  process.stderr.write(`UNHANDLED ERROR: ${message}\n`);
   reply.status(500).send({
     error: {
       code: "INTERNAL_ERROR",
