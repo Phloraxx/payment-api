@@ -21,7 +21,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - name: Get latest deployment ID before trigger
+      - name: Capture current deployment
         id: before
         env:
           URL: ${{ secrets.DOKPLOY_URL }}
@@ -32,18 +32,7 @@ jobs:
           ID=$(echo "$JSON" | jq -r '[.deployments[].deploymentId][0] // "none"')
           echo "before=${ID}" >> "${GITHUB_OUTPUT}"
 
-      - name: Trigger Dokploy deployment
-        env:
-          URL: ${{ secrets.DOKPLOY_URL }}
-          COMPOSE_ID: ${{ secrets.DOKPLOY_APP_ID }}
-          TOKEN: ${{ secrets.DOKPLOY_API_TOKEN }}
-        run: |
-          curl -fs -X POST "${URL}/api/compose.deploy" \
-            -H "x-api-key: ${TOKEN}" \
-            -H "Content-Type: application/json" \
-            -d "{\"composeId\": \"${COMPOSE_ID}\"}"
-
-      - name: Poll for completion
+      - name: Wait for Dokploy auto-deploy
         shell: bash
         env:
           URL: ${{ secrets.DOKPLOY_URL }}
@@ -66,11 +55,8 @@ jobs:
                 exit 1
               fi
             else
-              echo "Attempt ${i}: waiting for new deployment to appear..."
+              echo "Attempt ${i}: waiting for Dokploy auto-deploy..."
             fi
           done
           echo "Timed out waiting for deployment"
           exit 1
-
-
-
