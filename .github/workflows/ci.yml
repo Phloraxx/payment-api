@@ -32,26 +32,30 @@ jobs:
       - name: Poll for completion
         shell: bash
         run: |
-          SHA="${{ github.sha }}"
           URL="https://docker.mulearnscet.in/api/compose.one?composeId=${{ secrets.DOKPLOY_APP_ID }}"
           AUTH="x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}"
+
+          BEFORE=$(curl -s "$URL" -H "$AUTH" | jq -r '[.deployments[].deploymentId][0] // "none"')
+          echo "Latest deployment before trigger: $BEFORE"
 
           for i in $(seq 1 30); do
             sleep 10
             DATA=$(curl -s "$URL" -H "$AUTH")
-            STATUS=$(echo "$DATA" | jq -r --arg sha "$SHA" '
-              [.deployments[] | select(.description | contains("Commit: \($sha)")) | .status][0] // "pending"
-            ')
-            echo "Attempt $i: deployment status = $STATUS"
-            if [ "$STATUS" = "done" ]; then
-              echo "Deployment succeeded"
-              exit 0
-            elif [ "$STATUS" = "error" ]; then
-              ERROR_MSG=$(echo "$DATA" | jq -r --arg sha "$SHA" '
-                [.deployments[] | select(.description | contains("Commit: \($sha)")) | .errorMessage][0] // "Unknown error"
-              ')
-              echo "Deployment failed: $ERROR_MSG"
-              exit 1
+            LATEST_ID=$(echo "$DATA" | jq -r '[.deployments[].deploymentId][0] // "none"')
+            LATEST_STATUS=$(echo "$DATA" | jq -r '[.deployments[].status][0] // "unknown"')
+
+            if [ "$LATEST_ID" != "$BEFORE" ]; then
+              echo "Attempt $i: deployment $LATEST_ID status = $LATEST_STATUS"
+              if [ "$LATEST_STATUS" = "done" ]; then
+                echo "Deployment succeeded"
+                exit 0
+              elif [ "$LATEST_STATUS" = "error" ]; then
+                ERROR_MSG=$(echo "$DATA" | jq -r '[.deployments[].errorMessage][0] // "Unknown error"')
+                echo "Deployment failed: $ERROR_MSG"
+                exit 1
+              fi
+            else
+              echo "Attempt $i: waiting for new deployment to appear..."
             fi
           done
           echo "Timed out waiting for deployment"
