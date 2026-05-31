@@ -23,7 +23,7 @@ COPY --from=admin-build /server/admin/public/ ./admin/public/
 COPY --from=server-build /app/dist/ ./dist/
 COPY --from=server-build /app/node_modules/ ./node_modules/
 COPY package*.json ./
-EXPOSE 3001
+EXPOSE 3000
 VOLUME ["/app/data"]
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD node -e "fetch('http://localhost:3001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["dumb-init", "node", "dist/server/index.js"]
