@@ -27,3 +27,4 @@ jobs:
           api_token: ${{ secrets.DOKPLOY_API_TOKEN }}
           application_id: ${{ secrets.DOKPLOY_APP_ID }}
           service_type: compose
+
