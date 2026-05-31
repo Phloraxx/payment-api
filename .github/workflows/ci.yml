@@ -21,9 +21,17 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     steps:
+      - name: Get latest deployment ID before trigger
+        id: before
+        run: |
+          ID=$(curl -s "${{ secrets.DOKPLOY_URL }}/api/compose.one?composeId=${{ secrets.DOKPLOY_APP_ID }}" \
+            -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
+            | jq -r '[.deployments[].deploymentId][0] // "none"')
+          echo "before=$ID" >> "$GITHUB_OUTPUT"
+
       - name: Trigger Dokploy deployment
         run: |
-          curl -s -X POST "https://docker.mulearnscet.in/api/compose.deploy" \
+          curl -s -X POST "${{ secrets.DOKPLOY_URL }}/api/compose.deploy" \
             -H "x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}" \
             -H "Content-Type: application/json" \
             -d '{"composeId": "${{ secrets.DOKPLOY_APP_ID }}"}' \
@@ -32,11 +40,9 @@ jobs:
       - name: Poll for completion
         shell: bash
         run: |
-          URL="https://docker.mulearnscet.in/api/compose.one?composeId=${{ secrets.DOKPLOY_APP_ID }}"
+          URL="${{ secrets.DOKPLOY_URL }}/api/compose.one?composeId=${{ secrets.DOKPLOY_APP_ID }}"
           AUTH="x-api-key: ${{ secrets.DOKPLOY_API_TOKEN }}"
-
-          BEFORE=$(curl -s "$URL" -H "$AUTH" | jq -r '[.deployments[].deploymentId][0] // "none"')
-          echo "Latest deployment before trigger: $BEFORE"
+          BEFORE="${{ steps.before.outputs.before }}"
 
           for i in $(seq 1 30); do
             sleep 10
@@ -50,8 +56,7 @@ jobs:
                 echo "Deployment succeeded"
                 exit 0
               elif [ "$LATEST_STATUS" = "error" ]; then
-                ERROR_MSG=$(echo "$DATA" | jq -r '[.deployments[].errorMessage][0] // "Unknown error"')
-                echo "Deployment failed: $ERROR_MSG"
+                echo "Deployment failed"
                 exit 1
               fi
             else
