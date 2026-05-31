@@ -164,6 +164,7 @@ export class TicketService {
       throw error;
     }
     const ticket = this.getTicket(id);
+    this.decimalPool.release(ticket);
     this.logger.info("Payment confirmed", {
       ticketId: ticket.id,
       amount: ticket.amount,

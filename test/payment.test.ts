@@ -35,7 +35,7 @@ describe("payment matching", () => {
     expect(() => ctx!.services.payments.confirmFromSms(`${two.id} B paid you ₹100.01 UPI Ref:606703736481`)).toThrow();
   });
 
-  it("does not reuse paid decimals but reuses expired decimals", () => {
+  it("does not reuse paid decimals immediately but releases them after delay", () => {
     ctx = withServices();
     const paid = ctx.services.tickets.createTicket(100);
     ctx.services.tickets.markPaid(paid.id, { rrn: "111122223333" });
@@ -43,6 +43,8 @@ describe("payment matching", () => {
     expect(next.amount).not.toBe(paid.amount);
 
     ctx.services.tickets.transition(next.id, "expired");
-    expect(ctx.services.decimalPool.getSnapshot()[0]?.freeAmounts).toContain(next.amount);
+    const snapshot = ctx.services.decimalPool.getSnapshot()[0]!;
+    expect(snapshot.freeAmounts).not.toContain(next.amount);
+    expect(snapshot.pendingRelease).toBe(2);
   });
 });
