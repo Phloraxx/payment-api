@@ -29,8 +29,8 @@ export async function registerWebhookRoute(app: FastifyInstance, config: Config,
       }
       const { sms } = request.body as { sms: string };
       const parsed = services.payments.parseSms(sms);
-      if (parsed.method === "kotak") {
-        const result = services.payments.confirmFromKotakSms(sms);
+      if (parsed.method === "bank") {
+        const result = services.payments.confirmFromBankSms(sms);
         return { status: "ok", ticketId: result.ticket.id, action: result.action, ticket: toTicketResponse(result.ticket) };
       }
       const result = services.payments.fillFromGenericSms(sms);

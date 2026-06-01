@@ -18,10 +18,10 @@ describe("payment matching", () => {
     expect(result.ticket.status).toBe("pending");
   });
 
-  it("parses Kotak SMS and marks ticket paid", () => {
+  it("parses bank SMS and marks ticket paid", () => {
     ctx = withServices();
     const ticket = ctx.services.tickets.createTicket(100);
-    const result = ctx.services.payments.confirmFromKotakSms(
+    const result = ctx.services.payments.confirmFromBankSms(
       "Confirmed payment for Received Rs.100.00 in your Kotak Bank AC X4959 from user@oksbi on 08-03-26.UPI Ref:606703736480.",
     );
     expect(result.ticket.id).toBe(ticket.id);

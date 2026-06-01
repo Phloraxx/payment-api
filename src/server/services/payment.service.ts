@@ -24,23 +24,23 @@ export class PaymentService {
       };
     }
 
-    const kotak = sms.match(/(?:Received|payment for Received)\s+(?:Rs\.?|₹)\s?(\d+(?:\.\d{1,2})?)/i);
-    if (kotak?.[1]) {
+    const bank = sms.match(/(?:Received|payment for Received)\s+(?:Rs\.?|₹)\s?(\d+(?:\.\d{1,2})?)/i);
+    if (bank?.[1]) {
       return {
-        amount: toPaisa(kotak[1]),
+        amount: toPaisa(bank[1]),
         rrn: this.extractRrn(sms),
         upiId: this.extractUpi(sms),
-        method: "kotak",
+        method: "bank",
       };
     }
 
     throw new AppError("INVALID_AMOUNT", 'Unrecognized SMS format. Expected: "TICKET123 Name paid ₹500" or "Received Rs. 500 from Name".');
   }
 
-  confirmFromKotakSms(sms: string): { ticket: Ticket; action: string; parsed: ParsedSms } {
+  confirmFromBankSms(sms: string): { ticket: Ticket; action: string; parsed: ParsedSms } {
     const parsed = this.parseSms(sms);
-    if (parsed.method !== "kotak") {
-      throw new AppError("INVALID_AMOUNT", "Expected Kotak SMS format.");
+    if (parsed.method !== "bank") {
+      throw new AppError("INVALID_AMOUNT", "Expected bank SMS format.");
     }
     const baseAmount = baseAmountFromPaisa(parsed.amount);
     const matches = this.db
@@ -53,7 +53,7 @@ export class PaymentService {
       rrn: parsed.rrn,
       upiId: parsed.upiId,
       paidAt: new Date().toISOString(),
-      matchMethod: "kotak",
+      matchMethod: "bank",
     });
     return { ticket: paid, action: "marked_paid", parsed };
   }

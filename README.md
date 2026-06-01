@@ -1,6 +1,12 @@
-# payment-api
+<div align="center">
 
-A UPI payment gateway that uses **Dynamic Decimal Matching** to resolve payments by parsing bank SMS notifications. Built with Fastify, SQLite, and TypeScript.
+# DDM PAYMENT GATEWAY
+
+**v0.1.0**
+
+A zero-fee UPI payment gateway that uses **Dynamic Decimal Matching** to resolve payments by parsing bank SMS notifications. Built with Fastify, SQLite, and TypeScript.
+
+</div>
 
 ![Node](https://img.shields.io/badge/node-%3E%3D22-339933?logo=node.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript)
@@ -27,31 +33,22 @@ A UPI payment gateway that uses **Dynamic Decimal Matching** to resolve payments
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                     Fastify Server                       │
-│                                                          │
-│  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐  │
-│  │  Routes      │  │  Services    │  │  Middleware     │  │
-│  │              │  │              │  │                │  │
-│  │  POST /ticket│──▶ TicketService│  │  Rate limit    │  │
-│  │  GET /status │  │              │  │  Request log   │  │
-│  │  POST /webhook│  DecimalPool  │  │  Error handler │  │
-│  │  GET /health │  │  PaymentSvc │  │                │  │
-│  └──────┬───────┘  └──────┬───────┘  └────────────────┘  │
-│         │                 │                               │
-│         ▼                 ▼                               │
-│  ┌──────────────────────────────────────────────────┐    │
-│  │              SQLite (app.db)                      │    │
-│  │  tickets (id, amount, base_amount, decimal_val,  │    │
-│  │          status, sender_name, rrn, upi_id, ...)  │    │
-│  └──────────────────────────────────────────────────┘    │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐    │
-│  │              In-Memory                            │    │
-│  │  Map<base_amount, Set<taken_decimal>>            │    │
-│  │  Map<ticket_id, setTimeout> (expiry timers)      │    │
-│  └──────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────┘
+Fastify Server
+│
+├── Routes ────────▶ Services ──────────▶ SQLite (app.db)
+│   POST /api/ticket    TicketService        tickets table
+│   GET  /api/status    DecimalPool
+│   POST /api/webhook   PaymentService
+│   GET  /api/health
+│
+├── Middleware
+│   Rate limit (@fastify/rate-limit)
+│   Request logger (Pino)
+│   Error handler (unified JSON responses)
+│
+├── In-Memory State
+│   Map<base_amount, Set<taken_decimal>>
+│   Map<ticket_id, setTimeout>  (expiry timers)
 ```
 
 ### Components
@@ -61,7 +58,7 @@ A UPI payment gateway that uses **Dynamic Decimal Matching** to resolve payments
 | **Fastify** | HTTP server with built-in rate limiting (`@fastify/rate-limit`), schema validation (`@sinclair/typebox`), and security headers (`@fastify/helmet`) |
 | **TicketService** | Ticket CRUD via prepared statements. Manages per-ticket `setTimeout` handles for TTL expiry and decimal release |
 | **DecimalPoolService** | In-memory pool of taken decimal values. `allocate()` finds the first free decimal 0-99, `release()` removes from the taken set |
-| **PaymentService** | Parses incoming SMS using regex, dispatches to `confirmFromKotakSms()` or `fillFromGenericSms()` |
+| **PaymentService** | Parses incoming SMS using regex, dispatches to `confirmFromBankSms()` or `fillFromGenericSms()` |
 | **SQLite** | Single `tickets` table in WAL mode. Synchronous driver (`better-sqlite3`) — no connection pool overhead |
 
 ---
@@ -91,10 +88,10 @@ ticket.amount = 10000 paisa = ₹100.00
 ```
 Two SMSes arrive at POST /api/webhook { sms: "..." }
 
-  KOTAK SMS (bank settlement):
+  BANK SMS (settlement notification):
     "Received Rs.100.00 from user@paytm UPI Ref:123456789"
-    → parseSms → method: "kotak", amount: 10000
-    → confirmFromKotakSms
+    → parseSms → method: "bank", amount: 10000
+    → confirmFromBankSms
       → SELECT WHERE base_amount = 10000 AND status = 'pending'
       → markPaid(ticket)
         → UPDATE status = 'paid', rrn = '123456789'
@@ -102,15 +99,15 @@ Two SMSes arrive at POST /api/webhook { sms: "..." }
         → DecimalPool.release(10000, 0)
     → Response: { action: "marked_paid", ticketId: "TICKET..." }
 
-  GENERIC SMS (UPI app notification):
-    "TICKET... SOURAV paid you ₹100.00 UPI Ref:123456789"
+  GENERIC SMS (UPI app notification, includes ticketId):
+    "TICKET17123456780000 SOURAV paid you ₹100.00 UPI Ref:123456789"
     → parseSms → method: "generic", ticketId: "TICKET...", senderName: "SOURAV"
     → fillFromGenericSms
       → UPDATE sender_name = 'SOURAV' WHERE id = 'TICKET...'
     → Response: { action: "name_filled", ticketId: "TICKET..." }
 ```
 
-The Kotak SMS is the authoritative payment signal. The generic SMS only fills the payer's name. Either can arrive first — `fillSenderName` works regardless of payment status.
+The bank SMS is the authoritative payment signal. The generic SMS only fills the payer's name. Either can arrive first — `fillSenderName` works regardless of payment status.
 
 ---
 
@@ -184,7 +181,7 @@ SELECT base_amount, decimal_val, status FROM tickets;
 
 ### SMS Formats
 
-**Kotak Mahindra** (settlement SMS, no ticket ID):
+**Bank SMS** (settlement notification, no ticket ID):
 ```
 Confirmed payment for Received Rs.100.00 in your Kotak Bank AC X4959
 from user@oksbi on 08-03-26.UPI Ref:606703736480.
@@ -208,26 +205,24 @@ The `rrn` column has a `UNIQUE` constraint. If two webhook calls arrive with the
 Each ticket has three associated timers managed in-memory:
 
 ```
-ticket created
-    │
-    ├── setTimeout(TTL) ───────────────────────────────────┐
-    │  2 minutes (configurable via TICKET_TTL_MINUTES)      │
-    │                                                       │
-    ▼                                                       ▼
-onTtlReached(ticket)                                  paid/cancelled
-    │                                                       │
-    ├── setTimeout(30s) ── grace period                    │
-    │  ticket stays 'pending', Kotak SMS can still arrive   │
-    │                                                       │
-    ▼                                                       ▼
-graceExpired(ticket)                                   clearTimers()
-    │                                                       │
-    ├── UPDATE status = 'expired'                          │
-    ├── setTimeout(30s) ── release decimal                  │
-    │                                                       │
-    ▼                                                       ▼
-releaseTimer fires                                      DecimalPool.release()
-DecimalPool.release()
+Ticket Created
+│
+├── 2 min TTL ──────────▶ onTtlReached()
+│                           │
+│                           ├── 30s grace period
+│                           │   ticket stays 'pending', bank SMS can still arrive
+│                           │
+│                           ▼
+│                        graceExpired()
+│                           │
+│                           ├── UPDATE status = 'expired'
+│                           └── 30s ──▶ DecimalPool.release()
+│
+├── Paid (via bank SMS) ──▶ clearTimers()
+│                            └── DecimalPool.release()  (immediate)
+│
+└── Cancelled ─────────────▶ clearTimers()
+                             └── 30s ──▶ DecimalPool.release()
 ```
 
 On server restart, all timers are lost. The startup routine mass-expires any remaining pending tickets to maintain consistency:
@@ -323,7 +318,7 @@ X-Webhook-Secret: <shared-secret>
 { "sms": "Confirmed payment for Received Rs.100.00 in your Kotak Bank AC X4959 from user@oksbi on 08-03-26.UPI Ref:606703736480." }
 ```
 
-**Response `200` (Kotak):**
+**Response `200` (Bank SMS):**
 ```json
 {
   "status": "ok",
@@ -347,8 +342,8 @@ X-Webhook-Secret: <shared-secret>
 | Code | Status | Condition |
 |------|--------|-----------|
 | `WEBHOOK_UNAUTHORIZED` | 401 | Missing or invalid `X-Webhook-Secret` |
-| `TICKET_NOT_FOUND` | 404 | Kotak: no pending ticket matches the amount. Generic: no ticket with the given ID |
-| `AMOUNT_MISMATCH` | 400 | Kotak: multiple pending tickets match the same amount |
+| `TICKET_NOT_FOUND` | 404 | Bank SMS: no pending ticket matches the amount. Generic: no ticket with the given ID |
+| `AMOUNT_MISMATCH` | 400 | Bank SMS: multiple pending tickets match the same amount |
 | `RRN_DUPLICATE` | 409 | The RRN has already been processed for a different ticket |
 | `INVALID_AMOUNT` | 400 | Unrecognised SMS format |
 
@@ -460,7 +455,7 @@ src/
 │   │   └── webhook.ts        # POST /api/webhook
 │   └── services/
 │       ├── decimal.service.ts    # DDM pool: allocate, release, rebuild
-│       ├── payment.service.ts    # SMS parsing, Kotak/generic dispatch
+│       ├── payment.service.ts    # SMS parsing, bank/generic dispatch
 │       └── ticket.service.ts     # Ticket CRUD, timer management
 ├── types/
 │   └── index.ts              # Ticket, TicketResponse, ParsedSms interfaces
@@ -500,14 +495,14 @@ npm start
 
 ```bash
 # Build
-docker build -t payment-api .
+docker build -t ddm-payment-gateway .
 
 # Run
 docker run -d \
   -p 3000:3000 \
   -v payment_data:/app/data \
   --env-file .env \
-  payment-api
+  ddm-payment-gateway
 
 # With docker-compose
 docker compose up -d
@@ -523,7 +518,7 @@ npm run test:watch  # Watch mode
 The test suite covers:
 
 - Decimal pool allocation, spillover, and recovery
-- SMS parsing for both Kotak and generic formats
+- SMS parsing for both bank and generic formats
 - Route integration (create ticket, status check, webhook)
 - Webhook authentication rejection
 - Duplicate RRN rejection

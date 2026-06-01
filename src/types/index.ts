@@ -32,5 +32,5 @@ export interface ParsedSms {
   senderName?: string | undefined;
   rrn?: string | undefined;
   upiId?: string | undefined;
-  method: "generic" | "kotak";
+  method: "generic" | "bank";
 }
