@@ -2,7 +2,6 @@
   "name": "payment-gateway-v2",
   "version": "0.1.0",
   "private": true,
-  "workspaces": ["src/admin"],
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server/index.ts",
@@ -13,7 +12,7 @@
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "admin:dev": "npm --prefix src/admin run dev",
-    "admin:build": "npm --prefix src/admin run build"
+    "admin:build": "npm --prefix src/admin ci && npm --prefix src/admin run build"
   },
   "dependencies": {
     "@fastify/cookie": "^10.0.1",
