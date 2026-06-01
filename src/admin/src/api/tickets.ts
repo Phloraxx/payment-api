@@ -1,4 +1,4 @@
-import type { LogEntry, PoolSnapshot, Ticket } from "../types";
+import type { LogEntry, PoolSnapshot, Settings, Ticket } from "../types";
 import { api } from "./client";
 
 export function listTickets(params = "") {
@@ -38,5 +38,5 @@ export function fullSync() {
 }
 
 export function getSettings() {
-  return api<Record<string, string | number | boolean | null>>("/api/admin/settings");
+  return api<Settings>("/api/admin/settings");
 }
