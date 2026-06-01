@@ -1,6 +1,6 @@
 <div align="center">
 
-# DDM PAYMENT GATEWAY
+# Payment API
 
 **v0.1.0**
 
