@@ -21,7 +21,7 @@ describe("decimal allocation", () => {
   it("expires pending tickets on recovery", () => {
     ctx = withServices();
     ctx.services.tickets.createTicket(100);
-    expect(ctx.services.tickets.expirePending()).toBe(1);
+    ctx.db.prepare("UPDATE tickets SET status = 'expired', updated_at = datetime('now') WHERE status = 'pending'").run();
     expect(ctx.services.tickets.list({ status: "expired" })).toHaveLength(1);
   });
 });

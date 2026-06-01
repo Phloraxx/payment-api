@@ -28,7 +28,7 @@ describe("HTTP routes", () => {
       method: "POST",
       url: "/api/webhook",
       headers: { "x-webhook-secret": ctx.config.webhookSecret },
-      payload: { sms: `${ticket.ticketId} SOURAV paid you ₹100.00 UPI Ref:606703736499` },
+      payload: { sms: `Confirmed payment for Received Rs.100.00 in your Kotak Bank AC X4959 from user@paytm on 01-01-26.UPI Ref:606703736499.` },
     });
     expect(webhook.statusCode).toBe(200);
     expect(webhook.json<{ ticketId: string }>().ticketId).toBe(ticket.ticketId);
