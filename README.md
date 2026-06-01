@@ -2,16 +2,20 @@
 
 # Payment API
 
-**v0.1.0**
+**v0.6.81**
 
 A zero-fee UPI payment gateway that uses **Dynamic Decimal Matching** to resolve payments by parsing bank SMS notifications. Built with Fastify, SQLite, and TypeScript.
 
 </div>
 
+<div align="center">
+
 ![Node](https://img.shields.io/badge/node-%3E%3D22-339933?logo=node.js)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript)
 ![Fastify](https://img.shields.io/badge/Fastify-5-000000?logo=fastify)
 ![SQLite](https://img.shields.io/badge/SQLite-better_sqlite3-003B57?logo=sqlite)
+
+</div>
 
 ---
 
