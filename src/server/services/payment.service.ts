@@ -1,7 +1,7 @@
 import type Database from "better-sqlite3";
 import type { ParsedSms, Ticket } from "../../types/index.js";
 import { AppError } from "../errors.js";
-import { toPaisa } from "../money.js";
+import { baseAmountFromPaisa, toPaisa } from "../money.js";
 import type { TicketService } from "./ticket.service.js";
 
 export class PaymentService {
@@ -34,33 +34,38 @@ export class PaymentService {
       };
     }
 
-    throw new AppError("INVALID_AMOUNT", 'Unrecognized SMS format. Expected: "TICKET123 paid ₹500 by Name" or "Received Rs. 500 from Name".');
+    throw new AppError("INVALID_AMOUNT", 'Unrecognized SMS format. Expected: "TICKET123 Name paid ₹500" or "Received Rs. 500 from Name".');
   }
 
-  confirmFromSms(sms: string): { ticket: Ticket; action: string; parsed: ParsedSms } {
+  confirmFromKotakSms(sms: string): { ticket: Ticket; action: string; parsed: ParsedSms } {
     const parsed = this.parseSms(sms);
-    let ticket: Ticket;
-    if (parsed.ticketId) {
-      ticket = this.tickets.getTicket(parsed.ticketId);
-      if (ticket.amount !== parsed.amount) {
-        throw new AppError("AMOUNT_MISMATCH", "SMS amount does not match ticket amount.");
-      }
-    } else {
-      const matches = this.db
-        .prepare("SELECT * FROM tickets WHERE amount = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 2")
-        .all(parsed.amount) as Ticket[];
-      if (matches.length === 0) throw new AppError("TICKET_NOT_FOUND", "No pending ticket matches this payment amount.");
-      if (matches.length > 1) throw new AppError("AMOUNT_MISMATCH", "Multiple pending tickets match this amount.");
-      ticket = matches[0]!;
+    if (parsed.method !== "kotak") {
+      throw new AppError("INVALID_AMOUNT", "Expected Kotak SMS format.");
     }
+    const baseAmount = baseAmountFromPaisa(parsed.amount);
+    const matches = this.db
+      .prepare("SELECT * FROM tickets WHERE base_amount = ? AND status = 'pending' ORDER BY created_at ASC LIMIT 2")
+      .all(baseAmount) as Ticket[];
+    if (matches.length === 0) throw new AppError("TICKET_NOT_FOUND", "No pending ticket matches this payment amount.");
+    if (matches.length > 1) throw new AppError("AMOUNT_MISMATCH", "Multiple pending tickets match this base amount.");
+    const ticket = matches[0]!;
     const paid = this.tickets.markPaid(ticket.id, {
-      senderName: parsed.senderName,
       rrn: parsed.rrn,
       upiId: parsed.upiId,
       paidAt: new Date().toISOString(),
-      matchMethod: parsed.method,
+      matchMethod: "kotak",
     });
     return { ticket: paid, action: "marked_paid", parsed };
+  }
+
+  fillFromGenericSms(sms: string): { ticket: Ticket; action: string; parsed: ParsedSms } {
+    const parsed = this.parseSms(sms);
+    if (parsed.method !== "generic") {
+      throw new AppError("INVALID_AMOUNT", "Expected generic SMS format.");
+    }
+    if (!parsed.ticketId) throw new AppError("TICKET_NOT_FOUND", "No ticket ID in SMS.");
+    const ticket = this.tickets.fillSenderName(parsed.ticketId, parsed.senderName);
+    return { ticket, action: "name_filled", parsed };
   }
 
   private extractRrn(sms: string): string | undefined {
