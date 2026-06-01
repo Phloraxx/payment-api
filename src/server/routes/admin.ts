@@ -126,6 +126,8 @@ export async function registerAdminRoutes(app: FastifyInstance, _config: Config,
     publicBaseUrl: _config.publicBaseUrl,
     rpId: _config.rpId,
     ticketTtlMinutes: _config.ticketTtlMinutes,
+    upiId: _config.upiId,
+    upiPayeeName: _config.upiPayeeName,
     appwriteEnabled: _config.appwrite.enabled,
     appwriteEndpoint: _config.appwrite.endpoint ?? null,
   }));
