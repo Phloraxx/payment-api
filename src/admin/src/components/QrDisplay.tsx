@@ -1,33 +1,25 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import QRCode from "qrcode";
-import { getSettings } from "../api/tickets";
+
+const UPI_ID = "souravpbijoy-2@okicici";
+const PAYEE_NAME = "MuLearn SCET";
 
 interface QrDisplayProps {
   ticketId: string;
   amount: number;
 }
 
-function upiLink(ticketId: string, amount: number, upiId: string, payeeName: string): string {
+function upiLink(ticketId: string, amount: number): string {
   const am = amount.toFixed(2);
-  return `upi://pay?pa=${upiId}&pn=${encodeURIComponent(payeeName)}&am=${am}&cu=INR&tn=${ticketId}`;
+  return `upi://pay?pa=${UPI_ID}&pn=${encodeURIComponent(PAYEE_NAME)}&am=${am}&cu=INR&tn=${ticketId}`;
 }
 
 export function QrDisplay({ ticketId, amount }: QrDisplayProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [upiId, setUpiId] = useState("");
-  const [payeeName, setPayeeName] = useState("");
+  const link = upiLink(ticketId, amount);
 
   useEffect(() => {
-    getSettings().then((s) => {
-      setUpiId(s.upiId);
-      setPayeeName(s.upiPayeeName);
-    }).catch(() => {});
-  }, []);
-
-  const link = upiId ? upiLink(ticketId, amount, upiId, payeeName) : "";
-
-  useEffect(() => {
-    if (!canvasRef.current || !link) return;
+    if (!canvasRef.current) return;
     QRCode.toCanvas(canvasRef.current, link, {
       width: 200,
       margin: 2,
@@ -38,11 +30,7 @@ export function QrDisplay({ ticketId, amount }: QrDisplayProps) {
   return (
     <div className="panel" style={{ textAlign: "center" }}>
       <h3 style={{ margin: "0 0 12px" }}>Scan to Pay</h3>
-      {link ? (
-        <canvas ref={canvasRef} style={{ borderRadius: 8 }} />
-      ) : (
-        <div style={{ width: 200, height: 200, margin: "0 auto", background: "#1e293b", borderRadius: 8 }} />
-      )}
+      <canvas ref={canvasRef} style={{ borderRadius: 8 }} />
       <div className="result" style={{ marginTop: 12, fontSize: 13, wordBreak: "break-all" }}>
         <strong style={{ display: "block", color: "#e2e8f0", fontSize: 15, marginBottom: 4 }}>
           ₹{amount.toFixed(2)}

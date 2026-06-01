@@ -1,10 +1,9 @@
 import { useEffect, useState } from "react";
 import { fullSync, getSettings } from "../api/tickets";
-import type { Settings } from "../types";
 
 export function Settings() {
   const [message, setMessage] = useState("");
-  const [settings, setSettings] = useState<Settings>({} as Settings);
+  const [settings, setSettings] = useState<Record<string, string | number | boolean | null>>({});
   useEffect(() => {
     void getSettings().then(setSettings);
   }, []);

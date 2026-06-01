@@ -19,18 +19,6 @@ export interface LogEntry {
   created_at: string;
 }
 
-export interface Settings {
-  port: number;
-  host: string;
-  publicBaseUrl: string;
-  rpId: string;
-  ticketTtlMinutes: number;
-  upiId: string;
-  upiPayeeName: string;
-  appwriteEnabled: boolean;
-  appwriteEndpoint: string | null;
-}
-
 export interface PoolSnapshot {
   baseAmount: number;
   free: number;

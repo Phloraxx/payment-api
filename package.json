@@ -5,14 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server/index.ts",
-    "build": "npm run admin:build && tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json",
     "start": "node dist/server/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "admin:dev": "npm --prefix src/admin run dev",
-    "admin:build": "npm --prefix src/admin ci && npm --prefix src/admin run build"
+    "admin:build": "npm --prefix src/admin run build"
   },
   "dependencies": {
     "@fastify/cookie": "^10.0.1",
