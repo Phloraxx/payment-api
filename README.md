@@ -1,177 +1,442 @@
-# Payment Gateway v2 — Zero-Fee UPI Payment Gateway
+# payment-api
 
-A UPI payment gateway for college events that uses **Dynamic Decimal Matching (DDM)** to identify payments without needing a third-party payment gateway or API. Works purely by parsing bank SMS notifications.
+A UPI payment gateway that uses **Dynamic Decimal Matching** to resolve payments by parsing bank SMS notifications. Built with Fastify, SQLite, and TypeScript.
 
-## How It Works
+![Node](https://img.shields.io/badge/node-%3E%3D22-339933?logo=node.js)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript)
+![Fastify](https://img.shields.io/badge/Fastify-5-000000?logo=fastify)
+![SQLite](https://img.shields.io/badge/SQLite-better_sqlite3-003B57?logo=sqlite)
 
-1. **Ticket creation** — When a ticket is created, the system allocates a unique precise amount (e.g., ₹100.03 instead of ₹100) from a pool of 100 decimal variations (0–99 paise).
-2. **Student pays** — The student scans a UPI QR code or transfers to the displayed UPI ID using the exact displayed amount.
-3. **Bank SMS arrives** — The system receives the bank's SMS notification via a webhook endpoint.
-   - **Kotak Mahindra SMS** contains the amount and sender's UPI ID — the system matches by amount and marks the ticket paid.
-   - **Generic SMS** (other banks) contains the ticket ID and sender's name — the system fills in the sender name only.
-4. **Unique amount guarantees** — The unique decimal ensures no two payments can be confused, even when multiple tickets have the same rupee value.
+---
+
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Data Flow](#data-flow)
+- [Dynamic Decimal Matching](#dynamic-decimal-matching)
+- [SMS Processing](#sms-processing)
+- [Timer & Expiry System](#timer--expiry-system)
+- [API Reference](#api-reference)
+- [Database Schema](#database-schema)
+- [Configuration](#configuration)
+- [Project Structure](#project-structure)
+- [Running](#running)
+
+---
 
 ## Architecture
 
-- **Single Node.js process** — No microservices, no message queues, no external dependencies.
-- **Fastify 5** — High-performance HTTP server with built-in rate limiting and schema validation.
-- **SQLite** via `better-sqlite3` — Zero-config database, WAL mode for concurrent reads.
-- **No external APIs** — No Razorpay, no PhonePe, no third-party payment gateway.
-
-## API Endpoints
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| `POST` | `/api/ticket` | — | Create a ticket `{ amount: number }` |
-| `GET` | `/api/status/:id` | — | Get ticket status |
-| `POST` | `/api/webhook` | `x-webhook-secret` | Incoming SMS notification `{ sms: string }` |
-| `GET` | `/health` | — | Health check |
-
-### POST /api/ticket
-
-```json
-// Request
-{ "amount": 100 }
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Fastify Server                       │
+│                                                          │
+│  ┌─────────────┐  ┌──────────────┐  ┌────────────────┐  │
+│  │  Routes      │  │  Services    │  │  Middleware     │  │
+│  │              │  │              │  │                │  │
+│  │  POST /ticket│──▶ TicketService│  │  Rate limit    │  │
+│  │  GET /status │  │              │  │  Request log   │  │
+│  │  POST /webhook│  DecimalPool  │  │  Error handler │  │
+│  │  GET /health │  │  PaymentSvc │  │                │  │
+│  └──────┬───────┘  └──────┬───────┘  └────────────────┘  │
+│         │                 │                               │
+│         ▼                 ▼                               │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │              SQLite (app.db)                      │    │
+│  │  tickets (id, amount, base_amount, decimal_val,  │    │
+│  │          status, sender_name, rrn, upi_id, ...)  │    │
+│  └──────────────────────────────────────────────────┘    │
+│                                                          │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │              In-Memory                            │    │
+│  │  Map<base_amount, Set<taken_decimal>>            │    │
+│  │  Map<ticket_id, setTimeout> (expiry timers)      │    │
+│  └──────────────────────────────────────────────────┘    │
+└─────────────────────────────────────────────────────────┘
 ```
 
-```json
-// Response
-{ "ticketId": "TICKET17123456780000", "amount": 100 }
+### Components
+
+| Component | Role |
+|-----------|------|
+| **Fastify** | HTTP server with built-in rate limiting (`@fastify/rate-limit`), schema validation (`@sinclair/typebox`), and security headers (`@fastify/helmet`) |
+| **TicketService** | Ticket CRUD via prepared statements. Manages per-ticket `setTimeout` handles for TTL expiry and decimal release |
+| **DecimalPoolService** | In-memory pool of taken decimal values. `allocate()` finds the first free decimal 0-99, `release()` removes from the taken set |
+| **PaymentService** | Parses incoming SMS using regex, dispatches to `confirmFromKotakSms()` or `fillFromGenericSms()` |
+| **SQLite** | Single `tickets` table in WAL mode. Synchronous driver (`better-sqlite3`) — no connection pool overhead |
+
+---
+
+## Data Flow
+
+### Ticket Creation
+
+```
+POST /api/ticket { amount: 100 }
+
+  1. toPaisa(100) → 10000 paisa
+  2. DecimalPool.allocate(10000)
+     → base = 10000
+     → scan 0..99, decimal 00 is free
+     → mark 00 as taken
+     → return { amount: 10000, baseAmount: 10000, decimalVal: 0 }
+  3. INSERT INTO tickets (...) VALUES ('TICKET...', 10000, 'pending', 10000, 0)
+  4. setTimeout(() => onTtlReached(ticket), 2 * 60_000)
+  5. Response: { ticketId: 'TICKET...', amount: 100, status: 'pending' }
+
+ticket.amount = 10000 paisa = ₹100.00
 ```
 
-### GET /api/status/:id
+### Payment Confirmation
 
-```json
-// Response
-{ "status": "pending", "ticketId": "TICKET17123456780000", "amount": 100, "createdAt": "..." }
+```
+Two SMSes arrive at POST /api/webhook { sms: "..." }
+
+  KOTAK SMS (bank settlement):
+    "Received Rs.100.00 from user@paytm UPI Ref:123456789"
+    → parseSms → method: "kotak", amount: 10000
+    → confirmFromKotakSms
+      → SELECT WHERE base_amount = 10000 AND status = 'pending'
+      → markPaid(ticket)
+        → UPDATE status = 'paid', rrn = '123456789'
+        → clearTimers() (cancel expiry + grace timers)
+        → DecimalPool.release(10000, 0)
+    → Response: { action: "marked_paid", ticketId: "TICKET..." }
+
+  GENERIC SMS (UPI app notification):
+    "TICKET... SOURAV paid you ₹100.00 UPI Ref:123456789"
+    → parseSms → method: "generic", ticketId: "TICKET...", senderName: "SOURAV"
+    → fillFromGenericSms
+      → UPDATE sender_name = 'SOURAV' WHERE id = 'TICKET...'
+    → Response: { action: "name_filled", ticketId: "TICKET..." }
 ```
 
-### POST /api/webhook
+The Kotak SMS is the authoritative payment signal. The generic SMS only fills the payer's name. Either can arrive first — `fillSenderName` works regardless of payment status.
 
-The webhook accepts SMS notifications from banks. Two formats are supported:
+---
 
-**Kotak Mahindra (marks ticket paid):**
+## Dynamic Decimal Matching
+
+### Problem
+
+UPI payments only provide a transaction amount and reference number. Without a payment gateway callback, there is no way to know which customer paid for which ticket when multiple tickets share the same price.
+
+### Solution
+
+Replace the standard `₹100.00` amount with a unique `₹100.xx` amount drawn from a pool of 100 decimal variations. The exact amount encodes which ticket was paid.
+
+### Pool Structure
+
 ```
-Confirmed payment for Received Rs.100.00 in your Kotak Bank AC X4959 from user@oksbi on 08-03-26.UPI Ref:606703736480.
+Map<base_amount, Set<taken_decimal>>
+
+base 10000 (₹100):  Set{ 00, 03, 07, 15 }    → 96 free slots
+base 10100 (₹101):  Set{ 01, 02 }              → 98 free slots
+base 10200 (₹102):  Set{ }                     → 100 free slots (untouched)
 ```
 
-**Generic (fills sender name, does NOT mark paid):**
+The pool stores only **taken** decimals. Free decimals are anything in 0..99 not in the set.
+
+### Allocation
+
+```
+allocate(10000 paisa):
+  1. base = baseAmountFromPaisa(10000) → 10000
+  2. set = pools.get(10000) ?? new Set()
+  3. for i = 0..99:
+       if !set.has(i): set.add(i); return { amount: 10000 + i, baseAmount: 10000, decimalVal: i }
+  4. All 100 taken → spillover
+     for block = 10100, 10200, ...:
+       set = pools.get(block) ?? new Set()
+       if set.size < 100: return allocateFromBlock(block)
+  5. throw POOL_EXHAUSTED
+```
+
+Sequential allocation (0, 1, 2, ...) is used rather than random to minimise fragmentation.
+
+### Release Semantics
+
+| Trigger | Decimal Release | Rationale |
+|---------|----------------|-----------|
+| **Paid** | Immediate | RRN deduplication in the DB prevents the same decimal from being double-matched |
+| **Expired** | 30s delay | Prevents rapid recycling: a delayed SMS could match a freshly re-allocated decimal |
+| **Cancelled** | 30s delay | Same anti-race protection |
+
+### Spillover
+
+When all 100 decimal slots for a base amount are taken, the next integer block is used. For example, ticket #101 for `₹100` will be allocated `₹101.00`. The price drift is bounded by the number of concurrent tickets at that price point.
+
+### Startup Recovery
+
+On server restart:
+
+```sql
+UPDATE tickets SET status = 'expired' WHERE status = 'pending';
+SELECT base_amount, decimal_val, status FROM tickets;
+```
+
+1. All pending tickets are mass-expired (TTL state was in-memory and lost)
+2. The pool is rebuilt from remaining `pending` and `paid` ticket decimals
+3. No per-ticket timers are restored — fresh timers are created for new tickets
+
+---
+
+## SMS Processing
+
+### SMS Formats
+
+**Kotak Mahindra** (settlement SMS, no ticket ID):
+```
+Confirmed payment for Received Rs.100.00 in your Kotak Bank AC X4959
+from user@oksbi on 08-03-26.UPI Ref:606703736480.
+```
+→ Extracts `amount` (10000 paisa), `rrn`, `upi_id` → matches by `base_amount` → marks paid
+
+**Generic** (UPI app notification, includes ticket ID):
 ```
 TICKET17123456780000 SOURAV paid you ₹100.00 UPI Ref:606703736479
 ```
+→ Extracts `ticketId`, `senderName` → matches by ID → fills `sender_name`
 
-Requires the `x-webhook-secret` header (constant-time compared).
+### RRN Deduplication
 
+The `rrn` column has a `UNIQUE` constraint. If two webhook calls arrive with the same RRN (duplicate delivery), the second `UPDATE` throws a constraint error, which is caught and surfaced as `RRN_DUPLICATE`. This prevents the same transaction from marking two different tickets as paid.
+
+---
+
+## Timer & Expiry System
+
+Each ticket has three associated timers managed in-memory:
+
+```
+ticket created
+    │
+    ├── setTimeout(TTL) ───────────────────────────────────┐
+    │  2 minutes (configurable via TICKET_TTL_MINUTES)      │
+    │                                                       │
+    ▼                                                       ▼
+onTtlReached(ticket)                                  paid/cancelled
+    │                                                       │
+    ├── setTimeout(30s) ── grace period                    │
+    │  ticket stays 'pending', Kotak SMS can still arrive   │
+    │                                                       │
+    ▼                                                       ▼
+graceExpired(ticket)                                   clearTimers()
+    │                                                       │
+    ├── UPDATE status = 'expired'                          │
+    ├── setTimeout(30s) ── release decimal                  │
+    │                                                       │
+    ▼                                                       ▼
+releaseTimer fires                                      DecimalPool.release()
+DecimalPool.release()
+```
+
+On server restart, all timers are lost. The startup routine mass-expires any remaining pending tickets to maintain consistency:
+
+```sql
+UPDATE tickets SET status = 'expired', updated_at = datetime('now')
+WHERE status = 'pending';
+```
+
+---
+
+## API Reference
+
+### `POST /api/ticket`
+
+Create a payment ticket. A unique decimal amount is allocated from the pool.
+
+```
+Rate limit: 5 requests/minute/IP
+```
+
+**Request:**
 ```json
-// Request
+{ "amount": 100 }
+```
+
+**Response `200`:**
+```json
+{
+  "ticketId": "TICKET17123456780000",
+  "amount": 100,
+  "amountPaisa": 10000,
+  "status": "pending",
+  "createdAt": "2026-06-01T12:00:00"
+}
+```
+
+**Errors:**
+| Code | Status | Condition |
+|------|--------|-----------|
+| `INVALID_AMOUNT` | 400 | Amount is not a positive number with ≤2 decimals |
+| `POOL_EXHAUSTED` | 503 | All decimal slots for this and adjacent blocks are taken |
+
+---
+
+### `GET /api/status/:id`
+
+Get the current status of a ticket.
+
+```
+Rate limit: 60 requests/minute/IP
+```
+
+**Response `200`:**
+```json
+{
+  "ticketId": "TICKET17123456780000",
+  "amount": 100,
+  "amountPaisa": 10000,
+  "status": "paid",
+  "createdAt": "2026-06-01T12:00:00",
+  "paidAt": "2026-06-01T12:02:30",
+  "senderName": "SOURAV",
+  "rrn": "606703736479",
+  "upiId": "user@paytm"
+}
+```
+
+`status` is one of: `pending`, `paid`, `cancelled`, `expired`.
+
+**Errors:**
+| Code | Status | Condition |
+|------|--------|-----------|
+| `TICKET_NOT_FOUND` | 404 | No ticket with the given ID |
+
+---
+
+### `POST /api/webhook`
+
+Receive a bank SMS notification. Requires the `X-Webhook-Secret` header.
+
+```
+Rate limit: 30 requests/minute/IP
+```
+
+**Headers:**
+```
+X-Webhook-Secret: <shared-secret>
+```
+
+**Request:**
+```json
 { "sms": "Confirmed payment for Received Rs.100.00 in your Kotak Bank AC X4959 from user@oksbi on 08-03-26.UPI Ref:606703736480." }
-
-// Response (Kotak)
-{ "ticketId": "TICKET...", "status": "ok", "action": "marked_paid" }
-
-// Response (Generic)
-{ "ticketId": "TICKET...", "status": "ok", "action": "name_filled" }
 ```
 
-### GET /health
-
+**Response `200` (Kotak):**
 ```json
-// Response
-{ "status": "ok", "uptime": 1234 }
+{
+  "status": "ok",
+  "ticketId": "TICKET17123456780000",
+  "action": "marked_paid",
+  "ticket": { "ticketId": "...", "amount": 100, "status": "paid", ... }
+}
 ```
 
-## Setup
+**Response `200` (Generic):**
+```json
+{
+  "status": "ok",
+  "ticketId": "TICKET17123456780000",
+  "action": "name_filled",
+  "ticket": { "ticketId": "...", "amount": 100, "status": "pending", ... }
+}
+```
 
-Copy `.env.example` to `.env` and configure:
+**Errors:**
+| Code | Status | Condition |
+|------|--------|-----------|
+| `WEBHOOK_UNAUTHORIZED` | 401 | Missing or invalid `X-Webhook-Secret` |
+| `TICKET_NOT_FOUND` | 404 | Kotak: no pending ticket matches the amount. Generic: no ticket with the given ID |
+| `AMOUNT_MISMATCH` | 400 | Kotak: multiple pending tickets match the same amount |
+| `RRN_DUPLICATE` | 409 | The RRN has already been processed for a different ticket |
+| `INVALID_AMOUNT` | 400 | Unrecognised SMS format |
+
+---
+
+### `GET /health`
+
+```
+Rate limit: none
+```
+
+**Response `200`:**
+```json
+{ "status": "healthy", "uptime": 3600, "db": "ok" }
+```
+
+---
+
+## Rate Limits
+
+| Endpoint | Limit | Scope |
+|----------|-------|-------|
+| `POST /api/ticket` | 5 requests / minute | Per IP |
+| `GET /api/status/:id` | 60 requests / minute | Per IP |
+| `POST /api/webhook` | 30 requests / minute | Per IP |
+| `GET /health` | Unlimited | — |
+| All others | 100 requests / minute | Per IP |
+
+Limits are enforced by `@fastify/rate-limit` using an in-memory sliding window.
+
+---
+
+## Database Schema
+
+### `tickets`
+
+```sql
+CREATE TABLE IF NOT EXISTS tickets (
+  id          TEXT PRIMARY KEY,
+  amount      INTEGER NOT NULL,
+  status      TEXT NOT NULL DEFAULT 'pending'
+              CHECK(status IN ('pending','paid','cancelled','expired')),
+  base_amount INTEGER NOT NULL,
+  decimal_val INTEGER NOT NULL,
+  sender_name TEXT,
+  rrn         TEXT UNIQUE,
+  upi_id      TEXT,
+  paid_at     TEXT,
+  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+```
+
+| Column | Type | Notes |
+|--------|------|-------|
+| `id` | TEXT | Format: `TICKET{timestamp}{counter}`, e.g. `TICKET17123456780000` |
+| `amount` | INTEGER | Total amount in paisa (base + decimal), e.g. `10003` = ₹100.03 |
+| `status` | TEXT | `pending` / `paid` / `cancelled` / `expired` |
+| `base_amount` | INTEGER | Floor to nearest rupee in paisa, e.g. `10000` for ₹100.xx |
+| `decimal_val` | INTEGER | The allocated decimal 0-99 |
+| `rrn` | TEXT | UPI reference number, unique across all tickets |
+
+### Indexes
+
+```sql
+idx_tickets_status   ON tickets(status)
+idx_tickets_amount   ON tickets(amount)
+idx_tickets_rrn      ON tickets(rrn)
+idx_tickets_decimal  ON tickets(base_amount, decimal_val, status)
+idx_tickets_created  ON tickets(created_at)
+```
+
+---
+
+## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `3000` | HTTP server port |
 | `HOST` | `0.0.0.0` | Bind address |
-| `TICKET_TTL_MINUTES` | `2` | Minutes before a pending ticket auto-expires |
-| `UPI_ID` | — | UPI ID for payment references (e.g., `college@upi`) |
+| `TICKET_TTL_MINUTES` | `2` | Time before a pending ticket expires (in-memory timer) |
+| `UPI_ID` | — | UPI ID shown on tickets (e.g. `college@upi`) |
 | `UPI_PAYEE_NAME` | — | Payee name for ticket display |
-| `WEBHOOK_SECRET` | random | Shared secret for SMS webhook authentication |
+| `WEBHOOK_SECRET` | random | Shared secret for `X-Webhook-Secret` header verification |
+| `DATA_DIR` | `data` | Directory for the SQLite database file |
+| `LOG_LEVEL` | `info` | Pino log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
 
-## Rate Limits
-
-| Endpoint | Rate Limit |
-|----------|------------|
-| `POST /api/ticket` | 5 requests per minute per IP |
-| `POST /api/webhook` | 30 requests per minute per IP |
-| `GET /api/status/:id` | 60 requests per minute per IP |
-| All others | 100 requests per minute per IP |
-
-## Running
-
-```bash
-# Development (with auto-reload)
-npm run dev
-
-# Build for production
-npm run build
-
-# Start production
-npm start
-
-# Run tests
-npm test
-
-# Type check
-npm run typecheck
-```
-
-### Docker
-
-```bash
-# Build
-docker build -t payment-gateway-v2 .
-
-# Run
-docker run -d -p 3000:3000 -v payment_data:/app/data --env-file .env payment-gateway-v2
-
-# With docker-compose
-docker compose up -d
-```
-
-## Dynamic Decimal Matching (DDM) Algorithm
-
-DDM prevents amount collisions when multiple tickets share the same rupee value.
-
-### Pool Structure
-
-Each base amount (price in paisa rounded down to the nearest rupee) has a pool of 100 decimal slots (0–99). For example, for ₹100 tickets:
-
-- Base amount: `10000` paisa (100 × 100)
-- Decimal slots: `0` through `99`
-- Available amounts: `10000` (₹100.00), `10001` (₹100.01), … `10099` (₹100.99)
-
-### Allocation
-
-1. When `createTicket(100)` is called, the pool for base amount `10000` is checked.
-2. The first free decimal slot is allocated (0, then 1, then 2, …).
-3. If all 100 slots at the base amount are taken, allocation **spill over**s to the next integer block: `10100` (₹101.00), `10101`, etc.
-4. The allocated slot is marked as **used** in the in-memory set so it won't be re-allocated.
-
-### Release (Grace Period)
-
-When a ticket is expired or cancelled, its decimal slot enters a **30-second grace period** before being returned to the free pool. This prevents rapid recycling of decimals that could confuse manual reconciliation.
-
-- **Paid** tickets release their decimal immediately (the payment is confirmed).
-- **Expired** tickets release after 30 seconds.
-- **Cancelled** tickets release after 30 seconds.
-
-### Recovery on Restart
-
-On server startup, `rebuild()` scans all `pending` and `paid` tickets from the database and re-populates the in-memory pool. This ensures that the pool state is correctly recovered after a restart.
-
-### Why Not a Random Decimal?
-
-A deterministic sequential allocation is used rather than random because:
-
-1. **Predictability** — The next free slot is always the smallest available, which minimises fragmentation.
-2. **Debugging** — The allocation order is reproducible and easy to reason about.
-3. **No collisions** — Sequential allocation is guaranteed to avoid collisions as long as freed slots are properly managed.
+---
 
 ## Project Structure
 
@@ -179,46 +444,87 @@ A deterministic sequential allocation is used rather than random because:
 src/
 ├── server/
 │   ├── index.ts              # Entry point, startup, graceful shutdown
-│   ├── config.ts             # Typed env configuration
-│   ├── app.ts                # Fastify app assembly
-│   ├── errors.ts             # AppError class and error codes
-│   ├── money.ts              # Paisa conversion utilities
+│   ├── config.ts             # Environment variable loader
+│   ├── app.ts                # Fastify app assembly (routes, plugins)
+│   ├── errors.ts             # AppError class + status code map
+│   ├── money.ts              # Paisa/rupee conversion utilities
 │   ├── db/
-│   │   ├── connection.ts     # SQLite connection management
-│   │   └── schema.ts         # Table definitions
+│   │   ├── connection.ts     # SQLite open/close with WAL pragmas
+│   │   └── schema.ts         # CREATE TABLE statements
 │   ├── middleware/
-│   │   ├── error-handler.ts  # Unified error responses
-│   │   └── request-logger.ts # Request logging
+│   │   ├── error-handler.ts  # Unified error response format
+│   │   └── request-logger.ts # Pino request logging
 │   ├── routes/
-│   │   ├── health.ts         # Health check endpoint
-│   │   ├── ticket.ts         # Ticket create + status endpoints
-│   │   └── webhook.ts        # SMS webhook endpoint
+│   │   ├── health.ts         # GET /health
+│   │   ├── ticket.ts         # POST /api/ticket, GET /api/status/:id
+│   │   └── webhook.ts        # POST /api/webhook
 │   └── services/
-│       ├── decimal.service.ts    # DDM pool allocation and release
-│       ├── payment.service.ts    # SMS parsing and payment confirmation
-│       └── ticket.service.ts     # Ticket CRUD with prepared statements
+│       ├── decimal.service.ts    # DDM pool: allocate, release, rebuild
+│       ├── payment.service.ts    # SMS parsing, Kotak/generic dispatch
+│       └── ticket.service.ts     # Ticket CRUD, timer management
 ├── types/
-│   └── index.ts              # Shared TypeScript interfaces
+│   └── index.ts              # Ticket, TicketResponse, ParsedSms interfaces
 └── test/                     # Vitest test suite
+    ├── helpers.ts
+    ├── decimal.test.ts
+    ├── money.test.ts
+    ├── payment.test.ts
+    └── routes.test.ts
 ```
 
-## Testing
+---
+
+## Running
 
 ```bash
-# All tests
+# Install
+npm install
+
+# Development (with file watching)
+npm run dev
+
+# TypeScript check
+npm run typecheck
+
+# Tests
 npm test
 
-# Watch mode
-npm run test:watch
+# Production build
+npm run build
 
-# Coverage
-npx vitest run --coverage
+# Start production
+npm start
 ```
 
-Tests cover:
+### Docker
+
+```bash
+# Build
+docker build -t payment-api .
+
+# Run
+docker run -d \
+  -p 3000:3000 \
+  -v payment_data:/app/data \
+  --env-file .env \
+  payment-api
+
+# With docker-compose
+docker compose up -d
+```
+
+### Testing
+
+```
+npm test            # Run all tests
+npm run test:watch  # Watch mode
+```
+
+The test suite covers:
+
 - Decimal pool allocation, spillover, and recovery
-- Payment SMS parsing (generic + Kotak formats)
-- Route integration (ticket create, status check, webhook)
-- Rejection of unauthorised webhook calls
+- SMS parsing for both Kotak and generic formats
+- Route integration (create ticket, status check, webhook)
+- Webhook authentication rejection
 - Duplicate RRN rejection
 - Immediate reuse of paid decimals
