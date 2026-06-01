@@ -10,17 +10,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "admin:dev": "npm --prefix src/admin run dev",
-    "admin:build": "npm --prefix src/admin run build"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@fastify/cookie": "^10.0.1",
     "@fastify/helmet": "^13.0.1",
     "@fastify/rate-limit": "^10.3.0",
-    "@fastify/static": "^9.1.3",
-    "@fastify/websocket": "^11.0.1",
-    "@simplewebauthn/server": "^13.1.1",
     "@sinclair/typebox": "^0.34.28",
     "better-sqlite3": "^11.9.1",
     "dotenv": "^16.4.7",
@@ -31,7 +25,6 @@
     "@eslint/js": "^9.22.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.13.10",
-    "@types/ws": "^8.18.1",
     "eslint": "^9.22.0",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",

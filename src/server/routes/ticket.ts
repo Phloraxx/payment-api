@@ -1,9 +1,9 @@
 import type { FastifyInstance } from "fastify";
 import { Type } from "@sinclair/typebox";
-import type { Services } from "../container.js";
+import type { AppServices } from "../app.js";
 import { toTicketResponse } from "../services/ticket.service.js";
 
-export async function registerTicketRoutes(app: FastifyInstance, services: Services): Promise<void> {
+export async function registerTicketRoutes(app: FastifyInstance, services: AppServices): Promise<void> {
   app.post<{ Body: { amount: number | string } }>(
     "/api/ticket",
     {
