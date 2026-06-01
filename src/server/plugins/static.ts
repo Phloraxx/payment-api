@@ -9,7 +9,6 @@ export async function registerStatic(app: FastifyInstance): Promise<void> {
   await app.register(fastifyStatic, {
     root,
     prefix: "/admin/",
-    decorateReply: false,
   });
   app.setNotFoundHandler((request, reply) => {
     if (request.url.startsWith("/admin")) {
