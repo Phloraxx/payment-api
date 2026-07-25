@@ -1,762 +1,727 @@
-# Payment Gateway v2 — Architecture Plan
+# Payment API Rebuild — Implementation Plan
 
-A zero-fee UPI payment gateway for college events using **Dynamic Decimal Matching (DDM)**. Single-server, SQLite-primary, Appwrite-secondary.
+> Branch: `rebuild-pocketbase`
+>
+> Goal: rebuild the prototype as a small, durable, self-hosted hobby payment-verification service using **Go + PocketBase + SQLite + libgm + React/Vite**.
+
+This plan intentionally optimises for simplicity. The project is personal infrastructure, not a commercial payment processor. We should still preserve the properties that matter for payment correctness: durable state, exact matching, idempotency, conservative amount reuse, observable connector health and reproducible tests.
 
 ---
 
-## 1. High-Level Architecture
+## 1. Decisions already made
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                        Docker Container                              │
-│                                                                      │
-│   Fastify Server (Node.js 22)                                        │
-│   ┌─────────────────────────────────────────────────────────────┐    │
-│   │  Routes                                                      │    │
-│   │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌────────────────┐ │    │
-│   │  │  Ticket  │ │ Webhook  │ │  Admin   │ │  WS Upgrade    │ │    │
-│   │  │  Routes  │ │  Route   │ │  Routes  │ │  + Test Routes │ │    │
-│   │  └────┬─────┘ └────┬─────┘ └────┬─────┘ └───────┬────────┘ │    │
-│   │       │            │            │                │           │    │
-│   │  ┌────┴────────────┴────────────┴────────────────┴────────┐ │    │
-│   │  │                    Services Layer                       │ │    │
-│   │  │  TicketSvc   DecimalPoolSvc   PaymentSvc   ExpirySvc  │ │    │
-│   │  │  SmsParser    AppwriteSync    Logger                    │ │    │
-│   │  └──────────────────────────┬──────────────────────────────┘ │    │
-│   │                             │                                 │    │
-│   │  ┌──────────────────────────┴──────────────────────────────┐ │    │
-│   │  │                     Data Layer                           │ │    │
-│   │  │  better-sqlite3 (WAL mode, persistent Docker volume)    │ │    │
-│   │  └─────────────────────────────────────────────────────────┘ │    │
-│   └───────────────────────────────────────────────────────────────┘    │
-│                                                                        │
-│   Volumes:  ./data → /app/data                                         │
-│             ├── payments.db                                            │
-│             └── logs.db                                                │
-│                                                                        │
-└──────────────────────────────┬──────────────────────────────────────────┘
-                               │ fire-and-forget write
-                      ┌────────┴────────┐
-                      │    Appwrite      │  ← External apps read from here
-                      │  (secondary DB)  │
-                      └─────────────────┘
-```
+### Keep
 
-## 2. Technology Stack
+- Dynamic exact-amount matching (`₹100.00` → `₹100.xx`).
+- Integer-paise money representation.
+- Bank SMS as the authoritative evidence for a UPI credit.
+- RRN/UPI reference deduplication.
+- A simple API that other personal projects can call.
+- A custom dashboard.
+- Docker/Dokploy deployment.
 
-| Layer | Choice | Rationale |
-|---|---|---|
-| Runtime | **Node.js 22** (Alpine Docker) | Single process, no cold starts |
-| Web framework | **Fastify 5** + TypeScript | Fastest Node.js framework, plugin ecosystem |
-| Primary DB | **better-sqlite3** (WAL mode) | Synchronous API, zero network overhead, crash-safe |
-| Secondary DB | **Appwrite** (fire-and-forget sync) | External apps read from here; payment path never depends on it |
-| WebSocket | **@fastify/websocket** | In-process pub/sub per ticket room |
-| Validation | **TypeBox** | Schema → JSON Schema → validation + TypeScript types |
-| Logging | **Pino** (Fastify default) | Structured JSON, fast, SQLite + WS stream |
-| Admin auth | **Passkey (WebAuthn)** via `@simplewebauthn/server` + session cookie via `@fastify/cookie` | Biometric/PIN login. No password to leak, no brute-force. Cookie set after successful WebAuthn assertion. |
-| Admin UI | **React + Vite + TypeScript** | Build step → static files served by Fastify |
-| Container | **Docker** + Portainer | Portainer webhook for CI/CD |
-| Testing | **Vitest** | Fast, native ESM |
-| Health | **dumb-init** | Proper signal handling in Docker |
+### Replace
 
-## 3. Database Schema
-
-Two separate SQLite databases — no write contention between critical path and logging.
-
-### `data/payments.db` — Core Payment Data
-
-All monetary values stored as INTEGER paisa. ₹100.03 → `10003`. This avoids floating-point precision issues and enables exact comparisons.
-
-```sql
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-
-CREATE TABLE tickets (
-    id          TEXT PRIMARY KEY,           -- "TICKET" + UnixMs timestamp
-    amount      INTEGER NOT NULL,           -- paisa: 10003 for ₹100.03
-    status      TEXT NOT NULL DEFAULT 'pending'
-                CHECK(status IN ('pending','paid','cancelled','expired')),
-    base_amount INTEGER NOT NULL,           -- integer rupees in paisa: 10000 for ₹100
-    decimal_val INTEGER NOT NULL,           -- 0-99 decimal for pool tracking
-    sender_name TEXT,
-    rrn         TEXT UNIQUE,                -- UPI reference number (dedup)
-    upi_id      TEXT,
-    paid_at     TEXT,                       -- ISO 8601
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX idx_tickets_status   ON tickets(status);
-CREATE INDEX idx_tickets_amount   ON tickets(amount);
-CREATE INDEX idx_tickets_rrn      ON tickets(rrn);
-CREATE INDEX idx_tickets_decimal  ON tickets(base_amount, decimal_val, status);
-
-CREATE TABLE authenticators (
-    id          TEXT PRIMARY KEY,           -- Base64URL credential ID
-    public_key  TEXT NOT NULL,              -- Base64URL public key (COSEPublicKey)
-    counter     INTEGER NOT NULL DEFAULT 0, -- Signature counter
-    device_name TEXT,                       -- e.g. "Chrome on Windows"
-    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
--- Single-use one-time code for first-time registration
-CREATE TABLE one_time_codes (
-    code        TEXT PRIMARY KEY,
-    used        INTEGER NOT NULL DEFAULT 0, -- 0 = unused, 1 = used
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-```
-
-### `data/logs.db` — Separate Database for Logs
-
-```sql
-PRAGMA journal_mode = WAL;
-
-CREATE TABLE logs (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    level       TEXT NOT NULL CHECK(level IN ('info','warn','error','debug')),
-    message     TEXT NOT NULL,
-    meta        TEXT,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX idx_logs_level   ON logs(level);
-CREATE INDEX idx_logs_created ON logs(created_at);
-
--- Ring buffer via periodic cleanup (not a trigger): every 500 inserts, keep max 10k rows
-```
-
-## 4. Decimal Allocation Engine (DDM Core)
-
-All amounts stored as integer paisa internally. Conversion helpers:
-- `toPaisa(100.03)` → `10003`
-- `fromPaisa(10003)` → `100.03`
-
-### In-Memory Data Structure
-
-```typescript
-class DecimalPool {
-  // One free-list per base_amount (in paisa)
-  // Key: 10000 for ₹100
-  // Value: queue [10000, 10001, ..., 10099]
-  private pools: Map<number, number[]>;
-
-  // Currently allocated amounts
-  private allocated: Map<string, TicketInfo>;
-}
-```
-
-### State Machine
-
-```
-          ┌──────────┐
-          │  FREE    │  ← Available in pool
-          └────┬─────┘
-               │ pop on create
-          ┌────▼─────┐
-          │ PENDING  │  ← TTL timer running (2 min)
-          └────┬─────┘
-               │
-      ┌────────┼────────┐
-      │        │        │
-  paid ▼   expired ▼  cancelled ▼
-┌──────┐  ┌────────┐ ┌──────────┐
-│ PAID │  │EXPIRED │ │CANCELLED │
-└──────┘  └───┬────┘ └────┬─────┘
-              │           │
-              └─────┬─────┘
-                    │ push back to pool
-         ┌────▼─────┐
-         │  FREE    │
-         └──────────┘
-```
-
-### Allocation Rules
-
-| Condition | Behavior |
+| Prototype | Rebuild |
 |---|---|
-| Free queue non-empty | Pop from front (e.g., `10003`) |
-| Free queue empty | Increment integer by 100 paisa, add new block of 100 |
-| Ticket expired/cancelled | Push amount to back of free queue |
-| Ticket paid | Do not immediately return amount to free queue; keep it reserved permanently by default, or release only after a configurable cooldown/manual admin action |
-| Server restart | Mark all pending as expired, rebuild free queues |
-| Pool full (all 100 in use) | New integer block created as safety valve |
+| Node/Fastify backend | Go application embedding PocketBase |
+| `better-sqlite3` directly | PocketBase SQLite/database APIs |
+| in-memory decimal pool | transactional database allocation |
+| per-ticket `setTimeout` | timestamps + PocketBase cron |
+| custom WebSocket manager | PocketBase realtime SSE |
+| custom Android relay app | Google Messages + libgm |
+| custom passkey/admin stack | PocketBase auth for app UI; PocketBase superuser UI for raw admin |
+| separate logs DB | PocketBase logs + `sms_events` domain audit records |
+| Appwrite replica | removed |
+| manual schema setup | PocketBase Go migrations |
 
-Paid decimal amounts are treated as consumed so delayed, duplicated, or re-sent bank SMS messages cannot accidentally confirm a newer pending ticket that reused the same amount. This trades a small amount drift over time for safer matching. If reuse is needed later, add a `PAID_REUSE_COOLDOWN_HOURS` setting and only return paid decimals after the bank SMS duplication window has clearly passed.
+### Explicit non-goals for v1
 
-### Lifecycle Example
+Do **not** add these unless a concrete need appears:
 
-```
-Base: ₹100 → 10000 paisa
-Pool: [10000, 10001, ..., 10099]
+- PostgreSQL
+- Redis
+- RabbitMQ/NATS/Kafka
+- microservices
+- Kubernetes
+- Appwrite/Supabase replication
+- generic provider/plugin architecture
+- multi-merchant organisations/roles
+- OAuth/API-key management UI
+- custom WebSocket infrastructure
+- custom PocketBase admin fork
+- GraphQL
+- separate analytics database
+- distributed locks
 
-t=0:  Create → pop 10000 → pool: [10001..10099]
-t=1:  Create → pop 10001 → pool: [10002..10099]
-...
-t=99: Create → pop 10099 → pool: []
-t=100: Pool empty → new block: 10100..10199 → pop 10100
-t=101: Pay for 10000 → mark paid; keep 10000 reserved
-t=102: Create → pop 10101 → pool: [10102..10199]
-t=103: Expire 10001 → push back → pool: [10102..10199, 10001]
+---
 
-API returns: fromPaisa(10101) → 101.01
-SMS lookup:  "₹101.01" → toPaisa(101.01) → 10101 → WHERE amount = 10101
-```
+## 2. First principle: prove libgm before rebuilding everything
 
-## 5. API Endpoints
+The highest-risk dependency is not PocketBase; it is the unofficial Google Messages protocol.
 
-> **Amount format**: API uses decimal (e.g. `100.03`). Internally stored as integer paisa.
->
-> **Admin auth**: Signed HttpOnly cookie via `@fastify/cookie`. Login sets `token=s:<signed>` with `HttpOnly; SameSite=Strict; Path=/api/admin`. Cookie is auto-sent on all admin requests and WebSocket upgrades.
+Before spending time on the payment UI or replacing the prototype, build a small disposable Go spike that proves the actual phone path.
 
-### Public
+### Phase 0 — Google Messages feasibility spike
 
-| Method | Path | Auth | Request | Response |
-|---|---|---|---|---|
-| `POST` | `/api/ticket` | — | `{ amount: 100 }` | `{ ticketId, amount, expiresAt, createdAt }` |
-| `GET` | `/api/status/:id` | — | — | `{ ticketId, amount, status, paidAt, senderName, rrn }` |
-| `WS` | `/api/ws?ticketId=X` | — | — | `payment_update` / `expired` / `shutdown` events |
+Create a tiny command under something like `cmd/gm-spike/`.
 
-### Webhook (SMS)
+It must prove:
 
-| Method | Path | Auth | Request | Response |
-|---|---|---|---|---|
-| `POST` | `/api/webhook` | `X-Webhook-Secret` header | `{ sms: "..." }` | `{ status, ticketId, action }` |
+1. PocketBase is not involved yet.
+2. Initialise a `libgm.Client`.
+3. Pair the Android phone.
+4. Persist `libgm.AuthData`.
+5. Restart the process and reconnect without repairing.
+6. Receive an incoming SMS event.
+7. Identify the message body, sender/message ID and timestamp we need.
+8. Disconnect network on the VPS, receive an SMS on the phone, restore network and test whether the message is recovered/caught up.
+9. Lock the phone and repeat.
+10. Enable Android Battery Saver and repeat.
+11. Test with weak/slow mobile data if practical.
+12. Leave the connector running for at least a realistic unattended period and observe reconnect behaviour.
 
-**Generic SMS:**
-```
-TICKET1709123456789 SOURAV paid you ₹100.03
-```
+### Record measurements
 
-**Kotak SMS:**
-```
-Confirmed payment for Received Rs.100.03 in your Kotak Bank AC X4959 from user@oksbi on 08-03-26.UPI Ref:606703736479.
-```
+For every test SMS record:
 
-**Matching:**
-1. Try generic: extract `TICKET(\d+)` + amount → lookup by ticketId
-2. Try Kotak: extract `Rs.X.YY` → `SELECT * FROM tickets WHERE amount = ? AND status = 'pending' LIMIT 1`
-3. Verify RRN not duplicate (UNIQUE constraint)
-4. Mark paid, push WS event, free decimal, fire-and-forget Appwrite sync
+- phone/SMS timestamp if available;
+- connector event timestamp;
+- process reconnect timestamp;
+- whether event was live or recovered;
+- duplicate count;
+- phone lock state;
+- battery mode;
+- Wi-Fi/mobile-data state.
 
-### Admin (passkey + cookie-based auth)
+### Phase 0 acceptance criteria
 
-First-time setup:
-1. Admin visits `/admin` — no authenticators registered → redirects to `/admin/setup`
-2. `GET /api/admin/setup/status` returns `{ needs_setup: true, has_one_time_code: true }`
-3. Admin enters `ONE_TIME_CODE` → `POST /api/admin/setup/verify-code { code }` validates it
-4. `GET /api/admin/register/begin` returns WebAuthn registration options (challenge, rp, user)
-5. Browser calls `navigator.credentials.create(options)` → biometric/PIN prompt
-6. `POST /api/admin/register/complete { credential }` verifies and stores public key → sets session cookie
-7. One-time code is marked used
+Do not proceed with libgm as the primary connector until all of these are true:
 
-Subsequent logins:
-1. `GET /api/admin/login/begin` returns WebAuthn authentication options (challenge + allowCredentials)
-2. Browser calls `navigator.credentials.get(options)` → biometric/PIN prompt
-3. `POST /api/admin/login/complete { assertion }` verifies signature → sets signed HttpOnly session cookie
+- pairing works on the actual Android phone;
+- auth can be persisted and restored;
+- restart reconnect works;
+- at least one real bank SMS is received and parsed;
+- duplicate/replayed messages can be identified;
+- connection loss is detectable;
+- recovery behaviour is understood and documented;
+- the one-active-computer Google Messages limitation is acceptable for this phone.
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/admin/setup/status` | Check if setup is needed |
-| `POST` | `/api/admin/setup/verify-code` | `{ code }` → validates one-time code |
-| `GET` | `/api/admin/register/begin` | WebAuthn registration options (after code verified) |
-| `POST` | `/api/admin/register/complete` | `{ credential }` → stores public key |
-| `GET` | `/api/admin/login/begin` | WebAuthn assertion options |
-| `POST` | `/api/admin/login/complete` | `{ assertion }` → verifies → sets cookie |
-| `POST` | `/api/admin/logout` | Clears session cookie |
-| `GET` | `/api/admin/session` | Check if cookie is valid (used by SPA on load) |
-| `GET` | `/api/admin/tickets` | List + filter + paginate + export |
-| `GET` | `/api/admin/tickets/:id` | Ticket detail |
-| `PATCH` | `/api/admin/tickets/:id` | Update fields |
-| `POST` | `/api/admin/tickets/:id/mark-paid` | Mark paid shortcut |
-| `POST` | `/api/admin/tickets/:id/cancel` | Cancel shortcut |
-| `GET` | `/api/admin/stats` | Aggregate stats |
-| `GET` | `/api/admin/logs` | Query logs with filters |
-| `GET` | `/api/admin/pool` | Current decimal pool state |
-| `POST` | `/api/admin/sync/full` | Re-sync all tickets to Appwrite |
-| `WS` | `/api/admin/ws` | Real-time events + log stream (cookie sent automatically) |
+If the spike fails, retain the Android relay as the connector and still continue with the PocketBase rebuild. The payment architecture must not depend on libgm succeeding.
 
-### Test (within admin, uses real API)
+---
 
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/api/admin/test/ticket` | Create test ticket (bypasses rate limits) |
-| `POST` | `/api/admin/test/webhook` | Simulate SMS webhook |
-| `WS` | `/api/admin/test/ws?ticketId=X` | Test WebSocket |
+## 3. Phase 1 — Clean application skeleton
 
-## 6. Rate Limiting
+Only after Phase 0 provides enough confidence.
 
-| Scope | Limit | Justification |
-|---|---|---|
-| **Ticket creation** | 5/min/IP | Prevents decimal pool exhaustion by bad actors. 5/min is enough for human-paced registration on campus NAT. |
-| **Webhook** | 30/min/IP | Single phone sending SMS — generous buffer |
-| **Status polling** | 60/min/IP | Prevents polling abuse |
-| **Admin endpoints** | 30/min/IP (per session) | Admin dashboard |
-| **Admin login / register** | 10/min/IP | Passkey auth — rate limit on WebAuthn challenge endpoints |
-| **WebSocket connects** | 20/min/IP | Connection flood prevention |
-| **Health check** | No limit | Required for Docker health checks |
+### Backend
 
-All limits use `@fastify/rate-limit` — in-memory sliding window per IP.
+Create a new Go application around PocketBase:
 
-## 7. WebSocket Architecture
-
-```typescript
-// Single process, all in-memory
-class WsManager {
-  ticketRooms: Map<string, Set<WebSocket>>;   // ticketId → connections
-  adminSockets: Map<string, Set<WebSocket>>;   // admin sessions
-  heartbeatTimers: Map<WebSocket, Timer>;
-}
+```text
+cmd/payment-api/main.go
+internal/
+  config/
+  payments/
+  sms/
+  gmessages/
+  api/
+migrations/
+web/
 ```
 
-| Event | Source | Destination | Payload |
-|---|---|---|---|
-| `payment_update` | Webhook | Ticket room | `{ type, status, paidAt, senderName }` |
-| `expired` | Expiry timer | Ticket room | `{ type, reason: "timeout" }` |
-| `shutdown` | Graceful shutdown | All rooms | `{ type, reason: "restart", reconnectMs }` |
-| `ticket_update` | Status change | Admin sockets | `{ type, action, ticket }` |
-| `log_entry` | Logger | Admin sockets | `{ type, level, message, meta }` |
+Initial responsibilities:
 
-Heartbeat: Server pings every 30s. Closes connection after 30s no response.
+- create `pocketbase.New()`;
+- register Go migrations;
+- register custom API routes;
+- register the expiry/cleanup cron;
+- serve the compiled frontend;
+- expose a health endpoint;
+- start/stop the Google Messages manager with application lifecycle.
 
-## 8. Appwrite Sync (Fire-and-Forget)
+### Frontend
 
-SQLite is the source of truth. Appwrite is a convenience replica for external apps.
+Use only:
 
-```
-SQLite write (ticket create / update)
-  ↓
-Immediately fire Appwrite REST call (no await, no block)
-  ↓
-  Success → done
-  Failure → log the error. Alerts visible in admin logs.
-```
+- React
+- Vite
+- TypeScript
+- PocketBase JS SDK
 
-No queue, no worker, no polling. On crash, SQLite has all the data. Admin uses `POST /api/admin/sync/full` to re-sync if Appwrite was down.
+No Next.js/SSR/Redux/GraphQL.
 
-## 9. Server Lifecycle
+### Deployment
 
-### Startup
-1. Open SQLite, run `PRAGMA integrity_check`
-2. Run migrations (CREATE TABLE IF NOT EXISTS)
-3. Crash recovery: if any `pending` tickets exist → expire them
-4. Build DecimalPool from scratch (all decimals free)
-5. Seed `one_time_codes` from env if not already seeded (auto-generate if not set)
-6. Register routes, WS handlers
-7. Listen on PORT 3000
-8. Health check returns 200 → Portainer marks healthy
+Target one runtime container:
 
-### Graceful Shutdown
-```
-SIGTERM received
-1. Fastify.close() → stop accepting new connections (503 for in-flight)
-2. UPDATE tickets SET status='expired' WHERE status='pending'
-3. Clear all expiry timers
-4. Broadcast WS: { type: "shutdown", reason: "restart", reconnectMs: 3000 }
-5. Close all WebSocket connections
-6. SQLite WAL checkpoint
-7. Exit (process.exit(0))
+```text
+payment-api
+  ├─ single Go binary
+  ├─ embedded/served web assets
+  └─ /app/pb_data persistent volume
 ```
 
-### Crash Recovery
-On next startup: expire any stale pending tickets, rebuild pool from scratch.
+A multi-stage Docker build may use Node only to compile the frontend.
 
-### Health Check
-```
-GET /health → 200
-{
-  "status": "healthy",
-  "uptime": 3600,
-  "db": "ok",
-  "appwrite_reachable": true,
-  "pool": { "base_amount": 100, "pending": 23, "free": 77 }
-}
+### Acceptance criteria
+
+- application boots with an empty `pb_data` directory;
+- migrations run automatically;
+- PocketBase `/_/` works;
+- custom `/` UI is served;
+- `/api/health` reports healthy;
+- restart preserves data;
+- Docker image runs in Dokploy with one volume.
+
+---
+
+## 4. Phase 2 — Durable payment model
+
+### Collection: `payments`
+
+Minimum fields:
+
+```text
+id                    PocketBase record id
+requested_amount      integer paise
+payable_amount        integer paise
+status                pending | paid | expired | cancelled
+expires_at            datetime
+reuse_after           datetime
+rrn                    text, optional
+upi_id                 text, optional
+payer_name             text, optional
+paid_at                datetime, optional
+metadata               JSON, optional
+created                PocketBase created timestamp
+updated                PocketBase updated timestamp
 ```
 
-## 10. Error Handling
+Indexes should support:
+
+- status + expiry scans;
+- exact payable amount lookup;
+- RRN lookup/uniqueness where practical;
+- recent payments listing.
+
+### Money rules
+
+- API may accept rupees as a decimal string/number for convenience.
+- Convert immediately to integer paise.
+- Internal payment code only accepts integer paise.
+- Never use float equality for allocation or matching.
+
+### Payment lifecycle
+
+```text
+          create
+            │
+            ▼
+         pending
+       /    │     \
+      /     │      \
+   paid   expired  cancelled
+```
+
+No in-memory state is authoritative.
+
+### Expiry
+
+A payment is expired based on `expires_at`, not a Go timer.
+
+A PocketBase cron job periodically marks stale `pending` payments `expired` and sets/maintains `reuse_after`.
+
+Every operation that tries to pay/cancel a payment must also validate its current timestamps; correctness must not depend on the cron firing at an exact second.
+
+---
+
+## 5. Phase 3 — Exact amount allocator
+
+The allocator is part of `PaymentService` and runs in a short SQLite transaction.
+
+### Inputs
+
+```text
+requested_amount_paise
+now
+payment TTL
+reuse/quarantine policy
+```
+
+### Algorithm
+
+For a request of `10000` paise:
+
+1. Start with block `10000..10099`.
+2. For each candidate exact amount:
+   - candidate must not have a current `pending` payment;
+   - candidate must not be inside another payment's `reuse_after` quarantine window.
+3. Select the first safe candidate.
+4. Insert the new `payments` record inside the same transaction.
+5. If all 100 candidates are unavailable, move to the next block (`10100..10199`) as a safety valve.
+6. Bound spillover with a configured maximum so a bug cannot allocate arbitrarily high amounts.
+
+Because PocketBase/SQLite permits a single writer transaction at a time, the check-and-insert sequence is naturally serialised as long as the entire allocation is inside one short transaction.
+
+### Important difference from the prototype
+
+Received `₹100.37` is `10037`.
+
+Matching is:
+
+```text
+WHERE payable_amount = 10037
+AND status = 'pending'
+```
+
+It is **never** transformed to `10000` and matched by a base amount.
+
+### Reuse policy
+
+Do not optimise this prematurely.
+
+Initial rule:
+
+- pending amount: unavailable;
+- terminal payment: unavailable until `reuse_after`;
+- `reuse_after` duration is configurable;
+- start conservative and tune from real observed SMS delay/replay data.
+
+The system must prefer failing to auto-match over falsely confirming the wrong payment.
+
+### Tests
+
+- first candidate allocation;
+- sequential allocation;
+- two concurrent creates cannot receive the same exact amount;
+- 100-slot spillover;
+- configured spillover bound;
+- amount remains unavailable during quarantine;
+- amount becomes reusable afterward;
+- exact amount lookup does not confuse `10001` and `10002`.
+
+---
+
+## 6. Phase 4 — SMS event model and parser
+
+### Collection: `sms_events`
+
+Minimum fields:
+
+```text
+id
+source                 google_messages
+source_message_id      unique/dedup key
+sender
+body
+message_at
+received_at
+processing_status      received | parsed | matched | ignored | error
+parsed_amount           integer paise, optional
+rrn                     optional
+upi_id                  optional
+payer_name              optional
+matched_payment         relation -> payments, optional
+error                   optional
+created
+updated
+```
+
+### Processing rule
+
+Always save the event before attempting to match it.
+
+```text
+libgm event
+   │
+   ▼
+insert/find sms_event by source_message_id
+   │
+   ├─ already processed → no-op
+   │
+   ▼
+parse
+   │
+   ├─ irrelevant SMS → ignored
+   ├─ parse error     → error
+   └─ payment evidence
+            │
+            ▼
+       PaymentService.Match
+```
+
+### Parser design
+
+Start with the real bank format currently used by the project (Kotak) and only add parsers when real samples exist.
+
+Do not build a plugin registry until there is a second bank implementation.
+
+Parser output should be a small value object:
+
+```text
+amount_paise
+rrn
+upi_id
+payer_name
+message_time
+```
+
+### Idempotency
+
+Two independent dedupe keys are useful:
+
+1. Google/source message ID prevents processing the same message event repeatedly.
+2. RRN prevents the same UPI transaction from confirming multiple payments.
+
+Duplicate delivery should be a successful no-op, not an exceptional crash path.
+
+---
+
+## 7. Phase 5 — Google Messages manager
+
+Integrate libgm directly in the Go process.
+
+### Responsibilities
+
+`GoogleMessagesManager` owns only connector concerns:
+
+- load/save private auth/session state;
+- pair/unpair;
+- connect;
+- reconnect with backoff;
+- expose health/status;
+- receive events;
+- hand SMS messages to `SmsService`;
+- request/reconcile updates after reconnection if supported by the tested libgm flow.
+
+It must **not** contain payment matching logic.
+
+### Connector state
+
+Keep small operational state such as:
+
+```text
+paired
+connected
+last_connected_at
+last_disconnected_at
+last_event_at
+last_error
+```
+
+This can be exposed through a custom status endpoint and UI.
+
+Sensitive `libgm.AuthData` should not be a normal public PocketBase collection. Store it under the persistent data directory with restrictive file permissions. If a practical encryption-at-rest key is introduced, keep the key outside the data file/backup.
+
+### Connection lifecycle
+
+```text
+application boot
+    │
+    ├─ no session → disconnected/unpaired
+    │
+    └─ session exists
+          │
+          ▼
+       connect
+          │
+     ┌────┴────┐
+     │         │
+  healthy   failure
+     │         │
+ events      backoff
+     │         │
+     └──── reconnect
+```
+
+### Do not hide degraded state
+
+If the phone or Google relay is unavailable, the UI must clearly report it. A payment remaining pending is safer than pretending the connector is healthy.
+
+---
+
+## 8. Phase 6 — API
+
+Keep custom write routes small.
+
+### Initial external API
+
+```text
+POST   /api/payments
+GET    /api/payments/{id}
+POST   /api/payments/{id}/cancel
+GET    /api/health
+```
+
+Protect personal-project API writes with one configured bearer API key initially. Do not build an API-key management subsystem yet.
+
+### Dashboard/internal API
+
+```text
+GET    /api/connector/gmessages/status
+POST   /api/connector/gmessages/pair
+POST   /api/connector/gmessages/reconnect
+DELETE /api/connector/gmessages/pair
+```
+
+The dashboard may use PocketBase collection APIs for authenticated read-only listing and realtime subscriptions.
+
+Do not allow the browser to directly create/update payment records through generic PocketBase record APIs. State transitions belong to `PaymentService`.
+
+---
+
+## 9. Phase 7 — Custom UI
+
+PocketBase's admin dashboard remains untouched at `/_/`.
+
+Our UI should cover only normal workflows:
+
+### Dashboard
+
+- connector status;
+- pending/paid counts;
+- recent payments;
+- most recent SMS event/error.
+
+### Payments
+
+- create test/payment;
+- list/filter payments;
+- payment detail;
+- exact requested vs payable amount;
+- status and timestamps;
+- RRN/UPI ID when available;
+- cancel pending payment.
+
+### SMS Events
+
+- recent events;
+- parsed fields;
+- matched payment;
+- ignored/error reason.
+
+This is primarily a debugging surface, so keep it practical rather than decorative.
+
+### Google Messages
+
+- paired/unpaired;
+- connected/disconnected;
+- pair flow;
+- reconnect;
+- unpair;
+- last connected/event/error timestamps.
+
+### Settings
+
+Initially show configuration read-only where useful. Do not duplicate every PocketBase setting from `/_/`.
+
+### Realtime
+
+Use PocketBase collection subscriptions for payment/event updates. Do not create a parallel WebSocket protocol.
+
+---
+
+## 10. Phase 8 — Optional outgoing webhook
+
+Only add after payment detection is reliable.
+
+Use one configured destination initially:
+
+```text
+PAYMENT_WEBHOOK_URL
+PAYMENT_WEBHOOK_SECRET
+```
+
+On a transition to `paid`:
 
 ```json
 {
-  "error": {
-    "code": "POOL_EXHAUSTED",
-    "message": "All payment slots are currently occupied. Please try again.",
-    "details": { "pending_count": 100, "ttl_seconds": 120 }
-  }
+  "event": "payment.paid",
+  "payment": { "id": "...", "amount": 10037, "rrn": "..." }
 }
 ```
 
-| Code | HTTP | Trigger |
-|---|---|---|
-| `INVALID_AMOUNT` | 400 | Missing, non-numeric, or ≤ 0 amount |
-| `TICKET_NOT_FOUND` | 404 | ticketId doesn't exist |
-| `POOL_EXHAUSTED` | 503 | All decimal slots in use |
-| `RRN_DUPLICATE` | 409 | Payment with same RRN already processed |
-| `AMOUNT_MISMATCH` | 400 | Webhook amount doesn't match ticket |
-| `TICKET_ALREADY_RESOLVED` | 409 | Ticket already paid/cancelled/expired |
-| `WEBHOOK_UNAUTHORIZED` | 401 | Bad webhook secret |
-| `ADMIN_UNAUTHORIZED` | 401 | Invalid/missing/expired session cookie |
-| `RATE_LIMITED` | 429 | Rate limit exceeded |
-| `INTERNAL_ERROR` | 500 | Unexpected server error |
+Sign with HMAC and include an event/delivery ID.
 
-## 11. Logging Architecture
-
-### What Gets Logged
-
-```
-Every HTTP request:
-  { level, time, req_id, method, path, status, duration_ms, ip, error }
-
-Business events:
-  - Ticket created:       { level, message, meta: { ticketId, amount, decimal, pool_free } }
-  - Payment confirmed:    { level, message, meta: { ticketId, amount, sender, rrn, match_method } }
-  - Decimal pool full:    { level, message, meta: { base_amount, pending_count, new_integer } }
-  - Decimal freed:        { level, message, meta: { amount, reason } }
-  - Ticket expired:       { level, message, meta: { ticketId, amount } }
-
-Errors:
-  - Appwrite sync failure:{ level, message, meta: { ticket_id, error } }
-  - Webhook auth failure: { level, message, meta: { ip, reason } }
-  - Invalid input:        { level, message, meta: { ip, validation_error } }
-```
-
-### Storage + Routing
-
-```
-Pino logger
-  ├── Console (stdout, structured JSON) → Docker log collector
-  ├── data/logs.db (separate DB, ring-buffer via periodic cleanup: every 500 inserts, keep max 10k rows) → Admin API
-  └── WebSocket broadcast → Admin dashboard real-time stream
-```
-
-## 12. Admin Dashboard (React + Vite SPA)
-
-Operational dashboard style with Tailwind CSS. Inter font, dark mode default, dense tables, clear status colors, restrained motion, and high-contrast controls. The UI should feel calm, fast, and built for repeated admin work rather than decorative. Use subtle transitions only where they clarify state changes.
-
-### Pages
-
-| Page | Route | Features |
-|---|---|---|
-| **Login** | `/` | Passkey WebAuthn authentication. Auto-redirect if cookie valid. |
-| **Setup** | `/setup` | First-time passkey registration. One-time code entry → biometric/PIN prompt. |
-| **Overview** | `/overview` | Compact stats cards (total tickets, pending, paid today, revenue). Decimal pool usage gauge. Recent activity feed. |
-| **Tickets** | `/tickets` | Searchable, filterable, sortable table with pagination. Row click → drawer with detail view. Export CSV/JSON. |
-| **Decimal Pool** | `/pool` | Usage visualization for free, pending, expired/cancelled reusable, and paid-reserved decimals. Table of active decimals with status badges. |
-| **Test Harness** | `/test` | Create ticket, simulate webhook, test WebSocket — all against real API endpoints. |
-| **Logs** | `/logs` | Log table with level badges. Search + filter. Real-time stream via WebSocket. |
-| **Settings** | `/settings` | Environment config display. Appwrite sync status + "Re-sync All" button. |
-
-### Design System
-
-```
-Colors:
-  bg-primary:    #0a0a0f  (deep black-blue)
-  bg-secondary:  #12121a  (card backgrounds)
-  bg-tertiary:   #1a1a2e  (hover states)
-  accent:        #6366f1  (indigo-500 - primary action)
-  accent-glow:   #818cf8  (indigo-400 - hover glow)
-  text:          #f1f5f9  (slate-50)
-  text-secondary:#94a3b8  (slate-400)
-  border:        #1e293b  (slate-800)
-  success:       #22c55e  (green-500)
-  warning:       #f59e0b  (amber-500)
-  error:         #ef4444  (red-500)
-
-Typography:
-  font-family: 'Inter', system-ui, sans-serif
-  scale: 12 / 14 / 16 / 18 / 20 / 24 / 30
-
-Components (Tailwind CSS):
-  Panel:        bg-secondary border border-border rounded-lg
-  Button:       h-9 px-3 rounded-md bg-accent hover:bg-accent-glow transition-colors
-  Input:        h-9 bg-tertiary/50 border-border rounded-md focus:ring-accent
-  Badge:        px-2 py-0.5 rounded-full text-xs font-medium
-  Table:        compact rows, sticky header, row hover bg-tertiary, visible empty/error states
-  Sidebar:      fixed left, w-60, clear active state, icon + label navigation
-  Drawer:       slide-in from right for ticket detail and admin actions
-  Skeleton:     shimmer animation for loading states
-```
-
-### Build
-
-```
-# Dev
-cd admin && vite dev              → localhost:5173 (proxied to :3000)
-
-# Production
-cd admin && vite build            → output: server/admin/public/
-
-# Fastify serves it
-app.register(fastifyStatic, { root: join(__dirname, 'admin/public') });
-```
-
-### WebAuthn Flow (Setup)
-
-```
-1. GET  /api/admin/setup/status          → { needs_setup: true }
-2. POST /api/admin/setup/verify-code     → { code: "XXXX-XXXX" }
-3. GET  /api/admin/register/begin        → { publicKey: CreationOptions }
-4. Browser: navigator.credentials.create(publicKey)
-5. POST /api/admin/register/complete     → { credential: ... } → sets cookie
-```
-
-### WebAuthn Flow (Login)
-
-```
-1. GET  /api/admin/login/begin           → { publicKey: RequestOptions }
-2. Browser: navigator.credentials.get(publicKey)
-3. POST /api/admin/login/complete        → { assertion: ... } → sets cookie
-```
-
-## 13. Project Structure
-
-```
-payment-gateway/
-├── src/
-│   ├── server/                       # Fastify backend
-│   │   ├── index.ts                  # Entry point + graceful shutdown
-│   │   ├── app.ts                    # Fastify bootstrap
-│   │   ├── config.ts                 # Typed env config
-│   │   ├── db/
-│   │   │   ├── connection.ts         # Two DB connections: payments + logs
-│   │   │   └── schema.ts             # CREATE TABLE statements
-│   │   ├── routes/
-│   │   │   ├── ticket.ts             # POST /api/ticket, GET /api/status/:id
-│   │   │   ├── webhook.ts            # POST /api/webhook
-│   │   │   ├── admin.ts              # All /api/admin/* routes
-│   │   │   ├── health.ts             # GET /health
-│   │   │   ├── ws.ts                 # WS upgrade handlers
-│   │   │   └── test.ts               # /api/admin/test/* routes
-│   │   ├── services/
-│   │   │   ├── ticket.service.ts     # CRUD, expiry timers
-│   │   │   ├── decimal.service.ts    # DecimalPool (in-memory + SQLite)
-│   │   │   ├── payment.service.ts    # SMS parsing + matching
-│   │   │   ├── appwrite.service.ts   # Fire-and-forget + full re-sync
-│   │   │   ├── expiry.service.ts     # TTL scheduling + cleanup
-│   │   │   ├── logger.service.ts     # Pino → logs.db + WS
-│   │   │   └── auth.service.ts       # WebAuthn registration, verification, passkey management
-│   │   ├── ws/
-│   │   │   ├── manager.ts            # Connection pools, heartbeat
-│   │   │   └── handlers.ts           # Ticket + Admin WS handlers
-│   │   ├── middleware/
-│   │   │   ├── auth.ts               # Verify signed HttpOnly cookie
-│   │   │   ├── request-logger.ts     # Log all HTTP requests
-│   │   │   └── error-handler.ts      # Global error handler
-│   │   ├── plugins/
-│   │   │   └── static.ts             # Serve admin SPA
-│   │   └── admin/
-│   │       └── public/               # Built React SPA output
-│   ├── admin/                        # React + Vite SPA source
-│   │   ├── index.html
-│   │   ├── vite.config.ts
-│   │   ├── package.json
-│   │   └── src/
-│   │       ├── main.tsx
-│   │       ├── App.tsx
-│   │       ├── api/
-│   │       │   ├── client.ts
-│   │       │   ├── tickets.ts
-│   │       │   ├── logs.ts
-│   │       │   └── auth.ts
-│   │       ├── pages/
-│   │       │   ├── Login.tsx
-│   │       │   ├── Setup.tsx
-│   │       │   ├── Overview.tsx
-│   │       │   ├── Tickets.tsx
-│   │       │   ├── DecimalPool.tsx
-│   │       │   ├── Logs.tsx
-│   │       │   ├── TestHarness.tsx
-│   │       │   └── Settings.tsx
-│   │       ├── components/
-│   │       │   ├── GlassCard.tsx
-│   │       │   ├── Sidebar.tsx
-│   │       │   ├── StatsCard.tsx
-│   │       │   ├── PoolGauge.tsx
-│   │       │   ├── StatusBadge.tsx
-│   │       │   └── DataTable.tsx
-│   │       └── hooks/
-│   │           ├── useWebSocket.ts
-│   │           └── useWebAuthn.ts
-│   └── types/
-│       └── index.ts
-├── data/                             # Docker volume (gitignored)
-│   ├── payments.db
-│   └── logs.db
-├── Dockerfile
-├── docker-compose.yml
-├── .env.example
-├── .github/workflows/deploy.yml
-├── package.json
-├── tsconfig.json
-└── README.md
-```
-
-## 14. Docker + CI/CD
-
-### Dockerfile
-
-```dockerfile
-# Stage 1: Build admin SPA
-FROM node:22-alpine AS admin-build
-WORKDIR /app
-COPY src/admin/package*.json ./
-RUN npm ci
-COPY src/admin/ ./
-RUN npm run build
-
-# Stage 2: Build server
-FROM node:22-alpine AS server-build
-WORKDIR /app
-COPY package*.json tsconfig*.json ./
-RUN npm ci
-COPY src/server/ ./src/server/
-COPY src/types/ ./src/types/
-RUN npm run build
-
-# Stage 3: Production
-FROM node:22-alpine
-RUN apk add --no-cache dumb-init
-WORKDIR /app
-COPY --from=admin-build /app/dist/ ./admin/public/
-COPY --from=server-build /app/dist/ ./dist/
-COPY --from=server-build /app/node_modules/ ./node_modules/
-COPY package*.json ./
-EXPOSE 3000
-VOLUME ["/app/data"]
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-  CMD node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1))"
-CMD ["dumb-init", "node", "dist/server/index.js"]
-```
-
-### docker-compose.yml
-
-```yaml
-services:
-  app:
-    build: .
-    ports: ["3000:3000"]
-    volumes:
-      - payment_data:/app/data
-    environment:
-      - PORT=3000
-      - TICKET_TTL_MINUTES=2
-      - ONE_TIME_CODE=${ONE_TIME_CODE}
-      - COOKIE_SECRET=${COOKIE_SECRET}
-      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
-      - APPWRITE_ENDPOINT=${APPWRITE_ENDPOINT}
-      - APPWRITE_API_KEY=${APPWRITE_API_KEY}
-      - APPWRITE_PROJECT_ID=${APPWRITE_PROJECT_ID}
-      - APPWRITE_DATABASE_ID=${APPWRITE_DATABASE_ID}
-      - APPWRITE_COLLECTION_ID=${APPWRITE_COLLECTION_ID}
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1))"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-
-volumes:
-  payment_data:
-```
-
-### GitHub Actions
-
-```yaml
-name: Deploy
-on:
-  push:
-    branches: [main]
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - uses: docker/build-push-action@v5
-        with:
-          push: true
-          tags: ghcr.io/${{ github.repository }}:latest
-      - name: Trigger Portainer deploy
-        run: curl -X POST "${{ secrets.PORTAINER_WEBHOOK_URL }}"
-```
-
-## 15. Testing Plan
-
-Testing uses Vitest for backend unit/integration coverage and focused React component tests for admin workflows. Critical payment behavior should be tested before UI polish.
-
-### Backend Tests
-
-| Area | Coverage |
-|---|---|
-| Decimal allocation | Allocates unique paisa amounts per base amount, exhausts 100 slots into the next block, returns only expired/cancelled amounts, and does not immediately reuse paid amounts |
-| Ticket lifecycle | Create → pending, expiry timer → expired, cancel → cancelled, mark-paid → paid, already-resolved tickets reject duplicate transitions |
-| SMS parsing | Generic ticket SMS and Kotak SMS parse amount, ticket ID, sender, UPI ID, and RRN correctly |
-| Payment matching | Exact amount lookup, RRN duplicate rejection, amount mismatch rejection, ambiguous amount match refusal if more than one pending ticket is found |
-| Restart recovery | Startup expires stale pending tickets and rebuilds decimal pools from SQLite state |
-| Webhook security | Missing/bad `X-Webhook-Secret` returns 401 and uses constant-time secret comparison |
-| Admin auth | WebAuthn challenges are single-use, expire correctly, and session cookies gate all admin routes |
-| Appwrite sync | SQLite write succeeds even when Appwrite fails; failures are logged and full re-sync can be triggered |
-| Rate limits | Ticket, webhook, status, login, and WebSocket limits return 429 at expected thresholds |
-
-### Admin UI Tests
-
-| Area | Coverage |
-|---|---|
-| Auth flow | Setup, login, logout, expired session redirect |
-| Tickets table | Search, filters, sorting, pagination, export buttons, detail drawer |
-| Test harness | Creates a real test ticket, simulates webhook, observes WebSocket update |
-| Logs | Filters by level/text and appends real-time log entries |
-| Pool view | Shows free, pending, paid-reserved, and reusable decimal states clearly |
-| Responsive layout | Main dashboard pages remain usable on desktop and mobile widths |
-
-### End-to-End Smoke Tests
-
-1. Start server against a temporary SQLite data directory.
-2. Create a ticket for `100`.
-3. Confirm the returned amount is exact and unique.
-4. Post a matching webhook SMS.
-5. Verify ticket status changes to `paid`.
-6. Verify WebSocket receives `payment_update`.
-7. Create another ticket and verify the previously paid decimal is not reused.
-8. Restart the server and verify stale pending tickets become `expired`.
-
-## 16. Security Checklist
-
-| Concern | Mitigation |
-|---|---|
-| **SQL injection** | Parameterized queries (better-sqlite3) |
-| **Timing attacks** | `crypto.timingSafeEqual` for all secret comparisons |
-| **XSS** | React's default escaping + CSP headers |
-| **Session theft** | HttpOnly + signed + SameSite=Strict cookie. Not accessible to JS. |
-| **Webhook auth** | Shared secret via `X-Webhook-Secret` header only, constant-time comparison |
-| **Passkey (WebAuthn)** | No password to leak. Biometric/PIN bound to device. Phishing-resistant. Public key stored in `authenticators` table. |
-| **Decimal exhaustion** | 5/min/IP rate limit + 100-slot pool + 2min TTL + next-block safety valve |
-| **Server crash** | WAL mode, expiry on restart, SQLite volume persists |
-| **Dependencies** | Minimal surface: Fastify + plugins + better-sqlite3 + React |
-
-## 17. Environment Variables
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `PORT` | No | 3000 | HTTP server port |
-| `HOST` | No | 0.0.0.0 | Bind address |
-| `TICKET_TTL_MINUTES` | No | 2 | How long a pending ticket lives |
-| `ONE_TIME_CODE` | Yes* | Auto-generated | One-time setup code for passkey registration (printed to logs on first start) |
-| `COOKIE_SECRET` | Yes | — | Secret for signing admin session cookie |
-| `WEBHOOK_SECRET` | Yes | — | Shared secret for SMS webhook (`X-Webhook-Secret` header) |
-| `APPWRITE_ENDPOINT` | No | — | Appwrite server URL (if sync enabled) |
-| `APPWRITE_PROJECT_ID` | No* | — | Appwrite project ID |
-| `APPWRITE_API_KEY` | No* | — | Appwrite API key |
-| `APPWRITE_DATABASE_ID` | No* | — | Appwrite database ID |
-| `APPWRITE_COLLECTION_ID` | No* | — | Appwrite collection ID |
-
-*Required only if Appwrite sync is configured.
+If retries become necessary, introduce a `webhook_deliveries` collection and PocketBase cron retry loop **then**. Do not create it before there is an outgoing webhook implementation.
 
 ---
 
-_Plan generated from codebase analysis and design discussions — May 2026_
+## 11. Testing strategy
+
+### Unit tests
+
+- rupee/paise parsing;
+- exact amount allocation;
+- amount quarantine;
+- SMS parser against captured, redacted real samples;
+- state transitions;
+- RRN/source-message dedupe.
+
+### Database integration tests
+
+Use a temporary PocketBase data directory and real SQLite transactions.
+
+Test:
+
+- migrations;
+- create payment;
+- exact-match confirmation;
+- expiry after restart;
+- allocation race/concurrency;
+- duplicate SMS event;
+- duplicate RRN;
+- late/expired payment does not confirm a new payment.
+
+### Connector tests
+
+Split into:
+
+- pure tests around our manager/session code with fakes where practical;
+- manual/live tests against the actual phone because the Google protocol cannot be meaningfully validated only with mocks.
+
+### End-to-end acceptance test
+
+```text
+1. Start from clean pb_data.
+2. Pair phone.
+3. Create payment for ₹100.
+4. Receive payable amount, e.g. ₹100.03.
+5. Pay exactly ₹100.03.
+6. Real bank SMS arrives on Android.
+7. libgm receives/reconciles SMS.
+8. sms_event is persisted.
+9. exact pending payment is marked paid.
+10. React UI updates through PocketBase realtime.
+11. Restart container.
+12. payment and connector session remain available.
+```
+
+---
+
+## 12. Failure scenarios that must be tested
+
+| Failure | Expected behaviour |
+|---|---|
+| API process crashes | SQLite keeps payment state; restart does not expire valid payments solely because of restart |
+| Phone locked | SMS path should continue if Google Messages remains connected; measure actual behaviour |
+| Battery Saver | degraded/delayed behaviour is measured and surfaced, not assumed |
+| Phone internet lost | connector becomes stale/disconnected; pending payments remain pending |
+| VPS internet lost | reconnect later and reconcile/catch up where libgm allows |
+| Google session expires/unpairs | status becomes unpaired; pairing is required again |
+| duplicate Google event | no-op after existing `source_message_id` |
+| duplicate bank SMS/RRN | cannot pay a second payment |
+| delayed SMS after payment expiry | event is retained; must not falsely pay a newer payment using a quarantined amount |
+| malformed SMS | retained as ignored/error for debugging |
+| PocketBase realtime disconnect | browser SDK reconnects; payment state is still queryable from DB |
+
+---
+
+## 13. Security boundaries
+
+This is a hobby service, but it handles sensitive SMS/session material.
+
+Minimum safeguards:
+
+- TLS at the reverse proxy;
+- custom dashboard requires PocketBase user authentication or equivalent private access;
+- payment create/cancel API protected by a bearer secret;
+- `payments`/`sms_events` generic write rules locked down;
+- libgm session file not served by PocketBase/static routes;
+- session file permissions restricted;
+- secrets excluded from Git;
+- logs never print Google auth tokens/cookies;
+- raw SMS retention configurable later if desired;
+- PocketBase superuser `/_/` treated as a privileged debug interface.
+
+Do not implement custom WebAuthn for v1. PocketBase auth or external private access is enough.
+
+---
+
+## 14. Backups and recovery
+
+Use PocketBase's own backup capability plus normal volume backups.
+
+Recovery test must verify:
+
+1. restore `pb_data`;
+2. payment records return;
+3. migrations agree with restored schema;
+4. Google Messages session restoration works if its private state is included;
+5. if the session cannot be restored, the payment database still starts cleanly and the UI asks for re-pairing.
+
+Do not let connector-session corruption prevent access to historical payments.
+
+---
+
+## 15. Recommended implementation order
+
+Do not build horizontally across every feature. Finish vertical slices.
+
+### Milestone A — prove connector
+
+- libgm spike
+- pairing
+- persistence
+- real SMS
+- reconnect testing
+- latency notes
+
+### Milestone B — prove payment core
+
+- PocketBase skeleton
+- migrations
+- `payments`
+- transactional allocator
+- exact matching with synthetic SMS events
+- expiry/quarantine
+- tests
+
+### Milestone C — connect the two
+
+- `sms_events`
+- GoogleMessagesManager
+- real SMS ingestion
+- idempotency
+- connector status
+
+### Milestone D — usable UI
+
+- auth
+- dashboard
+- payment create/list/detail
+- SMS events
+- connector pairing/status
+- realtime
+
+### Milestone E — self-host comfortably
+
+- Docker
+- Dokploy
+- healthcheck
+- backup/restore test
+- optional outgoing webhook
+
+---
+
+## 16. Definition of v1 done
+
+v1 is done when:
+
+- one container deploys successfully;
+- PocketBase is the durable source of truth;
+- a payment can be created with an exact unique payable amount;
+- payment state survives restart;
+- bank SMS is received through the chosen connector;
+- exact amount + RRN matching marks the correct payment paid;
+- duplicate/replayed SMS cannot double-pay;
+- late SMS cannot pay a newly reused amount during quarantine;
+- the UI shows payment status in realtime;
+- Google Messages health and pairing state are visible;
+- the built-in PocketBase admin UI remains untouched;
+- backup and restore has been manually tested;
+- the old Android relay is no longer required for normal operation if libgm passes Phase 0.
+
+Anything beyond that is v2 work, not a reason to delay the clean rebuild.
