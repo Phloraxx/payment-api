@@ -4,17 +4,20 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/config"
+	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/sms"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
+	"github.com/rs/zerolog"
 )
 
 func apiTestFactory(t testing.TB, before func(*tests.TestApp, *payments.Service)) *tests.TestApp {
@@ -41,6 +44,24 @@ func apiTestFactoryWithConfig(t testing.TB, configure func(*config.Config), befo
 		before(app, paymentService)
 	}
 	New(cfg, paymentService, smsService, nil).Register(app)
+	return app
+}
+
+func apiTestFactoryWithGMessages(t testing.TB) *tests.TestApp {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatalf("create PocketBase test app: %v", err)
+	}
+	cfg := config.Config{
+		UPIID: "operator@bank", UPIPayeeName: "PayGate",
+		APIKey: "api-secret", SMSWebhookSecret: "sms-secret",
+		PaymentTTL: 5 * time.Minute, AmountQuarantine: 24 * time.Hour,
+		GMessagesEnabled: true, GMessagesSessionPath: filepath.Join(t.TempDir(), "session.json"),
+	}
+	paymentService := payments.NewService(app, cfg, nil)
+	smsService := sms.NewService(app, paymentService)
+	manager := gmessages.NewManager(cfg, zerolog.Nop(), nil)
+	New(cfg, paymentService, smsService, manager).Register(app)
 	return app
 }
 
@@ -172,6 +193,28 @@ func TestPublicPaymentStatusRedactsSensitiveEvidence(t *testing.T) {
 		NotExpectedContent: []string{"123456789012", "private@upi", "Private Person", "private-order-123", `"rrn"`, `"payerName"`, `"externalId"`},
 	}
 	scenario.Test(t)
+}
+
+func TestGoogleMessagesAccountPairEndpointValidation(t *testing.T) {
+	scenarios := []tests.ApiScenario{
+		{
+			Name: "Google pair requires dashboard auth", Method: http.MethodPost, URL: "/api/connector/gmessages/pair/google",
+			Body:           strings.NewReader(`{"cookieData":"SID=missing-rest"}`),
+			TestAppFactory: func(t testing.TB) *tests.TestApp { return apiTestFactoryWithGMessages(t) },
+			ExpectedStatus: http.StatusUnauthorized, ExpectedContent: []string{"Dashboard authentication is required."},
+		},
+		{
+			Name: "payment API key cannot control Google pairing", Method: http.MethodPost, URL: "/api/connector/gmessages/pair/google",
+			Headers:        map[string]string{"Authorization": "Bearer api-secret"},
+			Body:           strings.NewReader(`{"cookieData":"SID=missing-rest"}`),
+			TestAppFactory: func(t testing.TB) *tests.TestApp { return apiTestFactoryWithGMessages(t) },
+			ExpectedStatus: http.StatusUnauthorized, ExpectedContent: []string{"Dashboard authentication is required."},
+		},
+	}
+	// API keys intentionally do not grant dashboard-only connector access.
+	for i := range scenarios {
+		scenarios[i].Test(t)
+	}
 }
 
 func TestLegacySMSWebhookMatchesPayment(t *testing.T) {

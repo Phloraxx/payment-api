@@ -88,3 +88,10 @@ tr.clickable:hover { background: #1d252f; }
 .modal { width: min(680px, 100%); max-height: 88vh; overflow: auto; background: #181e26; border: 1px solid #3a4552; border-radius: 14px; padding: 24px; box-shadow: 0 28px 90px rgba(0,0,0,.45); }
 @media (max-width: 900px) { .four { grid-template-columns: repeat(2, 1fr); } aside { width: 190px; flex-basis: 190px; } }
 @media (max-width: 640px) { .shell { display: block; } aside { width: 100%; height: auto; position: static; padding: 16px; } nav { display: flex; gap: 4px; overflow-x: auto; margin-top: 10px; } .nav { width: auto; white-space: nowrap; } .sidebar-bottom { margin-top: 12px; display: flex; justify-content: space-between; align-items: center; } main { padding: 24px 16px; } .four { grid-template-columns: repeat(2, 1fr); } .split, .section-title { align-items: flex-start; } .record-field { display: block; } .record-field code { display: block; text-align: left; max-width: 100%; margin-top: 5px; } .settings div, .detail-list div { display: block; } .settings dd, .detail-list dd { text-align: left; margin-top: 4px; } }
+textarea { width: 100%; resize: vertical; min-height: 130px; background: #11151b; border: 1px solid #36404c; border-radius: 7px; color: #fff; padding: 11px 12px; outline: none; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+textarea:focus { border-color: #82944d; box-shadow: 0 0 0 3px rgba(216,243,106,.08); }
+.google-pair-setup { margin-top: 22px; padding: 18px; border: 1px solid #303944; border-radius: 10px; background: #141a21; }
+.google-pair-setup h3, .pair-panel h3 { margin: 0 0 10px; }
+.google-pair-setup a { color: #b7d2ff; }
+.google-pair-setup code { color: #d8f36a; }
+.pair-emoji { font-size: clamp(76px, 12vw, 128px); line-height: 1.15; margin: 8px 0 14px; }

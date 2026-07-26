@@ -229,7 +229,7 @@ Responsibilities:
 - process old/catch-up events through the same idempotent ingestion path;
 - expose operator pairing/reconnect/unpair controls.
 
-Pairing refuses to replace an already-valid session. The operator must unpair first.
+Google-account/emoji (Gaia) pairing is the primary flow. The operator supplies the same cookie material required by upstream mautrix-gmessages (cookie JSON, Cookie header, or DevTools Copy-as-cURL); values are not logged or echoed. QR pairing remains a fallback. Pairing refuses to replace an already-valid session or another in-progress pairing; the operator must cancel/unpair first.
 
 The connector is optional. Payment/SMS records remain valid if Google's private protocol changes.
 
@@ -247,8 +247,11 @@ GET    /api/paygate/health
 GET    /api/config                        # authenticated operator
 GET    /api/dashboard                     # authenticated operator
 GET    /api/connector/gmessages/status    # authenticated operator
-POST   /api/connector/gmessages/pair
-POST   /api/connector/gmessages/pair/refresh
+POST   /api/connector/gmessages/pair/google
+POST   /api/connector/gmessages/pair/qr
+POST   /api/connector/gmessages/pair/qr/refresh
+POST   /api/connector/gmessages/pair              # backward-compatible QR alias
+POST   /api/connector/gmessages/pair/refresh      # backward-compatible QR refresh alias
 POST   /api/connector/gmessages/reconnect
 DELETE /api/connector/gmessages/pair
 ```

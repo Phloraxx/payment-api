@@ -24,6 +24,7 @@ import (
 const (
 	maxPaymentRequestBytes int64 = (1 << 20) + (64 << 10)
 	maxSMSRequestBytes     int64 = 128 << 10
+	maxGMessagesPairBytes  int64 = 128 << 10
 )
 
 type API struct {
@@ -48,6 +49,10 @@ func (a *API) Register(app core.App) {
 		e.Router.GET("/api/config", a.getConfig)
 		e.Router.GET("/api/dashboard", a.dashboard)
 		e.Router.GET("/api/connector/gmessages/status", a.gmessagesStatus)
+		e.Router.POST("/api/connector/gmessages/pair/google", a.gmessagesGooglePair).Bind(apis.BodyLimit(maxGMessagesPairBytes))
+		e.Router.POST("/api/connector/gmessages/pair/qr", a.gmessagesPair)
+		e.Router.POST("/api/connector/gmessages/pair/qr/refresh", a.gmessagesPairRefresh)
+		// Backward-compatible QR aliases from the first PayGate rebuild.
 		e.Router.POST("/api/connector/gmessages/pair", a.gmessagesPair)
 		e.Router.POST("/api/connector/gmessages/pair/refresh", a.gmessagesPairRefresh)
 		e.Router.POST("/api/connector/gmessages/reconnect", a.gmessagesReconnect)
@@ -256,6 +261,32 @@ func (a *API) gmessagesStatus(e *core.RequestEvent) error {
 		return e.UnauthorizedError("dashboard authentication is required", nil)
 	}
 	return e.JSON(http.StatusOK, a.connectorStatus())
+}
+
+type googleMessagesPairBody struct {
+	CookieData string `json:"cookieData"`
+}
+
+func (a *API) gmessagesGooglePair(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("dashboard authentication is required", nil)
+	}
+	if a.GMessages == nil {
+		return e.BadRequestError("Google Messages connector is unavailable", nil)
+	}
+	var body googleMessagesPairBody
+	if err := decodeJSON(e, &body); err != nil {
+		return e.BadRequestError("invalid JSON body", err)
+	}
+	emoji, accountEmail, err := a.GMessages.BeginGooglePair(strings.TrimSpace(body.CookieData))
+	if err != nil {
+		return e.BadRequestError(err.Error(), nil)
+	}
+	return e.JSON(http.StatusOK, map[string]any{
+		"emoji":        emoji,
+		"accountEmail": accountEmail,
+		"status":       a.GMessages.Status(),
+	})
 }
 
 func (a *API) gmessagesPair(e *core.RequestEvent) error {

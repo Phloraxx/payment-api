@@ -58,10 +58,11 @@ This document records what was implemented and what must be proven before/after 
 - [x] Privacy-prefilter bank-credit-like messages before ingestion.
 - [x] Handle connected/degraded/phone-response events.
 - [x] Back off reconnect attempts.
-- [x] Add QR pairing command/API.
-- [x] Auto-refresh short-lived QR data.
-- [x] Refuse accidental re-pair over an existing session.
-- [ ] Scan/complete a real phone QR pairing — intentionally deferred by operator request.
+- [x] Add Google-account/Gaia emoji pairing API and UI.
+- [x] Accept/validate upstream-required cookie JSON, raw Cookie headers and DevTools Copy-as-cURL input without logging values.
+- [x] Keep QR pairing as a fallback and auto-refresh short-lived QR data.
+- [x] Refuse accidental re-pair over an existing session or another pairing in progress.
+- [ ] Complete a real phone Google-account/emoji pairing and verify reconnect/session persistence.
 
 ### API/security
 
@@ -100,7 +101,7 @@ This document records what was implemented and what must be proven before/after 
 - [x] SMS evidence view.
 - [x] Outgoing webhook-delivery view.
 - [x] Connector health/settings.
-- [x] QR rendering/refresh.
+- [x] Google-account/emoji pairing UI plus QR fallback rendering/refresh.
 - [x] Periodic auth refresh and 401 sign-out.
 - [x] UI create retries preserve idempotency key.
 
@@ -163,7 +164,7 @@ Before replacing `main`, use a **new temporary Docker volume** with the final im
 13. database survives container stop/removal/recreation on the same volume;
 14. Docker health transitions to healthy after recreation.
 
-QR scanning is excluded from this acceptance pass by explicit operator request.
+Live Google Messages device pairing is excluded from the generic container acceptance pass and is validated separately with the real phone.
 
 ## Production cutover checklist
 
@@ -182,7 +183,7 @@ QR scanning is excluded from this acceptance pass by explicit operator request.
 - [ ] Generate a new strong `SMS_WEBHOOK_SECRET`.
 - [ ] Keep the old `WEBHOOK_SECRET` only if the current Android relay must survive the first cutover.
 - [ ] Set `LEGACY_SMS_WEBHOOK_ENABLED=true` only for that transition.
-- [ ] Keep Google Messages disabled until real QR testing if not paired yet.
+- [x] Enable Google Messages only after production core cutover; live account/emoji pairing remains pending.
 - [ ] Confirm no secret is printed into logs/history during the change.
 
 ### Branch/cutover
@@ -204,7 +205,7 @@ Once the new Android endpoint or Google Messages path is confirmed:
 - rotate/update the Android relay to `/api/events/sms` with `SMS_WEBHOOK_SECRET` and timestamps/provider IDs;
 - set `LEGACY_SMS_WEBHOOK_ENABLED=false`;
 - remove the old weak `WEBHOOK_SECRET` from Dokploy;
-- pair/test Google Messages with the real phone;
+- pair/test Google Messages with the real phone using Google-account/emoji pairing (QR only as fallback);
 - measure ingestion/matching latency and missed-event rate before treating libgm as the primary source.
 
 ## Definition of v1 done

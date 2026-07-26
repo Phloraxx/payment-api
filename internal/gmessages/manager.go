@@ -26,6 +26,9 @@ type Status struct {
 	Paired          bool       `json:"paired"`
 	Connected       bool       `json:"connected"`
 	PhoneResponsive bool       `json:"phoneResponsive"`
+	PairingMethod   string     `json:"pairingMethod,omitempty"`
+	PairingEmoji    string     `json:"pairingEmoji,omitempty"`
+	AccountEmail    string     `json:"accountEmail,omitempty"`
 	LastConnectedAt *time.Time `json:"lastConnectedAt,omitempty"`
 	LastMessageAt   *time.Time `json:"lastMessageAt,omitempty"`
 	LastError       string     `json:"lastError,omitempty"`
@@ -45,6 +48,7 @@ type Manager struct {
 	ctx          context.Context
 	cancel       context.CancelFunc
 	reconnecting bool
+	pairCancel   context.CancelFunc
 }
 
 func NewManager(cfg config.Config, logger zerolog.Logger, ingest IngestFunc) *Manager {
@@ -65,7 +69,13 @@ func NewManager(cfg config.Config, logger zerolog.Logger, ingest IngestFunc) *Ma
 		return m
 	}
 	m.session = session
-	m.status = Status{Enabled: true, State: "disconnected", Paired: true}
+	m.status = Status{
+		Enabled:       true,
+		State:         "disconnected",
+		Paired:        true,
+		PairingMethod: sessionPairingMethod(session),
+		AccountEmail:  sessionAccountEmail(session),
+	}
 	return m
 }
 
@@ -90,8 +100,10 @@ func (m *Manager) Start(parent context.Context) {
 func (m *Manager) Stop() {
 	m.mu.Lock()
 	cancel := m.cancel
+	pairCancel := m.pairCancel
 	client := m.client
 	m.cancel = nil
+	m.pairCancel = nil
 	m.ctx = nil
 	m.client = nil
 	m.status.Connected = false
@@ -101,6 +113,9 @@ func (m *Manager) Stop() {
 	m.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if pairCancel != nil {
+		pairCancel()
 	}
 	if client != nil {
 		client.Disconnect()
@@ -180,6 +195,9 @@ func (m *Manager) handleEvent(raw any) {
 		m.status.State = "connected"
 		m.status.Connected = true
 		m.status.PhoneResponsive = true
+		m.status.PairingEmoji = ""
+		m.status.PairingMethod = sessionPairingMethod(m.session)
+		m.status.AccountEmail = sessionAccountEmail(m.session)
 		m.mu.Unlock()
 		if err := m.saveCurrentSession(); err != nil {
 			m.logger.Error().Err(err).Msg("failed to persist Google Messages session")
@@ -345,22 +363,157 @@ func (m *Manager) Reconnect() error {
 	return m.saveCurrentSession()
 }
 
+func (m *Manager) BeginGooglePair(cookieInput string) (string, string, error) {
+	if !m.cfg.GMessagesEnabled {
+		return "", "", errors.New("google messages connector is disabled")
+	}
+	cookies, err := parseGoogleCookieInput(cookieInput)
+	if err != nil {
+		return "", "", err
+	}
+
+	m.mu.Lock()
+	if validSession(m.session) {
+		m.mu.Unlock()
+		return "", "", errors.New("google messages is already paired; unpair it before starting a new pairing")
+	}
+	if m.status.State == "pairing" {
+		m.mu.Unlock()
+		return "", "", errors.New("google messages pairing is already in progress")
+	}
+	oldClient := m.client
+	oldPairCancel := m.pairCancel
+	session := libgm.NewAuthData()
+	session.SetCookies(cookies)
+	client := m.newClient(session)
+	parent := m.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	pairCtx, pairCancel := context.WithTimeout(parent, 2*time.Minute)
+	m.session = session
+	m.client = client
+	m.pairCancel = pairCancel
+	m.status = Status{Enabled: true, State: "pairing", PairingMethod: "google"}
+	m.mu.Unlock()
+
+	if oldPairCancel != nil {
+		oldPairCancel()
+	}
+	if oldClient != nil {
+		oldClient.Disconnect()
+	}
+
+	if err := client.FetchConfig(pairCtx); err != nil {
+		pairCancel()
+		m.failPairing(client, fmt.Errorf("google account authentication failed: %w", err))
+		return "", "", errors.New("google account authentication failed; refresh the browser cookies and try again")
+	}
+	accountEmail := strings.TrimSpace(client.Config.GetDeviceInfo().GetEmail())
+
+	emojiCh := make(chan string, 1)
+	resultCh := make(chan error, 1)
+	go func() {
+		resultCh <- client.DoGaiaPairing(pairCtx, func(emoji string) {
+			emojiCh <- emoji
+		})
+	}()
+
+	select {
+	case emoji := <-emojiCh:
+		m.mu.Lock()
+		if m.client == client {
+			m.status.PairingEmoji = emoji
+			m.status.AccountEmail = accountEmail
+		}
+		m.mu.Unlock()
+		go m.awaitGooglePairResult(client, pairCancel, resultCh)
+		return emoji, accountEmail, nil
+	case err := <-resultCh:
+		pairCancel()
+		m.failPairing(client, googlePairingError(err))
+		return "", accountEmail, googlePairingError(err)
+	case <-pairCtx.Done():
+		err := googlePairingError(pairCtx.Err())
+		m.failPairing(client, err)
+		return "", accountEmail, err
+	}
+}
+
+func (m *Manager) awaitGooglePairResult(client *libgm.Client, cancel context.CancelFunc, resultCh <-chan error) {
+	err := <-resultCh
+	cancel()
+	if err != nil {
+		m.failPairing(client, googlePairingError(err))
+		return
+	}
+	m.mu.Lock()
+	if m.client == client {
+		m.pairCancel = nil
+		m.status.PairingEmoji = ""
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) failPairing(client *libgm.Client, err error) {
+	if client != nil {
+		client.Disconnect()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.client != client {
+		return
+	}
+	if m.pairCancel != nil {
+		m.pairCancel()
+	}
+	m.pairCancel = nil
+	m.client = nil
+	m.session = nil
+	m.status = Status{Enabled: m.cfg.GMessagesEnabled, State: "unpaired"}
+	if err != nil {
+		m.status.LastError = err.Error()
+	}
+}
+
+func googlePairingError(err error) error {
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, libgm.ErrNoDevicesFound):
+		return errors.New("no Google Messages phone was found for this account; enable account pairing on the phone and keep Messages online")
+	case errors.Is(err, libgm.ErrPairingInitTimeout):
+		return errors.New("the phone did not respond to the pairing request; keep Google Messages open and disable battery optimisation temporarily")
+	case errors.Is(err, libgm.ErrIncorrectEmoji):
+		return errors.New("the wrong emoji was selected on the phone")
+	case errors.Is(err, libgm.ErrPairingCancelled):
+		return errors.New("pairing was cancelled on the phone")
+	case errors.Is(err, libgm.ErrPairingTimeout), errors.Is(err, context.DeadlineExceeded):
+		return errors.New("google messages pairing timed out")
+	default:
+		return errors.New("google messages pairing failed; check the connector logs and try again")
+	}
+}
+
+// BeginPair starts the legacy QR flow. Google-account/emoji pairing is preferred.
 func (m *Manager) BeginPair() (string, error) {
 	if !m.cfg.GMessagesEnabled {
 		return "", errors.New("google messages connector is disabled")
 	}
-	m.mu.RLock()
-	alreadyPaired := validSession(m.session)
-	m.mu.RUnlock()
-	if alreadyPaired {
+	m.mu.Lock()
+	if validSession(m.session) {
+		m.mu.Unlock()
 		return "", errors.New("google messages is already paired; unpair it before starting a new pairing")
 	}
-	m.mu.Lock()
+	if m.status.State == "pairing" {
+		m.mu.Unlock()
+		return "", errors.New("google messages pairing is already in progress")
+	}
 	oldClient := m.client
 	m.session = libgm.NewAuthData()
 	m.client = m.newClient(m.session)
 	client := m.client
-	m.status = Status{Enabled: true, State: "pairing"}
+	m.status = Status{Enabled: true, State: "pairing", PairingMethod: "qr"}
 	m.mu.Unlock()
 	if oldClient != nil {
 		oldClient.Disconnect()
@@ -377,9 +530,10 @@ func (m *Manager) RefreshPair() (string, error) {
 	m.mu.RLock()
 	client := m.client
 	state := m.status.State
+	method := m.status.PairingMethod
 	m.mu.RUnlock()
-	if client == nil || state != "pairing" {
-		return "", errors.New("pairing has not started")
+	if client == nil || state != "pairing" || method != "qr" {
+		return "", errors.New("QR pairing has not started")
 	}
 	return client.RefreshPhoneRelay()
 }
@@ -387,13 +541,21 @@ func (m *Manager) RefreshPair() (string, error) {
 func (m *Manager) Unpair() error {
 	m.mu.Lock()
 	client := m.client
+	pairCancel := m.pairCancel
+	wasPaired := validSession(m.session)
 	m.client = nil
+	m.pairCancel = nil
 	m.session = nil
 	m.status = Status{Enabled: m.cfg.GMessagesEnabled, State: "unpaired"}
 	m.mu.Unlock()
+	if pairCancel != nil {
+		pairCancel()
+	}
 	if client != nil {
-		if _, err := client.UnpairBugle(); err != nil {
-			m.logger.Warn().Err(err).Msg("remote Google Messages unpair failed; deleting local session anyway")
+		if wasPaired {
+			if _, err := client.UnpairBugle(); err != nil {
+				m.logger.Warn().Err(err).Msg("remote Google Messages unpair failed; deleting local session anyway")
+			}
 		}
 		client.Disconnect()
 	}
@@ -418,10 +580,15 @@ func (m *Manager) markConnected() {
 func (m *Manager) markLoggedOut() {
 	m.mu.Lock()
 	client := m.client
+	pairCancel := m.pairCancel
 	m.client = nil
+	m.pairCancel = nil
 	m.session = nil
 	m.status = Status{Enabled: m.cfg.GMessagesEnabled, State: "unpaired", LastError: "Google Messages session was logged out"}
 	m.mu.Unlock()
+	if pairCancel != nil {
+		pairCancel()
+	}
 	if client != nil {
 		client.Disconnect()
 	}
@@ -451,6 +618,7 @@ func (m *Manager) saveCurrentSession() error {
 
 func validSession(session *libgm.AuthData) bool {
 	return session != nil &&
+		googleSessionHasRequiredCookies(session) &&
 		session.Browser != nil &&
 		session.Mobile != nil &&
 		session.RequestCrypto != nil &&
@@ -461,6 +629,32 @@ func validSession(session *libgm.AuthData) bool {
 		len(session.RefreshKey.X) > 0 &&
 		len(session.RefreshKey.Y) > 0 &&
 		len(session.TachyonAuthToken) > 0
+}
+
+func googleSessionHasRequiredCookies(session *libgm.AuthData) bool {
+	if session == nil || !session.IsGoogleAccount() {
+		return true
+	}
+	session.CookiesLock.RLock()
+	defer session.CookiesLock.RUnlock()
+	return validateGoogleCookies(session.Cookies) == nil
+}
+
+func sessionPairingMethod(session *libgm.AuthData) string {
+	if session == nil {
+		return ""
+	}
+	if session.IsGoogleAccount() {
+		return "google"
+	}
+	return "qr"
+}
+
+func sessionAccountEmail(session *libgm.AuthData) string {
+	if session == nil || !session.IsGoogleAccount() || session.Mobile == nil {
+		return ""
+	}
+	return strings.TrimSpace(session.Mobile.GetSourceID())
 }
 
 func loadSession(path string) (*libgm.AuthData, error) {
