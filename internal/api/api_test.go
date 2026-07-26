@@ -1,7 +1,9 @@
 package api
 
 import (
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +12,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/sms"
 	_ "github.com/Phloraxx/payment-api/migrations"
+	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
 )
@@ -85,6 +88,54 @@ func TestPaymentAPIAuthenticationAndAmountValidation(t *testing.T) {
 	}
 	for i := range scenarios {
 		scenarios[i].Test(t)
+	}
+}
+
+func TestPaymentCreateThroughRealHTTPServer(t *testing.T) {
+	app := apiTestFactory(t, nil)
+	defer app.Cleanup()
+
+	router, err := apis.NewRouter(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveEvent := &core.ServeEvent{App: app, Router: router}
+	if err := app.OnServe().Trigger(serveEvent, func(e *core.ServeEvent) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	mux, err := serveEvent.Router.BuildMux()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/payments", strings.NewReader(`{"amount":100,"externalId":"network-http"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer api-secret")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "network-http-idem")
+
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", res.StatusCode, body)
+	}
+	content := string(body)
+	for _, want := range []string{`"requestedAmount":100`, `"externalId":"network-http"`, `upi://pay?`} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("response missing %q: %s", want, content)
+		}
 	}
 }
 
