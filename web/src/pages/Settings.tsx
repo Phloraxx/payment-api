@@ -15,11 +15,17 @@ type SafeConfig = {
   connector: Connector;
 };
 
-type PairResponse = { qrUrl: string; status: Connector };
+type QRPairResponse = { qrUrl: string; status: Connector };
+type GooglePairResponse = { emoji: string; accountEmail: string; status: Connector };
+
+const googleMessagesConfigURL = "https://accounts.google.com/AccountChooser?continue=https://messages.google.com/web/config";
 
 export function Settings({ notify }: { notify: (value: string) => void }) {
   const [config, setConfig] = useState<SafeConfig | null>(null);
   const [connector, setConnector] = useState<Connector | null>(null);
+  const [cookieData, setCookieData] = useState("");
+  const [pairingEmoji, setPairingEmoji] = useState("");
+  const [pairingAccount, setPairingAccount] = useState("");
   const [qrUrl, setQrUrl] = useState("");
   const [qrImage, setQrImage] = useState("");
   const [busy, setBusy] = useState(false);
@@ -32,7 +38,13 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
       ]);
       setConfig(cfg);
       setConnector(status);
-      if (status.state !== "pairing" && status.paired) {
+      if (status.pairingMethod === "google" && status.state === "pairing") {
+        setPairingEmoji(status.pairingEmoji ?? "");
+        setPairingAccount(status.accountEmail ?? "");
+      }
+      if (status.paired) {
+        setCookieData("");
+        setPairingEmoji("");
         setQrUrl("");
         setQrImage("");
       }
@@ -43,7 +55,7 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
 
   useEffect(() => {
     void refresh();
-    const timer = window.setInterval(() => void refresh(), 10_000);
+    const timer = window.setInterval(() => void refresh(), 3_000);
     return () => window.clearInterval(timer);
   }, [refresh]);
 
@@ -53,10 +65,10 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
   }, [qrUrl]);
 
   useEffect(() => {
-    if (!qrUrl || connector?.state !== "pairing") return;
+    if (!qrUrl || connector?.state !== "pairing" || connector.pairingMethod !== "qr") return;
     const timer = window.setInterval(async () => {
       try {
-        const result = await api<PairResponse>("/api/connector/gmessages/pair/refresh", { method: "POST" });
+        const result = await api<QRPairResponse>("/api/connector/gmessages/pair/qr/refresh", { method: "POST" });
         setQrUrl(result.qrUrl);
         setConnector(result.status);
       } catch (err) {
@@ -64,17 +76,40 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
       }
     }, 20_000);
     return () => window.clearInterval(timer);
-  }, [qrUrl, connector?.state, notify]);
+  }, [qrUrl, connector?.state, connector?.pairingMethod, notify]);
 
-  async function startPairing() {
+  async function startGooglePairing() {
+    if (!cookieData.trim()) {
+      notify("Paste the Google Messages cookie data or Copy-as-cURL request first.");
+      return;
+    }
     setBusy(true);
     try {
-      const result = await api<PairResponse>("/api/connector/gmessages/pair", { method: "POST" });
+      const result = await api<GooglePairResponse>("/api/connector/gmessages/pair/google", {
+        method: "POST",
+        body: JSON.stringify({ cookieData }),
+      });
+      setCookieData("");
+      setPairingEmoji(result.emoji);
+      setPairingAccount(result.accountEmail);
+      setConnector(result.status);
+      notify("Pairing request sent. Tap the matching emoji in Google Messages on your phone.");
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Google account pairing could not start.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function startQRPairing() {
+    setBusy(true);
+    try {
+      const result = await api<QRPairResponse>("/api/connector/gmessages/pair/qr", { method: "POST" });
       setQrUrl(result.qrUrl);
       setConnector(result.status);
-      notify("Pairing started. Scan the QR from Google Messages.");
+      notify("QR fallback pairing started.");
     } catch (err) {
-      notify(err instanceof Error ? err.message : "Pairing could not start.");
+      notify(err instanceof Error ? err.message : "QR pairing could not start.");
     } finally {
       setBusy(false);
     }
@@ -91,37 +126,69 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
   }
 
   async function unpair() {
-    if (!window.confirm("Remove the stored Google Messages pairing from PayGate?")) return;
+    const pairing = connector?.state === "pairing";
+    if (!window.confirm(pairing ? "Cancel the current Google Messages pairing?" : "Remove the stored Google Messages pairing from PayGate?")) return;
     setBusy(true);
     try {
       setConnector(await api<Connector>("/api/connector/gmessages/pair", { method: "DELETE" }));
-      setQrUrl(""); setQrImage("");
-      notify("Google Messages unpaired.");
+      setCookieData(""); setPairingEmoji(""); setPairingAccount(""); setQrUrl(""); setQrImage("");
+      notify(pairing ? "Pairing cancelled." : "Google Messages unpaired.");
     } catch (err) {
       notify(err instanceof Error ? err.message : "Unpair failed.");
     } finally { setBusy(false); }
   }
 
   const enabled = connector?.enabled ?? false;
+  const pairing = connector?.state === "pairing";
   return <>
     <section className="card">
       <div className="section-title">
         <div><p className="eyebrow">GOOGLE MESSAGES</p><h2>{enabled ? connector?.state ?? "loading" : "disabled"}</h2></div>
         <Badge status={connector?.connected ? "connected" : connector?.state ?? "disabled"} />
       </div>
-      <p className="muted">{connector?.lastError || "Read-only SMS connector. The authenticated Android SMS webhook remains available as fallback."}</p>
+      <p className="muted">{connector?.lastError || "Read-only SMS connector. Google account + emoji pairing is preferred; QR remains available as a fallback."}</p>
       <dl className="settings compact">
         <div><dt>Paired</dt><dd>{connector?.paired ? "Yes" : "No"}</dd></div>
+        <div><dt>Pairing method</dt><dd>{connector?.pairingMethod || "—"}</dd></div>
+        <div><dt>Google account</dt><dd>{connector?.accountEmail || pairingAccount || "—"}</dd></div>
         <div><dt>Phone responsive</dt><dd>{connector?.phoneResponsive ? "Yes" : "No / unknown"}</dd></div>
         <div><dt>Last connected</dt><dd>{formatDate(connector?.lastConnectedAt)}</dd></div>
         <div><dt>Last bank SMS</dt><dd>{formatDate(connector?.lastMessageAt)}</dd></div>
       </dl>
+
+      {enabled && !connector?.paired && !pairing && <div className="google-pair-setup">
+        <h3>Google account pairing</h3>
+        <p className="muted">Open Google Messages Web in the same Google account, then in browser DevTools → Network reload the page, select the <code>config</code> request, and use <strong>Copy as cURL</strong>. Paste it below. A raw Cookie header or JSON cookie object also works.</p>
+        <p><a href={googleMessagesConfigURL} target="_blank" rel="noreferrer">Open Google Messages account/config ↗</a></p>
+        <textarea
+          value={cookieData}
+          onChange={(event) => setCookieData(event.target.value)}
+          placeholder="Paste Copy-as-cURL, Cookie: SID=…; HSID=…; …, or cookie JSON"
+          autoComplete="off"
+          spellCheck={false}
+          rows={7}
+        />
+        <p className="muted">Cookie values are never returned to the browser or written to application logs. PayGate persists them in the restricted session file only after pairing succeeds.</p>
+        <div className="actions">
+          <button className="primary" disabled={busy || !cookieData.trim()} onClick={() => void startGooglePairing()}>Start Google account pairing</button>
+          <button disabled={busy} onClick={() => void startQRPairing()}>Use QR fallback</button>
+        </div>
+      </div>}
+
+      {pairing && connector?.pairingMethod === "google" && <div className="pair-panel">
+        <p className="eyebrow">PAIRING EMOJI</p>
+        <div className="pair-emoji" aria-label={`Pairing emoji ${pairingEmoji || connector.pairingEmoji || ""}`}>{pairingEmoji || connector.pairingEmoji || "…"}</div>
+        <h3>Tap this emoji on your phone</h3>
+        <p>Google Messages → Device pairing. Choose the matching emoji when the pairing request appears.</p>
+        <p className="muted">Keep Google Messages open and the phone online. This request expires automatically.</p>
+      </div>}
+
+      {qrImage && connector?.pairingMethod === "qr" && <div className="pair-panel"><img src={qrImage} alt="Google Messages pairing QR" /><p>Google Messages → Device pairing → Switch to QR pairing → scan this code.</p><p className="muted">The QR refreshes automatically before the token expires.</p></div>}
+
       <div className="actions">
-        <button className="primary" disabled={!enabled || connector?.paired || busy} onClick={() => void startPairing()}>Start QR pairing</button>
         <button disabled={!enabled || !connector?.paired || busy} onClick={() => void reconnect()}>Reconnect</button>
-        <button className="danger" disabled={!connector?.paired || busy} onClick={() => void unpair()}>Unpair</button>
+        <button className="danger" disabled={!enabled || (!connector?.paired && !pairing) || busy} onClick={() => void unpair()}>{pairing ? "Cancel pairing" : "Unpair"}</button>
       </div>
-      {qrImage && <div className="pair-panel"><img src={qrImage} alt="Google Messages pairing QR" /><p>Google Messages → Device pairing → Switch to QR pairing → scan this code.</p><p className="muted">The QR refreshes automatically before the token expires.</p></div>}
     </section>
 
     <section className="card">

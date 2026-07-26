@@ -200,7 +200,7 @@ The React UI at `/` provides:
 - cancellation;
 - SMS evidence records;
 - outgoing webhook delivery records;
-- Google Messages connector status and QR pairing controls;
+- Google Messages connector status, Google-account/emoji pairing and QR fallback controls;
 - safe non-secret configuration status.
 
 Operator accounts use the PocketBase `users` auth collection. Domain collections are read-only through PocketBase APIs for authenticated `users`; state-changing payment operations go through custom Go handlers. Direct domain writes are locked.
@@ -226,11 +226,15 @@ The connector:
 - records the Google message ID and original timestamp;
 - reconnects/backoffs on connection failures;
 - reports paired/connected/phone-responsive state;
-- supports QR pairing and automatic QR refresh.
+- supports the current Google-account + emoji (Gaia) pairing flow;
+- accepts the upstream-required browser cookie set as cookie JSON, a raw Cookie header, or a DevTools Copy-as-cURL request;
+- keeps QR pairing as a fallback and automatically refreshes short-lived QR data.
 
-Starting a new pairing is refused while a valid session is already paired; explicitly unpair first.
+Google-account pairing is the primary path. Browser cookie input is never logged or echoed; it remains transient until pairing succeeds, after which libgm's AuthData (including the cookies required for account reauthentication) is stored in `pb_data/gmessages/session.json` with restrictive permissions.
 
-**Live phone QR scanning is the one intentionally deferred acceptance test.** The connector code is integrated and unit-tested, but the private Google Messages protocol can change and must be validated with the actual phone before relying on it as the only ingestion source.
+Starting a new pairing is refused while another pairing is active or a valid session is already paired; explicitly cancel/unpair first.
+
+**Live phone Google-account/emoji pairing is the remaining connector acceptance test.** The connector code is integrated and unit-tested, but the private Google Messages protocol can change and must be validated with the actual phone before relying on it as the only ingestion source.
 
 ## Configuration
 

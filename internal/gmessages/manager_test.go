@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/Phloraxx/payment-api/internal/config"
 
 	"go.mau.fi/mautrix-gmessages/pkg/libgm"
@@ -83,6 +85,38 @@ func TestBeginPairRefusesToReplaceExistingSession(t *testing.T) {
 	}
 	if _, err := manager.BeginPair(); err == nil || !strings.Contains(err.Error(), "already paired") {
 		t.Fatalf("BeginPair() error = %v; want already paired guard", err)
+	}
+}
+
+func TestGoogleSessionRequiresCookies(t *testing.T) {
+	session := libgm.NewAuthData()
+	session.Browser = &gmproto.Device{}
+	session.Mobile = &gmproto.Device{SourceID: "user@example.com"}
+	session.TachyonAuthToken = []byte{1}
+	session.DestRegID = uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	if validSession(session) {
+		t.Fatal("Google-account session without cookies was accepted")
+	}
+	cookies, err := parseGoogleCookieInput(testCookieHeader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session.SetCookies(cookies)
+	if !validSession(session) {
+		t.Fatal("complete Google-account session with required cookies was rejected")
+	}
+	if got := sessionPairingMethod(session); got != "google" {
+		t.Fatalf("pairing method = %q", got)
+	}
+}
+
+func TestQRPairRefusesDuringGooglePairing(t *testing.T) {
+	manager := &Manager{
+		cfg:    config.Config{GMessagesEnabled: true},
+		status: Status{Enabled: true, State: "pairing", PairingMethod: "google"},
+	}
+	if _, err := manager.BeginPair(); err == nil || !strings.Contains(err.Error(), "already in progress") {
+		t.Fatalf("BeginPair() error = %v; want in-progress guard", err)
 	}
 }
 

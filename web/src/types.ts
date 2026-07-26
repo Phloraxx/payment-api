@@ -22,6 +22,9 @@ export type Connector = {
   paired: boolean;
   connected: boolean;
   phoneResponsive: boolean;
+  pairingMethod?: string;
+  pairingEmoji?: string;
+  accountEmail?: string;
   lastConnectedAt?: string;
   lastMessageAt?: string;
   lastError?: string;

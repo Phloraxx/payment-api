@@ -148,7 +148,7 @@ This is why:
 - an old event cannot confirm a payment created later;
 - connector health is visible to the operator.
 
-Real p50/p95/p99 latency must be measured with the actual bank/phone/network after live QR pairing.
+Real p50/p95/p99 latency must be measured with the actual bank/phone/network after live Google-account/emoji pairing (or QR fallback if required).
 
 ## 8. Why browser automation was rejected
 

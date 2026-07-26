@@ -67,7 +67,7 @@ Use non-empty uniqueness for RRN, idempotency key and `(source, source_event_id)
 - `GET /api/paygate/health`: PayGate DB/readiness and redacted connector summary.
 - `GET /api/config`: authenticated safe configuration/connector status.
 - `GET /api/dashboard`: authenticated summary.
-- connector status/pair/refresh/reconnect/unpair routes are authenticated.
+- connector status, Google-account/emoji pair, QR fallback/refresh, reconnect and unpair routes are dashboard-authenticated.
 
 The SPA must never swallow unknown `/api/*` or `/_/*` routes.
 
@@ -101,14 +101,16 @@ UI pages: Login, Dashboard, Payments/create/details, SMS Events, Webhook Deliver
 libgm is optional infrastructure, not the payment model.
 
 - Persist AuthData under `pb_data/gmessages/session.json` with restrictive permissions.
-- Console/API QR pairing refreshes short-lived QR tokens.
-- Refuse accidental replacement of an existing valid pairing; unpair first.
+- Prefer Google-account/Gaia pairing: validate the upstream-required Google cookie set, fetch config, display the derived emoji, wait for phone confirmation, then persist the completed session.
+- Cookie input may be cookie JSON, a raw Cookie header, or a DevTools Copy-as-cURL request; values must never be logged or echoed.
+- Keep QR pairing as a fallback and refresh short-lived QR tokens.
+- Refuse accidental replacement of an existing valid pairing or another pairing already in progress; cancel/unpair first.
 - When enabled/paired, connect on serve, persist token refreshes, process incoming text `WrappedMessage` events into the same SMS service, and reconnect/back off on failure.
 - Keep provider message ID and original timestamp, including catch-up/old events.
 - Report paired/connected/phone-responsive/timestamp/error state to authenticated operator views.
 - Application remains healthy when unpaired/offline.
 - Connector is read-only; do not send SMS/RCS.
-- Real phone QR scanning is intentionally deferred until the operator performs the device test.
+- Real phone Google-account/emoji pairing and reconnect persistence remain a device acceptance test; QR is fallback only.
 
 ## Expiry/background work
 
