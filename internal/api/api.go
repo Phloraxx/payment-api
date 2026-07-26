@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -358,7 +359,16 @@ func constantTimeEqual(expected, actual string) bool {
 }
 
 func decodeJSON(e *core.RequestEvent, dst any) error {
-	decoder := json.NewDecoder(e.Request.Body)
+	// PocketBase wraps request bodies in a rereadable reader so middleware can
+	// inspect them more than once. Decode from an immutable snapshot here;
+	// otherwise a second Decode used to prove EOF can observe the rewound body
+	// as a second JSON value on real network requests.
+	body, err := io.ReadAll(e.Request.Body)
+	if err != nil {
+		return err
+	}
+
+	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {
 		return err
