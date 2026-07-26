@@ -1,702 +1,361 @@
-# Payment API Rebuild — Architecture
+# PayGate — Implemented Architecture
 
-This document defines the target architecture for the clean rebuild. `PLAN.md` defines implementation order; `RESEARCH.md` records the evidence behind these decisions.
+## 1. Scope
 
-## 1. Design goals
+PayGate is a single-operator, self-hosted UPI payment-verification service. A payer sends money directly to the configured UPI destination. PayGate observes bank-credit evidence and correlates it with a previously created payment.
 
-The system should be:
+It is not a fund-custody, settlement or acquiring system. The current product boundary intentionally avoids multi-merchant tenancy and provider abstractions.
 
-- simple enough for one person to understand and operate;
-- durable across process/container restarts;
-- correct about exact monetary amounts;
-- resilient to duplicate and delayed SMS delivery;
-- observable when the Android/Google Messages path is degraded;
-- easy to self-host on the existing Dokploy server;
-- small enough that PocketBase replaces infrastructure instead of becoming another dependency beside duplicate infrastructure.
-
-This is a personal hobby service. It does not need multi-tenant/payment-company architecture.
-
----
-
-## 2. System boundary
+## 2. Runtime
 
 ```text
-                 UPI payment
-Customer ─────────────────────────► bank account
-                                        │
-                                        │ credit SMS
-                                        ▼
-                                 Android phone
-                                        │
-                                 Google Messages
-                                        │
-                                  Messages Web
-                                        │
-                                        ▼
-                                      libgm
-                                        │
-                                        ▼
-┌───────────────────────────────────────────────────────┐
-│                  Payment API process                  │
-│                                                       │
-│  GoogleMessagesManager ──► SmsService                 │
-│                               │                       │
-│                               ▼                       │
-│                         PaymentService                │
-│                               │                       │
-│                    PocketBase / SQLite                │
-│                      │              │                 │
-│                  payments       sms_events            │
-│                      │              │                 │
-│                      └──── realtime ┘                 │
-│                               │                       │
-│                     custom REST routes                │
-│                               │                       │
-│                 React/Vite static frontend            │
-│                                                       │
-│       PocketBase `/_/` stays untouched/admin-only     │
-└───────────────────────────────────────────────────────┘
+                       ┌────────────────────────────┐
+                       │       Android phone        │
+                       │ receives bank-credit SMS   │
+                       └──────────────┬─────────────┘
+                                      │
+                  ┌───────────────────┴──────────────────┐
+                  │                                      │
+       Google Messages/libgm                    legacy Android relay
+                  │                                      │
+                  └───────────────────┬──────────────────┘
+                                      ▼
+                        ┌─────────────────────────┐
+                        │      PayGate binary     │
+                        │                         │
+                        │ custom Go HTTP routes   │
+                        │ payment service         │
+                        │ SMS parser/ingestion    │
+                        │ webhook outbox worker   │
+                        │ optional libgm manager  │
+                        │ PocketBase framework    │
+                        │ React static assets     │
+                        └────────────┬────────────┘
+                                     │
+                                     ▼
+                              PocketBase SQLite
+                               /app/pb_data
 ```
 
-The Android phone remains part of the payment-observation path. libgm replaces the custom relay application, not the phone/SIM.
+One process and one SQLite database are deliberate. This workload does not need Redis, Kafka, a second service or a separate logging database.
 
----
+## 3. PocketBase boundary
 
-## 3. Runtime architecture
+PocketBase 0.39.9 supplies:
 
-### One Go process
-
-The application embeds PocketBase as a Go package.
-
-The process owns:
-
-- HTTP server and custom routes;
-- PocketBase admin/API/realtime;
-- SQLite connection;
-- migrations;
-- scheduled expiry/cleanup jobs;
-- payment business logic;
-- SMS parsing;
-- libgm client lifecycle;
-- static frontend serving.
-
-Do not split these into services unless a later requirement proves that necessary.
-
-### One runtime container
-
-```text
-Docker container
-├── payment-api binary
-├── compiled frontend assets
-└── /app/pb_data  ← persistent volume
-```
-
-The frontend build may use Node in a Docker build stage, but Node is not required in the final runtime image.
-
----
-
-## 4. PocketBase responsibilities
-
-Use PocketBase for functionality it already provides:
-
-- SQLite/database access;
-- collections and schema;
-- Go migrations;
+- SQLite connection and transactions;
+- migrations/collection definitions;
 - authentication;
-- record API for controlled reads;
-- SSE realtime subscriptions;
-- application logging;
+- SSE realtime for the operator UI;
+- cron scheduling;
+- request logging;
 - backups;
-- health/admin plumbing;
-- cron jobs;
-- built-in superuser dashboard at `/_/`.
+- the low-level `/_/` administration UI.
 
-Do not fork PocketBase core or its admin frontend.
+Custom Go code owns payment state transitions. PocketBase record APIs expose domain collections read-only to authenticated records from the `users` auth collection. Collection create/update/delete rules are locked.
 
-### UI separation
+The application UI is a separate embedded React/Vite build at `/`; PocketBase `/_/` is not modified.
+
+## 4. Collections
+
+### `users`
+
+PocketBase auth collection for normal PayGate operator accounts. Public self-registration is disabled; accounts are created administratively.
+
+### `payments`
+
+Important fields:
+
+| Field | Purpose |
+|---|---|
+| `created_at` | Business creation timestamp used for evidence eligibility |
+| `requested_amount` | Whole requested amount in paise |
+| `payable_amount` | Exact DDM amount in paise |
+| `status` | pending/paid/expired/cancelled/late |
+| `expires_at` | Pending deadline |
+| `reuse_after` | Amount quarantine deadline |
+| `rrn` | UPI reference, unique when non-empty |
+| `upi_id` | Parsed payer UPI ID when available |
+| `payer_name` | Parsed payer identity when available |
+| `paid_at` | Best-known evidence occurrence time |
+| `external_id` | Caller/order correlation |
+| `idempotency_key` | Unique non-empty create key |
+| `metadata` | Caller JSON metadata |
+
+PocketBase's own `created` and `updated` autodate fields are also present. `created_at` is separate because business correlation must use an explicit timestamp written by the payment transaction rather than relying on framework metadata semantics.
+
+### `sms_events`
+
+Durable evidence/audit records:
+
+- source: `android_webhook`, `gmessages`, or `manual`;
+- source event ID;
+- sender/body;
+- original/effective message timestamp;
+- parsed amount/RRN/UPI ID/payer name;
+- processing status;
+- matched payment relation;
+- parsing/matching error;
+- small raw connector metadata.
+
+`(source, source_event_id)` is unique when the provider ID is non-empty.
+
+### `webhook_deliveries`
+
+Durable outbox/delivery state:
+
+- stable event ID and event name;
+- payment relation;
+- destination URL;
+- immutable request body;
+- attempts/status;
+- next attempt timestamp;
+- sending lease timestamp;
+- response code/error/delivery timestamps.
+
+## 5. Money and DDM allocation
+
+Money is never represented by floating point in the domain layer.
+
+For requested whole rupees `R`:
 
 ```text
-/     custom payment UI
-/_/   PocketBase superuser/debug UI
+requestedPaise = R * 100
+candidate = requestedPaise + suffix
+suffix ∈ [1, 99]
 ```
 
-The custom UI is built against the PocketBase backend, not layered on or injected into the PocketBase admin frontend.
+`.00` is intentionally excluded. The maximum accepted requested amount reserves 99 paise of `int64` headroom so `requestedPaise + 99` cannot overflow.
 
----
+Creation runs inside a SQLite transaction:
 
-## 5. Domain model
+1. expire due pending payments;
+2. resolve an existing idempotency key if supplied;
+3. choose a randomized starting suffix;
+4. probe all 99 suffixes cyclically;
+5. a candidate is unavailable while any existing payment with that payable amount has `reuse_after > now`;
+6. persist the first available candidate with `expires_at` and `reuse_after`;
+7. fail with `AMOUNT_CAPACITY_EXHAUSTED` if all 99 are blocked.
 
-Keep the first version deliberately small.
+The suffix start is injectable for deterministic tests but uses cryptographic randomness in production.
 
-### 5.1 `payments`
-
-A normal PocketBase collection controlled by custom payment routes for writes.
-
-Suggested fields:
-
-| Field | Type | Purpose |
-|---|---|---|
-| `requested_amount` | number/integer | Requested value in paise |
-| `payable_amount` | number/integer | Exact allocated value in paise |
-| `status` | select | `pending`, `paid`, `expired`, `cancelled` |
-| `expires_at` | date | Payment validity deadline |
-| `reuse_after` | date | Earliest time this exact amount may be allocated again |
-| `rrn` | text | Bank UPI reference/RRN |
-| `upi_id` | text | Payer UPI ID when available |
-| `payer_name` | text | Payer name when available |
-| `paid_at` | date | Confirmation time |
-| `metadata` | JSON | Optional caller metadata/order identifier |
-| `created` | system | PocketBase timestamp |
-| `updated` | system | PocketBase timestamp |
-
-Useful indexes:
-
-- `payable_amount`;
-- `status, expires_at`;
-- `rrn` (unique when non-empty if schema/index behaviour allows the desired null/empty semantics);
-- `created` for recent listings.
-
-Business code must still explicitly handle duplicate RRNs even when a DB constraint exists.
-
-### 5.2 `sms_events`
-
-A durable evidence/debug collection.
-
-| Field | Type | Purpose |
-|---|---|---|
-| `source` | select/text | `google_messages` initially |
-| `source_message_id` | text | Stable connector dedupe key |
-| `sender` | text | SMS sender/address |
-| `body` | text | Raw SMS body |
-| `message_at` | date | Source/phone timestamp when available |
-| `received_at` | date | Time our process received/reconciled it |
-| `processing_status` | select | `received`, `parsed`, `matched`, `ignored`, `error` |
-| `parsed_amount` | number/integer | Parsed paise |
-| `rrn` | text | Parsed RRN |
-| `upi_id` | text | Parsed UPI ID |
-| `payer_name` | text | Parsed payer name |
-| `matched_payment` | relation | Optional relation to `payments` |
-| `error` | text | Parse/match error or ignore reason |
-
-`source + source_message_id` should be unique.
-
-### 5.3 Auth collection
-
-If the dashboard needs login, use one small PocketBase auth collection such as `operators`.
-
-For a personal deployment this may contain a single account.
-
-Do not create organisations, roles or permissions beyond what is actually needed.
-
-### 5.4 Google Messages session
-
-Do not expose libgm session/auth state as an ordinary collection.
-
-Store the serialised connector session under a private path such as:
+## 6. Lifecycle and quarantine
 
 ```text
-pb_data/private/gmessages/session.json
-```
-
-Requirements:
-
-- never served as a static file;
-- restrictive file permissions;
-- never logged;
-- included intentionally in backup/restore testing;
-- corruption/missing state must degrade to `unpaired`, not stop PocketBase/payment history from starting.
-
-The session contains credentials/keys/tokens and must be treated as a secret.
-
----
-
-## 6. Payment creation and amount allocation
-
-### Money representation
-
-All business logic uses integer paise.
-
-```text
-₹1.00    → 100
-₹100.00  → 10000
-₹100.37  → 10037
-```
-
-Convert request input at the API boundary and never use a floating-point amount afterward.
-
-### Transactional allocator
-
-`CreatePayment()` runs a short `RunInTransaction` callback.
-
-Pseudo-flow:
-
-```text
-requested = 10000
-candidate = 10000
-
-for bounded candidate blocks:
-    for decimal 00..99:
-        candidate = block + decimal
-
-        if candidate has pending payment:
-            continue
-
-        if candidate belongs to terminal payment with reuse_after > now:
-            continue
-
-        INSERT payment(candidate, pending, expires_at, reuse_after)
-        COMMIT
-        return payment
-
-return allocation exhausted
-```
-
-SQLite's single-writer transaction model ensures two simultaneous creators cannot both pass the check and insert the same candidate when allocation stays inside one transaction.
-
-### Spillover
-
-After `₹100.00..₹100.99`, a bounded safety valve may use `₹101.00..₹101.99`, and so on.
-
-The number of spillover blocks must be configurable/bounded so a bug cannot create unexpectedly high payable amounts.
-
----
-
-## 7. Payment lifecycle
-
-```text
-                    ┌─────────────┐
-              ┌────►│    paid     │
-              │     └─────────────┘
+            create
               │
-┌──────────┐  │     ┌─────────────┐
-│ pending  │──┼────►│   expired   │
-└──────────┘  │     └─────────────┘
-              │
-              │     ┌─────────────┐
-              └────►│  cancelled  │
-                    └─────────────┘
+              ▼
+           pending
+          /   │    \
+       pay  expire cancel
+        │      │      │
+        ▼      ▼      ▼
+      paid   expired cancelled
+                \      /
+                 \    /
+             exact late credit
+                    │
+                    ▼
+                   late
 ```
 
-Only `pending` can automatically become `paid`.
+Expiry is persisted and evaluated both by scheduled work and before operations that depend on current state. No business truth depends on an in-memory timer.
 
-### Expiry
+`reuse_after` protects a fingerprint from immediate reassignment. Paid/cancelled/late transitions start a fresh quarantine window from the processing time. An expired payment retains the creation-time `expires_at + quarantine` reservation.
 
-A cron job marks stale pending payments expired, but timestamp checks also occur at business-operation time. A delayed cron job must not extend a payment accidentally.
+## 7. Evidence-time guard
 
-### Amount quarantine
+Amount quarantine alone is insufficient once a suffix is eventually reused: a provider may reconnect and deliver an old historical message.
 
-Terminal records retain `reuse_after`.
+Every normalized SMS has `OccurredAt`. For Google Messages this comes from the provider message timestamp. The SMS service clamps missing/future timestamps to ingestion time.
 
-Until then, their exact amount remains unavailable for new allocation.
-
-This prevents:
+Automatic matching requires:
 
 ```text
-old payment expires
-        │
-amount immediately reused
-        │
-old delayed SMS arrives
-        │
-WRONG new payment marked paid
+payment.created_at <= evidence.OccurredAt
 ```
 
-The initial quarantine should be conservative and tuned from measured message delays/replays rather than guessed for maximum throughput.
+Therefore an old catch-up message cannot confirm a payment that did not exist when the SMS occurred, even if the same amount has since been reused.
 
----
+Legacy webhook clients that omit a timestamp cannot provide this protection and are treated as occurring at ingestion time. This is one reason the compatibility route is temporary.
 
-## 8. SMS ingestion
+## 8. SMS transaction
 
-### Rule: persist before processing
+SMS ingestion is one database transaction for the evidence record and payment state transition:
 
-```text
-incoming/recovered message
-        │
-        ▼
-insert/find sms_events
-        │
-        ├─ duplicate source_message_id → no-op
-        │
-        ▼
-parse message
-        │
-        ├─ irrelevant → ignored
-        ├─ bad format → error
-        └─ payment evidence
-                 │
-                 ▼
-           MatchPayment()
-```
+1. validate source and storage-size bounds;
+2. deduplicate `(source, source_event_id)`;
+3. persist the raw SMS event as `received`;
+4. ignore unrelated messages after keeping the audit record;
+5. parse the bank-credit message;
+6. require exact amount and RRN for automatic confirmation;
+7. find an existing payment by RRN:
+   - same amount → idempotent duplicate;
+   - different amount → fail `RRN_AMOUNT_MISMATCH`;
+8. exact-match an eligible pending payment;
+9. otherwise exact-match an eligible expired/cancelled payment still quarantined and mark `late`;
+10. update the SMS record with result/relation;
+11. enqueue webhook work in the same transaction if required;
+12. wake the delivery worker only after commit.
 
-This means a parser bug never destroys the only copy of the evidence.
+Network calls never occur inside the SQLite transaction.
 
-### Bank parser
+## 9. Bank parser
 
-Start only with actual SMS formats observed by the project.
+The current parser is deliberately narrow and fail-closed around tested Kotak credit-message forms. It extracts:
 
-The first parser should extract:
+- received INR amount;
+- UPI RRN/reference;
+- UPI ID where present;
+- payer/from text where present.
 
-- exact credited amount;
-- RRN/reference;
-- payer UPI ID when present;
-- payer name when present.
+OTP/debit/unrelated messages are ignored rather than interpreted as payment evidence. Derived text fields are bounded before persistence so an unusual SMS cannot cause a collection-validation 500.
 
-No generic parser plugin framework is needed until a second genuinely different bank format exists.
-
----
-
-## 9. Exact payment matching
-
-Matching receives normalised evidence, not raw SMS.
-
-Required checks:
-
-1. parsed exact amount exists;
-2. RRN is not already attached to another successful payment;
-3. exactly one eligible `pending` payment has `payable_amount == parsed_amount`;
-4. the payment has not expired at the evidence/processing boundary according to the chosen policy;
-5. update the payment atomically to `paid`, attach evidence fields and `paid_at`;
-6. update `sms_event.matched_payment` and processing status.
-
-### Important invariant
-
-```text
-10037 matches 10037.
-```
-
-Never floor to `10000`, never infer by base rupee amount.
-
-### Duplicate semantics
-
-If the same source message or RRN is processed again, return a no-op/already-processed result rather than treating it as a fatal system error.
-
----
+Expanding to another bank should add concrete parser fixtures first rather than loosening the existing regex indiscriminately.
 
 ## 10. Google Messages connector
 
-### libgm boundary
+`internal/gmessages` wraps libgm behind an ingestion callback. The payment service itself has no dependency on libgm types.
 
-`GoogleMessagesManager` owns libgm. Payment code does not import or depend on Google-specific event structures.
+Responsibilities:
 
-```text
-libgm event
-   │
-   ▼
-GoogleMessagesManager
-   │ converts to simple SMS input
-   ▼
-SmsService
-```
+- load/save pairing state under the persistent data directory;
+- filesystem permissions: session file `0600`, private parent directory;
+- connect/reconnect/backoff;
+- monitor paired/connected/phone-responsive state;
+- ignore outgoing messages;
+- prefilter for bank-credit-like text before copying it into PayGate;
+- preserve provider message ID and timestamp;
+- process old/catch-up events through the same idempotent ingestion path;
+- expose operator pairing/reconnect/unpair controls.
 
-### Responsibilities
+Pairing refuses to replace an already-valid session. The operator must unpair first.
 
-- load/persist auth state;
-- initiate pairing;
-- connect/disconnect;
-- reconnect with bounded exponential backoff;
-- expose connection health;
-- receive messages;
-- reconcile/catch up after reconnect using the libgm behaviour proven in the Phase 0 spike;
-- forward only SMS-relevant events to `SmsService`.
+The connector is optional. Payment/SMS records remain valid if Google's private protocol changes.
 
-### Pairing
+## 11. HTTP boundary
 
-Do not hard-code the final UX until Phase 0.
-
-Current upstream code contains both Google-account/emoji pairing logic and QR-pairing implementation, while Google documents QR pairing availability outside the US. The spike decides which flow is reliable on the actual Indian phone/account.
-
-The final dashboard should reflect the tested flow rather than inventing a pairing abstraction first.
-
-### Connector health
-
-Expose at least:
+Custom routes:
 
 ```text
-paired
-connected
-last_connected_at
-last_disconnected_at
-last_message_at
-last_error
-```
-
-The frontend should visibly show degraded/disconnected/unpaired state.
-
----
-
-## 11. HTTP/API boundary
-
-### External/personal-project API
-
-Initial routes:
-
-```text
-POST /api/payments
-GET  /api/payments/{id}
-POST /api/payments/{id}/cancel
-GET  /api/health
-```
-
-Use one configured bearer key for state-changing API access in v1.
-
-### Connector routes
-
-Authenticated dashboard routes:
-
-```text
-GET    /api/connector/gmessages/status
+POST   /api/payments
+GET    /api/payments/{id}
+POST   /api/payments/{id}/cancel
+POST   /api/events/sms
+POST   /api/webhook                       # opt-in legacy compatibility
+GET    /api/paygate/health
+GET    /api/config                        # authenticated operator
+GET    /api/dashboard                     # authenticated operator
+GET    /api/connector/gmessages/status    # authenticated operator
 POST   /api/connector/gmessages/pair
+POST   /api/connector/gmessages/pair/refresh
 POST   /api/connector/gmessages/reconnect
 DELETE /api/connector/gmessages/pair
 ```
 
-Additional pairing-step routes may be added once the chosen libgm flow is proven.
+PocketBase owns `/api/health`, auth, records and realtime endpoints.
 
-### Generic PocketBase record APIs
+The SPA wildcard explicitly refuses `api` and `_` namespaces so malformed/unknown API calls cannot accidentally return `index.html` with status 200.
 
-Use them carefully:
+Request bodies have route-level limits in addition to collection field validation.
 
-- authenticated UI may read/list payments and SMS events;
-- realtime subscriptions may read permitted records;
-- direct generic create/update/delete for payment collections should be denied;
-- payment transitions occur through Go service methods/custom routes.
+## 12. Authentication
 
-This prevents a browser edit from bypassing payment invariants.
+State-changing payment API calls accept either:
 
----
+- `Authorization: Bearer <PAYGATE_API_KEY>`; or
+- a valid authenticated `users` PocketBase token used by the operator UI.
 
-## 12. Realtime/UI
+SMS ingestion uses a separate `X-Webhook-Secret`.
 
-PocketBase SSE is the only realtime channel in v1.
+The migration compatibility route `/api/webhook` is separately gated by `LEGACY_SMS_WEBHOOK_ENABLED` and the old `WEBHOOK_SECRET`; it never substitutes for the primary `SMS_WEBHOOK_SECRET`.
 
-```text
-PaymentService updates `payments`
-        │
-        ▼
-PocketBase record event
-        │
-        ▼
-PocketBase JS SDK subscription
-        │
-        ▼
-React UI updates
-```
+PocketBase's built-in rate limiter is enabled by default by the PayGate startup configuration.
 
-No Socket.IO/custom WebSocket manager.
+## 13. Outgoing webhook outbox
 
-### UI pages
+A state transition schedules a `webhook_deliveries` row inside the same transaction. The worker claims due rows with a transactional state change to `sending`, preventing two worker passes from intentionally delivering the same row simultaneously.
 
-Keep the first UI to approximately:
+A stale sending lease is recovered after a process crash. Retry timing is persisted. A successful HTTP 2xx response marks the delivery `delivered`; failures are retried until the configured fixed attempt ceiling and then become `exhausted`.
+
+The signature is HMAC-SHA256 over:
 
 ```text
-Dashboard
-Payments
-Payment Detail / New Payment
-SMS Events
-Google Messages
-Settings
+unixTimestamp + "." + rawJSONBody
 ```
 
-The PocketBase dashboard at `/_/` handles schema, raw records, logs, backups and cron inspection. Do not duplicate those administrative capabilities unless the normal workflow truly requires them.
+The stable event ID lets consumers handle network-level duplicate delivery safely.
 
----
+## 14. UI/realtime
 
-## 13. Scheduled work
+The UI reads `payments`, `sms_events` and `webhook_deliveries` through authenticated PocketBase record APIs and subscribes to PocketBase realtime events. It uses custom PayGate routes for state changes.
 
-Use PocketBase's built-in cron only for small periodic tasks such as:
+Authentication is refreshed periodically; a failed authenticated API response clears the local auth store instead of leaving the UI in a misleading signed-in state.
 
-- expire stale pending payments;
-- optional cleanup/retention later;
-- optional webhook retries later.
+Payment-create UI retries keep the same idempotency key until form values change or a request succeeds.
 
-Do not schedule one timer/goroutine per payment.
+## 15. Process lifecycle
 
-The Google Messages connection itself is long-running connector lifecycle code, not a cron job.
+At startup:
 
----
+1. strict environment parsing;
+2. PocketBase boot/migrations;
+3. serve-time validation of required/strong secrets and URLs;
+4. enable configured PocketBase rate limiting;
+5. start webhook worker;
+6. start libgm only when enabled and paired.
 
-## 14. Outgoing webhooks (optional v1.1)
+Cron jobs also check expirations and wake webhook delivery processing. The worker itself has an internal timer, so delayed delivery does not depend on a single cron tick.
 
-Once payment detection is stable, support one destination configured by environment/settings.
+At termination the root context is cancelled and the connector is disconnected cleanly.
 
-A successful payment can emit:
+## 16. Persistence and backups
 
-```json
-{
-  "event": "payment.paid",
-  "payment": {
-    "id": "...",
-    "requestedAmount": 10000,
-    "payableAmount": 10037,
-    "rrn": "..."
-  }
-}
-```
+All durable state lives under the configured PocketBase data directory. In the production image that is `/app/pb_data`.
 
-Use an HMAC signature.
+A deployment without a persistent mount there is invalid. Recreating a task/container must not recreate the database.
 
-Only introduce a `webhook_deliveries` collection if retries/history are actually implemented.
+The old prototype database is not migrated into the new schema automatically. Before the production cutover the old task data is separately backed up for rollback/reference.
 
----
+## 17. Failure philosophy
 
-## 15. Failure behaviour
+PayGate fails closed where a false confirmation is possible:
 
-### PocketBase/process restart
+- ambiguous exact amount → no payment confirmation;
+- RRN/amount contradiction → error, no reassignment;
+- old evidence predating a reused payment → unmatched;
+- missing RRN → audit error, no automatic confirmation;
+- unavailable Google Messages → persisted core remains intact;
+- outgoing merchant webhook unavailable → payment state remains committed and delivery retries durably.
 
-- payment state survives;
-- pending payments remain pending until their real `expires_at`;
-- no mass-expire-on-start behaviour;
-- connector attempts session restore independently.
-
-### Google Messages unavailable
-
-- payment records remain valid;
-- connector state becomes degraded;
-- payment stays pending/ultimately expires;
-- later recovered messages are processed idempotently if available.
-
-### Session invalid/unpaired
-
-- historical data remains available;
-- connector reports `unpaired`;
-- UI requests pairing;
-- application does not crash-loop.
-
-### Malformed bank SMS
-
-- retained in `sms_events`;
-- status `error`/`ignored` with reason;
-- no payment state change.
-
-### Duplicate SMS
-
-- same source ID: no-op;
-- same RRN under a different source message: no second confirmation.
-
----
-
-## 16. Logging and observability
-
-Do not create a second log database.
-
-Use:
-
-1. PocketBase/application logs for technical messages;
-2. `sms_events` for payment evidence and parser/match debugging;
-3. payment timestamps for lifecycle history.
-
-Connector logs should include state transitions but must redact:
-
-- cookies;
-- Tachyon auth tokens;
-- crypto keys;
-- full serialised libgm `AuthData`.
-
-Useful timings to collect from the start:
+## 18. Project layout
 
 ```text
-message_at
-received_at
-parsed_at (optional)
-paid_at
+cmd/payment-api/          process/CLI wiring
+internal/api/             HTTP routes and auth boundary
+internal/config/          strict environment configuration
+internal/domain/          domain types/errors
+internal/gmessages/       libgm adapter/session lifecycle
+internal/money/           integer-INR helpers
+internal/payments/        allocation/state machine/matching
+internal/sms/             parser and durable ingestion
+internal/webhooks/        durable outbound delivery worker
+internal/web/             embedded compiled UI
+migrations/               PocketBase collection schema
+web/                      React/Vite source
 ```
 
-This allows actual latency measurement instead of assumptions about Google Messages.
+## 19. Core invariants
 
----
-
-## 17. Security model
-
-Reasonable hobby-project baseline:
-
-- HTTPS through existing reverse proxy/Cloudflare setup;
-- operator authentication for the custom dashboard;
-- superuser credentials only for `/_/`;
-- generic payment collection writes disabled;
-- bearer secret for external create/cancel APIs;
-- connector auth state private on disk;
-- `.env`/session files ignored by Git;
-- no secrets in logs;
-- CSRF/browser protections follow the authentication method chosen for the custom UI;
-- raw SMS is considered sensitive data.
-
-No custom WebAuthn stack in the first rebuild.
-
----
-
-## 18. Backup model
-
-The persistent state is intentionally compact:
-
-```text
-pb_data/
-├── PocketBase SQLite/data
-└── private/gmessages/session...
-```
-
-Use PocketBase backup capabilities and/or volume snapshots.
-
-A restore is only trusted after testing:
-
-- database restoration;
-- migrations;
-- payment history;
-- connector session restoration;
-- graceful re-pair request if connector credentials cannot be restored.
-
----
-
-## 19. Project structure target
-
-Keep structure shallow until code size forces more separation.
-
-```text
-payment-api/
-├── cmd/
-│   └── payment-api/
-│       └── main.go
-├── internal/
-│   ├── config/
-│   ├── payments/
-│   │   ├── service.go
-│   │   ├── allocator.go
-│   │   └── money.go
-│   ├── sms/
-│   │   ├── service.go
-│   │   └── kotak.go
-│   ├── gmessages/
-│   │   ├── manager.go
-│   │   └── session.go
-│   └── api/
-│       └── routes.go
-├── migrations/
-├── web/
-│   ├── package.json
-│   └── src/
-├── Dockerfile
-├── README.md
-├── PLAN.md
-├── ARCHITECTURE.md
-└── RESEARCH.md
-```
-
-Do not create repository/service/provider/interface layers merely for symmetry. Extract them only when tests or a second implementation make the boundary useful.
-
----
-
-## 20. Architecture invariants
-
-These should remain true as implementation evolves:
-
-1. **Payment truth is durable SQLite data.**
-2. **Exact payable amount is matched exactly.**
-3. **No important payment timer/pool exists only in RAM.**
-4. **Incoming SMS is persisted before matching.**
-5. **Duplicate input is harmless.**
-6. **Amounts are not reused until their quarantine allows it.**
-7. **libgm failure does not corrupt payment state.**
-8. **PocketBase admin remains upstream/unmodified.**
-9. **PocketBase realtime is sufficient until proven otherwise.**
-10. **One process/container is the default architecture.**
-11. **External calls do not occur inside SQLite write transactions.**
-12. **Complexity must be justified by an observed problem, not a hypothetical future scale.**
+1. Payment amounts are integer paise.
+2. Requested amount is whole rupees; DDM owns `.01`–`.99`.
+3. SQLite is the source of truth.
+4. Payment creation and amount reservation are one transaction.
+5. Evidence never matches by whole-rupee base.
+6. RRN cannot silently move between different amounts.
+7. A message cannot confirm a payment created after that message occurred when an occurrence timestamp is known.
+8. Reused fingerprints pass through quarantine.
+9. External HTTP calls never run inside a payment/SMS transaction.
+10. Domain writes are backend-owned.
+11. Google Messages is a replaceable evidence connector, not the payment model.
+12. `/app/pb_data` must be persistent in production.

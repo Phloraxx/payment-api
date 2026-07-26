@@ -1,17 +1,14 @@
 services:
-  app:
-    build: .
+  paygate:
+    build:
+      context: .
     ports:
       - "3000:3000"
+    env_file:
+      - .env
     volumes:
-      - payment_data:/app/data
-    env_file: .env
+      - paygate_data:/app/pb_data
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
 
 volumes:
-  payment_data:
+  paygate_data:

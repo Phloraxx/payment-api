@@ -1,504 +1,227 @@
-# Payment API Rebuild — Research Notes
+# PayGate — Research and Implementation Findings
 
-Research snapshot: **25 July 2026**.
+This document records the technical facts that shaped the PocketBase/libgm rebuild and the implementation-specific problems discovered while validating it.
 
-This file records the upstream behaviour and constraints that the rebuild plan depends on. It is intentionally factual: when implementation starts, re-check version-sensitive details instead of assuming this snapshot remains current.
+## 1. Prototype audit
 
----
+The original TypeScript/Fastify service proved that a direct-to-UPI payment can be correlated from bank SMS evidence, but several prototype decisions were not safe foundations for a durable service.
 
-## 1. Current prototype audit
+Findings from the original implementation:
 
-Repository audited: `Phloraxx/payment-api` on `main` before creating `rebuild-pocketbase`.
+- amount state/expiry relied partly on process memory;
+- restart behaviour could invalidate pending tickets;
+- the advertised decimal matching path reduced a received amount to its whole-rupee base before selecting pending tickets, so two requests such as `₹100.01` and `₹100.02` could become ambiguous;
+- database state lived in SQLite without the production deployment actually mounting its data directory persistently;
+- the Android relay was an external dependency but the server interface itself only needed an SMS string plus shared secret;
+- RRN uniqueness was a useful idea and was retained;
+- integer money helpers were a useful idea and were retained.
 
-### Useful ideas worth preserving
+The rebuild therefore kept exact-amount allocation, SMS parsing and RRN idempotency while replacing the state/runtime architecture.
 
-- amounts are stored in integer paise;
-- RRN has a database uniqueness constraint;
-- Dynamic Decimal Matching gives concurrent payments distinguishable exact values;
-- a bank SMS is treated as authoritative evidence;
-- the API is intentionally small.
+## 2. PocketBase 0.39.9
 
-### Problems that justify a clean rebuild
+PocketBase is embedded as a Go framework rather than deployed as a second process.
 
-#### Exact amount is currently lost in bank matching
+Upstream capabilities used directly by this project:
 
-Current `PaymentService.confirmFromBankSms()` converts the parsed bank amount to a base amount and then queries pending tickets by `base_amount`:
+- `RunInTransaction` for short SQLite transactions;
+- Go migrations and programmatically constructed collections;
+- auth collections and API rules;
+- custom HTTP routes through `OnServe`;
+- SSE realtime record subscriptions;
+- scheduled cron jobs;
+- backup/log/admin facilities;
+- a built-in rate-limit middleware/rule model;
+- per-route request body limits.
 
-- source: [`src/server/services/payment.service.ts`](https://github.com/Phloraxx/payment-api/blob/main/src/server/services/payment.service.ts)
-- helper: [`src/server/money.ts`](https://github.com/Phloraxx/payment-api/blob/main/src/server/money.ts)
+Reference:
 
-`baseAmountFromPaisa()` floors to the whole-rupee block. Therefore `10001` and `10002` both become `10000` for the lookup. This contradicts the reason Dynamic Decimal Matching exists.
-
-The rebuild matches the **exact payable amount**, e.g. `10037 == 10037`.
-
-#### Important state is in memory
-
-The current README documents:
-
-- an in-memory `Map<base_amount, Set<taken_decimal>>`;
-- per-ticket `setTimeout` handles;
-- mass-expiry of pending tickets on restart because timer state is lost.
-
-Source: [`README.md` on main](https://github.com/Phloraxx/payment-api/blob/main/README.md).
-
-The rebuild stores payment validity/allocation state durably and derives expiry from timestamps.
-
-#### Old plan accumulated duplicate infrastructure
-
-The previous `PLAN.md` proposed, among other things:
-
-- Appwrite secondary replication;
-- custom WebSocket rooms/heartbeats;
-- a separate SQLite logs database;
-- custom passkey/WebAuthn administration;
-- a custom expiry service;
-- in-memory decimal pools;
-- custom admin log streaming.
-
-PocketBase already solves most of those infrastructure concerns. The rebuild removes them unless a real gap appears.
-
----
-
-## 2. PocketBase: suitability as the application base
-
-### Finding: PocketBase is explicitly designed to be embedded as a Go framework
-
-PocketBase documentation states that it can be used as a Go framework/package to build custom portable applications and integrate arbitrary third-party Go libraries.
-
-Sources:
-
-- [Extending PocketBase](https://pocketbase.io/docs/use-as-framework/)
-- [Extend with Go — Overview](https://pocketbase.io/docs/go-overview/)
-
-This is the key reason **not** to fork PocketBase itself.
-
-We can own `main.go`, routes and business logic while PocketBase remains an upgradable dependency.
-
-### Finding: custom routes and lifecycle hooks are supported
-
-The Go framework exposes route registration and application/event hooks.
-
-Sources:
-
-- [Extend with Go — Overview](https://pocketbase.io/docs/go-overview/)
-- [Event hooks](https://pocketbase.io/docs/go-event-hooks/)
-
-Implication:
-
-- custom `/api/payments` routes are normal PocketBase extension code;
-- connector start/stop can be integrated with app lifecycle;
-- we do not need a second HTTP server/framework.
-
-### Finding: transactions are built in
-
-PocketBase exposes `app.RunInTransaction(fn)`.
-
-Official docs explicitly note that:
-
-- writes persist only if the callback succeeds;
-- transaction code should use the provided `txApp`;
-- only a single writer/transaction is allowed at a time;
-- slow external operations should be kept outside transactions.
-
-Source: [Extend with Go — Database](https://pocketbase.io/docs/go-database/).
-
-Implication:
-
-A short transaction is a good fit for exact-amount allocation:
-
-```text
-check candidate amount
-insert payment
-commit
-```
-
-We should never contact Google Messages or deliver webhooks while holding this transaction.
-
-### Finding: realtime is already available through SSE
-
-PocketBase's realtime API uses Server-Sent Events and publishes record create/update/delete events. Official SDKs manage reconnect/subscriptions.
-
-Source: [API Realtime](https://pocketbase.io/docs/api-realtime/).
-
-Implication:
-
-The custom payment UI can subscribe to `payments` and `sms_events` directly. A custom WebSocket manager is unnecessary for v1.
-
-### Finding: cron/scheduled jobs are built in
-
-PocketBase exposes `app.Cron().Add/MustAdd`, runs jobs with `serve`, and shows registered jobs in the dashboard.
-
-Source: [Extend with Go — Jobs scheduling](https://pocketbase.io/docs/go-jobs-scheduling/).
-
-Implication:
-
-Use one small periodic expiry/cleanup job. Do not create one timer per payment.
-
-### Finding: migrations are built in and embeddable
-
-PocketBase has Go migrations that can create/change collections and data, and the migrations become part of the final Go executable.
-
-Source: [Extend with Go — Migrations](https://pocketbase.io/docs/go-migrations/).
-
-Implication:
-
-The schema should be committed as migrations rather than manually recreated through `/_/` on each deployment.
-
-### Finding: PocketBase already includes admin/backup tooling
-
-The upstream product provides:
-
-- admin dashboard;
-- logs;
-- backup APIs/UI;
-- cron inspection;
-- SQL console for superusers.
-
-Sources:
-
-- [PocketBase](https://pocketbase.io/)
-- [API Backups](https://pocketbase.io/docs/api-backups/)
-- [API Crons](https://pocketbase.io/docs/api-crons/)
-- [API SQL](https://pocketbase.io/docs/api-sql/)
-
-Implication:
-
-Do not rebuild raw collection/log/schema/backup screens into the normal payment UI.
-
-### Version note
-
-At this research snapshot, the public PocketBase docs show **v0.39.9**.
-
-The current upstream `master` `go.mod` declares Go `1.25.0` and uses `modernc.org/sqlite`.
-
-Sources:
-
-- [PocketBase site/docs](https://pocketbase.io/)
-- [`pocketbase/pocketbase` go.mod](https://github.com/pocketbase/pocketbase/blob/master/go.mod)
-
-Do not blindly develop against `master`. Implementation should pin a specific released PocketBase version and use the Go version required by that release.
-
-### Licence
-
-PocketBase is MIT licensed.
-
-Source: [`pocketbase/pocketbase` LICENSE.md](https://github.com/pocketbase/pocketbase/blob/master/LICENSE.md).
-
-For this hobby project there is no reason to fork the PocketBase source merely to customise application behaviour.
-
----
-
-## 3. libgm: what the source actually provides
-
-Repository: [`mautrix/gmessages`](https://github.com/mautrix/gmessages).
-
-The project is a Matrix ↔ Google Messages bridge, but the reusable Google Messages implementation lives under `pkg/libgm`.
-
-### Finding: libgm stores the state required for persistent pairing
-
-`libgm.AuthData` currently contains, among other fields:
-
-- request encryption helper;
-- refresh signing key;
-- paired browser device;
-- paired mobile device;
-- Tachyon auth token/expiry;
-- session/pairing identifiers;
-- Google cookies.
-
-Source: [`pkg/libgm/client.go`](https://github.com/mautrix/gmessages/blob/main/pkg/libgm/client.go).
-
-Implication:
-
-The connector session is highly sensitive and must be persisted as secret state, not logged or exposed as a normal public collection.
-
-### Finding: event-driven long-poll connection exists
-
-Current libgm source exposes:
-
-- `SetEventHandler(...)`;
-- `Connect()`;
-- `ConnectBackground()`;
-- `Disconnect()`;
-- `IsConnected()`;
-- `Reconnect()`.
-
-`Connect()` starts the long-poll loop and acknowledgement handling. `Reconnect()` closes the existing poll and reconnects.
-
-Source: [`pkg/libgm/client.go`](https://github.com/mautrix/gmessages/blob/main/pkg/libgm/client.go).
-
-Implication:
-
-A headless Go process can own the Messages-for-Web connection without Chromium/Playwright DOM scraping.
-
-### Finding: upstream code persists and restores libgm session data
-
-The upstream connector's login completion stores `client.AuthData` as session metadata and reconnects a client from it later.
-
-Source: [`pkg/connector/login.go`](https://github.com/mautrix/gmessages/blob/main/pkg/connector/login.go).
-
-Implication:
-
-Persisting auth state and reconnecting after process restart is an intended/real upstream pattern, not an invented idea. We still must prove it on our actual phone/account.
-
-### Finding: both QR and Google-account pairing logic exist upstream
-
-The source contains:
-
-- a QR login implementation using `StartLogin()` / `RefreshPhoneRelay()`;
-- a Google-account pairing implementation using cookies plus emoji confirmation;
-- session completion/persistence.
-
-However, in the current bridge's advertised `LoginFlows`, the QR flow is commented out while the implementation remains in source.
-
-Source: [`pkg/connector/login.go`](https://github.com/mautrix/gmessages/blob/main/pkg/connector/login.go).
-
-Implication:
-
-Do **not** design the final pairing UI around assumptions. Phase 0 must test the pairing flow that actually works in India with the target phone/account.
-
-### Finding: upstream itself acknowledges phone/battery connectivity issues
-
-The current login code includes a specific "phone not responding" error message advising that the phone be connected to the internet and that keeping the app open and/or disabling battery optimisation may be necessary.
-
-Source: [`pkg/connector/login.go`](https://github.com/mautrix/gmessages/blob/main/pkg/connector/login.go).
-
-This matches Google's own troubleshooting guidance and is why phone-state testing is part of Phase 0.
-
-### Licence and maintenance state
-
-`mautrix/gmessages` is AGPL-3.0 (with a separate exceptions file). The repository is actively maintained; GitHub lists release `v26.05` dated 16 May 2026 at this research snapshot.
-
-Sources:
-
-- [`mautrix/gmessages`](https://github.com/mautrix/gmessages)
-- [`LICENSE`](https://github.com/mautrix/gmessages/blob/main/LICENSE)
-- [`LICENSE.exceptions`](https://github.com/mautrix/gmessages/blob/main/LICENSE.exceptions)
-
-For a private personal hobby deployment this is not the commercial-licensing concern it would be for a proprietary product, but the project should still retain/comply with the applicable open-source licence requirements if distributed.
-
----
-
-## 4. Google Messages official constraints
-
-Source: Google, not libgm.
-
-### Phone internet is required
-
-Google states that the phone needs Wi-Fi or a data connection for Messages for Web.
-
-Source: [Check your messages on your computer or Android tablet](https://support.google.com/messages/answer/7611075?hl=en-IN).
-
-Implication:
-
-The phone may receive a cellular SMS while the data connection is unavailable, but the VPS cannot observe it through Messages for Web until connectivity resumes.
-
-### Only one computer can be active at a time
-
-Google states that the account can be paired with multiple devices but only one computer can be active at a time.
-
-Source: [Google Messages for Web help](https://support.google.com/messages/answer/7611075?hl=en-IN).
-
-Implication:
-
-A dedicated payment phone is preferable. Normal use of Messages Web on another computer must be tested for interference with the headless connector.
-
-### Inactive pairings may be removed
-
-Google says accounts may be unpaired automatically if Messages for Web is not used for a few weeks.
-
-Source: [Google Messages for Web help](https://support.google.com/messages/answer/7611075?hl=en-IN).
-
-Implication:
-
-Connector UI must support `unpaired` as a normal recoverable state.
-
-### Google explicitly recommends background data and disabling battery optimisation when troubleshooting
-
-Google's troubleshooting instructions say to:
-
-- ensure strong phone/computer internet;
-- enable Google Messages background data;
-- disable battery optimisation if enabled.
-
-Source: [Fix problems sending, receiving, or connecting to Google Messages](https://support.google.com/messages/answer/9077245?co=GENIE.Platform%3DDesktop&hl=en).
-
-Implication:
-
-Screen lock alone should not be treated as the failure mechanism. The real variables are Android/OEM background restrictions, battery mode and network availability. These need measurements on the actual device.
-
-### QR pairing in India
-
-Google's current India help page still describes QR pairing and notes that QR pairing is no longer available in the US.
-
-Source: [Google Messages for Web help — India](https://support.google.com/messages/answer/7611075?hl=en-IN).
-
-Implication:
-
-QR pairing is worth testing first for a headless hobby service, but libgm/upstream behaviour is still the deciding factor.
-
----
-
-## 5. What is known vs unknown about latency
-
-### Known
-
-- libgm uses a long-poll connection rather than browser DOM polling.
-- SMS arrival itself depends on the mobile network/bank sender.
-- Messages-for-Web forwarding depends on phone + internet + Google relay connectivity.
-- our own database match path can be kept local and short.
-
-### Unknown / must be measured
-
-There is no useful Google Messages-for-Web latency SLA for this use case.
-
-We should measure:
-
-```text
-message_at
-connector_received_at
-payment_matched_at
-```
-
-and classify tests by:
-
-```text
-screen locked/unlocked
-charging/not charging
-Battery Saver on/off
-Wi-Fi/mobile data
-normal/poor connectivity
-live event/recovered after outage
-```
-
-Do not publish or hard-code assumptions such as "confirmation always takes 2 seconds".
-
----
-
-## 6. Architecture decisions resulting from the research
-
-### Decision A — use PocketBase as framework, not fork
-
-Reason:
-
-- upstream explicitly supports this use case;
-- Go gives direct libgm integration;
-- upgrades remain dependency upgrades rather than long-lived source merges;
-- built-in infrastructure eliminates much of the prototype code.
-
-### Decision B — one Go process by default
-
-Reason:
-
-- PocketBase and libgm are both Go;
-- one-user hobby scale does not justify IPC/microservices;
-- fewer deployment/failure boundaries.
-
-### Decision C — keep a custom UI but leave PocketBase `/_/` untouched
-
-Reason:
-
-- normal payment workflows need a domain-specific UI;
-- the upstream admin UI is already excellent for raw records/schema/logs/backups;
-- modifying it would create upgrade maintenance for little benefit.
-
-### Decision D — exact payment matching only
-
-Reason:
-
-The prototype's base-amount lookup defeats DDM when multiple `₹100.xx` payments are pending.
-
-### Decision E — durable timestamps instead of in-memory timers
-
-Reason:
-
-A process restart should not alter payment truth.
-
-### Decision F — retain SMS events
-
-Reason:
-
-SMS is the source evidence and the connector is unofficial. A persisted event trail is invaluable for parser failures, late messages, duplicates and latency debugging.
-
-### Decision G — no queue/cache/database extras initially
-
-Reason:
-
-PocketBase/SQLite can perform the entire expected workload locally. Adding Redis/Postgres/message brokers would add operational complexity without solving an observed problem.
-
-### Decision H — libgm feasibility spike before UI work
-
-Reason:
-
-It is the highest-risk external component and depends on real Google/phone behaviour that unit tests cannot prove.
-
----
-
-## 7. Phase 0 live test matrix
-
-Use a dedicated test payment/SMS where possible.
-
-| Test | Phone | Network | Expected observation |
-|---|---|---|---|
-| Pair | unlocked | Wi-Fi | pairing completes and auth state saves |
-| Restart | any | Wi-Fi | process restores session without repair |
-| Normal SMS | unlocked | Wi-Fi | incoming event received |
-| Locked SMS | locked | Wi-Fi | measure latency/reliability |
-| Idle phone | locked/idle | Wi-Fi | measure after extended idle |
-| Battery Saver | locked | Wi-Fi | measure degradation |
-| Mobile data | locked | mobile | measure latency/reliability |
-| Poor data | locked | weak/limited | measure delay/reconnect |
-| VPS outage | any | phone online | determine catch-up after VPS returns |
-| Phone data outage | any | no phone data | SMS may arrive; determine sync after data returns |
-| Duplicate/reconnect | any | normal | verify duplicate source IDs/updates can be deduped |
-| Other Messages Web client | any | normal | verify one-active-computer interaction |
-| Long unattended run | locked/idle | normal | observe unpair/reconnect stability |
-
-Record real results in this file or a later test log before declaring libgm production-ready for this hobby service.
-
----
-
-## 8. Sources to re-check before implementation
-
-PocketBase:
-
-- https://pocketbase.io/docs/use-as-framework/
 - https://pocketbase.io/docs/go-overview/
-- https://pocketbase.io/docs/go-database/
 - https://pocketbase.io/docs/go-migrations/
-- https://pocketbase.io/docs/go-jobs-scheduling/
-- https://pocketbase.io/docs/api-realtime/
 - https://github.com/pocketbase/pocketbase
 
-Google Messages/libgm:
+### Implementation-specific PocketBase findings
 
-- https://github.com/mautrix/gmessages
-- https://github.com/mautrix/gmessages/blob/main/pkg/libgm/client.go
-- https://github.com/mautrix/gmessages/blob/main/pkg/connector/login.go
-- https://support.google.com/messages/answer/7611075?hl=en-IN
-- https://support.google.com/messages/answer/9077245?co=GENIE.Platform%3DDesktop&hl=en
+Several behaviours were verified against the exact v0.39.9 source/tests and then covered by PayGate tests:
 
-Prototype:
+1. Base collections only receive the system `id` field automatically; explicit `created`/`updated` autodate fields are required when the application wants them.
+2. PocketBase filter date comparisons should receive PocketBase/RFC3339-formatted date values rather than relying on arbitrary Go `time.Time` binding. A validation experiment showed the same stored date failed a `<=` filter when bound as `time.Time` and matched when bound as a PocketBase-formatted date/string. PayGate therefore normalises every business date filter through one helper.
+3. Collection index expressions are parsed/validated by PocketBase; a partial-index `IN (...)` expression used during the first migration draft was rejected and was replaced with an accepted boolean expression.
+4. A wildcard static SPA route can still catch unknown API paths if it is not explicitly guarded. PayGate excludes `api` and `_` namespaces from its SPA fallback.
+5. PocketBase rate-limit support exists but its settings must be enabled. PayGate enables configured rate limiting at serve time.
 
-- https://github.com/Phloraxx/payment-api/tree/main
-- https://github.com/Phloraxx/payment-api/blob/main/src/server/services/payment.service.ts
-- https://github.com/Phloraxx/payment-api/blob/main/src/server/money.ts
-- https://github.com/Phloraxx/payment-api/blob/main/PLAN.md
+These are reasons the project pins and tests against a specific PocketBase version rather than assuming behaviour from older examples.
 
----
+## 3. Why SQLite remains appropriate here
 
-## 9. Research conclusion
+The current boundary is one operator and one service instance. SQLite gives:
 
-The rebuild is feasible without forking PocketBase and without introducing extra infrastructure.
+- atomic allocation/state transitions;
+- simple backup/recovery;
+- very low deployment overhead;
+- enough concurrency for this workload when transactions are kept short.
 
-The architecture with the best simplicity/correctness ratio is currently:
+The application deliberately performs no external HTTP request inside a SQLite transaction. Outgoing webhooks use an outbox record and worker. Google Messages ingestion is normalised before entering payment matching.
+
+A move to PostgreSQL would make sense if the product becomes a multi-merchant horizontally scaled service, but it would add operational complexity without solving a current requirement.
+
+## 4. libgm / mautrix-gmessages
+
+Pinned module:
 
 ```text
-Go
-+ PocketBase/SQLite
-+ libgm
-+ small React/Vite UI
-+ one container
+go.mau.fi/mautrix-gmessages v0.2605.0
 ```
 
-The one unresolved architectural risk is the real-world Google Messages connector behaviour. That is why the next engineering task is a **small libgm feasibility spike**, not the full payment rewrite.
+Upstream source:
+
+- https://github.com/mautrix/gmessages
+- https://pkg.go.dev/go.mau.fi/mautrix-gmessages/pkg/libgm
+
+The source contains the pieces needed for a standalone connector rather than browser-DOM automation:
+
+- pairing;
+- request crypto;
+- protobuf schemas;
+- private Google/Tachyon authentication;
+- token refresh;
+- long-poll/event handling;
+- acknowledgements/session state;
+- phone responsiveness events;
+- old/catch-up message events.
+
+`AuthData` contains sensitive cryptographic/device/session material including request crypto, refresh key, browser/mobile device identities, Tachyon auth token, IDs and cookies. PayGate therefore treats the JSON session like a credential, stores it outside normal API collections and enforces private filesystem permissions.
+
+The connector is kept behind a small ingestion callback: payment-domain code never receives libgm protobuf types. This is a reliability boundary, not a claim that process/package separation changes licence obligations.
+
+## 5. libgm licence
+
+mautrix-gmessages/libgm is GNU AGPL-3.0. The upstream repository also contains special licence exceptions for named parties such as Beeper/Element; those exceptions do not automatically apply to this project.
+
+Because this implementation directly links libgm into the PayGate binary, the rebuilt repository is distributed under AGPL terms (`LICENSE`, `NOTICE`). A future closed-source commercial distribution needs an actual licensing/legal decision, for example obtaining an appropriate licence or independently replacing the connector. It should not rely on an assumption that simply moving AGPL code to another process removes obligations.
+
+## 6. Google Messages constraints
+
+Google's official Messages-for-Web documentation describes a paired computer experience where the computer communicates through the phone. Important operational consequences:
+
+- the phone remains part of the system;
+- the phone needs cellular service to receive SMS;
+- the phone/data path needs internet connectivity for Messages-for-Web synchronisation;
+- background-data/battery restrictions can interfere with connectivity;
+- paired devices expose sensitive message content and should be treated as trusted devices;
+- pairings can become inactive/unpaired;
+- only one computer is documented as active at a time even though multiple may be paired.
+
+Official references:
+
+- https://support.google.com/messages/answer/7611075
+- https://support.google.com/messages/answer/9077245
+- https://developer.android.com/training/monitoring-device-state/doze-standby
+- https://developer.android.com/develop/connectivity/network-ops/data-saver
+
+For a reliable installation, the intended phone setup is a dedicated/controlled Android device, stable power, stable Wi-Fi/mobile data, Google Messages allowed background/unrestricted data, and battery optimisation disabled for Messages where the device offers that control.
+
+## 7. Latency
+
+There is no published end-to-end Google Messages-for-Web latency SLA that PayGate can safely promise.
+
+Total observed latency is the sum of:
+
+```text
+bank/core banking
+→ mobile operator SMS delivery
+→ phone Messages app
+→ Google Messages relay
+→ libgm event
+→ PayGate persistence/parser/match
+→ optional outgoing webhook
+```
+
+The final PayGate-local stages should be small under normal load; upstream bank/carrier/phone/network stages can be delayed or offline for an unbounded period.
+
+This is why:
+
+- payment state is durable;
+- old/catch-up events are accepted and deduplicated;
+- message occurrence time is retained;
+- expired fingerprints are quarantined;
+- an old event cannot confirm a payment created later;
+- connector health is visible to the operator.
+
+Real p50/p95/p99 latency must be measured with the actual bank/phone/network after live QR pairing.
+
+## 8. Why browser automation was rejected
+
+Automating `messages.google.com/web` with Playwright/Puppeteer would couple payment verification to DOM structure, browser sessions and UI changes. libgm already exposes the underlying event/protocol implementation needed by the bridge ecosystem, so browser automation would add fragility rather than reduce it.
+
+A custom clean-room protocol implementation is technically possible but would need to reproduce pairing, crypto, token refresh, protobuf/version tracking, long-polling, ack/session logic, catch-up handling and protocol changes. That is not justified for the current product while libgm works and the connector is isolated from the payment domain.
+
+## 9. Evidence correlation research finding
+
+A quarantine window by itself is not a complete stale-payment defence.
+
+Scenario:
+
+1. Payment A uses `₹100.01`.
+2. A expires and its 24-hour quarantine eventually ends.
+3. Payment B later reuses `₹100.01`.
+4. Google Messages reconnects and emits an old SMS for A.
+
+If matching only looks at current amount/status, that historical event can falsely confirm B.
+
+The implemented fix is an evidence-time invariant:
+
+```text
+payment.created_at <= sms.OccurredAt
+```
+
+Provider timestamps are therefore domain-relevant evidence, not just observability metadata. A dedicated automated test reproduces reuse followed by delayed Google Messages catch-up and verifies B remains pending.
+
+This timestamp guard solves delayed *historical delivery*, but not a payer who initiates a brand-new transfer from an old QR after the same amount has legitimately been reused. If the bank SMS exposes only amount and a new RRN, that new transfer is observationally identical to the current payment. No finite quarantine can remove this ambiguity forever; it only reduces its probability. Deployments needing cryptographic/provider-level correlation should move to official acquiring/bank APIs rather than pretending SMS/DDM supplies a guarantee it cannot.
+
+## 10. RRN semantics
+
+RRN is used as strong deduplication evidence:
+
+- first exact amount + new RRN can resolve a payment;
+- repeated RRN + same amount is idempotent;
+- repeated RRN + different amount is an anomaly and does not resolve another payment.
+
+The current single-UPI-account scope makes a global non-empty RRN uniqueness constraint practical. If PayGate becomes multi-account/multi-rail, the uniqueness scope should be revisited against the semantics of those official connectors rather than copied unchanged.
+
+## 11. Legacy Android relay finding
+
+Production inspection showed the old service uses the route `/api/webhook` and a legacy `WEBHOOK_SECRET`. The existing deployed secret is extremely weak, so promoting it to the new primary SMS secret would undermine the rebuild.
+
+The compatibility strategy is therefore:
+
+- primary product route: `/api/events/sms` + strong `SMS_WEBHOOK_SECRET`;
+- old route: `/api/webhook` + old `WEBHOOK_SECRET`, available only when `LEGACY_SMS_WEBHOOK_ENABLED=true`;
+- legacy route always identifies the source as `android_webhook`;
+- log a startup warning while compatibility is enabled;
+- remove/disable it after the phone relay is upgraded or Google Messages is proven.
+
+This preserves cutover continuity without making the weak legacy credential the default security model.
+
+## 12. Deployment finding
+
+Inspection of the running Dokploy Swarm service showed the old production task has no persistent mount. Its SQLite file is therefore coupled to the task/container filesystem and can be lost on replacement.
+
+A backup was taken before rebuild/cutover work. The new image uses `/app/pb_data`, and production acceptance explicitly requires task recreation with the same PocketBase state still present.
+
+## 13. Current conclusion
+
+The small, robust architecture for the present scope is:
+
+```text
+Go + embedded PocketBase/SQLite
++ exact persisted DDM payment service
++ durable SMS evidence
++ optional libgm adapter
++ legacy relay only as a migration bridge
++ durable signed webhook outbox
++ embedded React operator UI
++ one persistent pb_data volume
+```
+
+The remaining external uncertainty is not the payment/database architecture; it is live behaviour of Google's private Messages protocol on the real phone. That QR/device test is intentionally deferred and should be treated as a connector acceptance test, not as proof of the payment core.
