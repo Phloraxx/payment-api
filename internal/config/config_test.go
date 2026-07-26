@@ -1,0 +1,100 @@
+package config
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+const (
+	testAPISecret = "api-secret-that-is-long-enough"
+	testSMSSecret = "sms-secret-that-is-long-enough"
+)
+
+func TestValidateServeRequiresCoreSecrets(t *testing.T) {
+	cfg := Config{PaymentTTL: 5 * time.Minute, AmountQuarantine: 24 * time.Hour}
+	err := cfg.ValidateServe()
+	if err == nil {
+		t.Fatal("ValidateServe accepted missing core configuration")
+	}
+	for _, field := range []string{"UPI_ID", "PAYGATE_API_KEY", "SMS_WEBHOOK_SECRET"} {
+		if !strings.Contains(err.Error(), field) {
+			t.Errorf("error %q does not mention %s", err, field)
+		}
+	}
+}
+
+func TestValidateServeRejectsWeakPrimarySecrets(t *testing.T) {
+	base := Config{UPIID: "operator@bank", APIKey: "short", SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour}
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "PAYGATE_API_KEY") {
+		t.Fatalf("weak API key error = %v", err)
+	}
+	base.APIKey = testAPISecret
+	base.SMSWebhookSecret = "short"
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "SMS_WEBHOOK_SECRET") {
+		t.Fatalf("weak SMS secret error = %v", err)
+	}
+}
+
+func TestValidateServeWebhookSecretIsConditional(t *testing.T) {
+	base := Config{UPIID: "operator@bank", APIKey: testAPISecret, SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour}
+	if err := base.ValidateServe(); err != nil {
+		t.Fatalf("base config invalid: %v", err)
+	}
+	base.OutgoingWebhookURL = "https://example.test/webhook"
+	if err := base.ValidateServe(); err == nil {
+		t.Fatal("webhook URL without signing secret was accepted")
+	}
+	base.OutgoingWebhookSecret = "signing-secret-that-is-long-enough"
+	if err := base.ValidateServe(); err != nil {
+		t.Fatalf("complete webhook config invalid: %v", err)
+	}
+	base.OutgoingWebhookURL = "not-a-url"
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "OUTGOING_WEBHOOK_URL") {
+		t.Fatalf("malformed webhook URL error = %v", err)
+	}
+}
+
+func TestLoadSupportsLegacyPrototypeVariablesWithoutPromotingLegacySecret(t *testing.T) {
+	t.Setenv("UPI_ID", "legacy@bank")
+	t.Setenv("UPI_NAME", "Legacy Name")
+	t.Setenv("PAYGATE_API_KEY", testAPISecret)
+	t.Setenv("WEBHOOK_SECRET", "legacy-webhook")
+	t.Setenv("TICKET_TTL_MINUTES", "7")
+	t.Setenv("AMOUNT_QUARANTINE_HOURS", "12")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UPIPayeeName != "Legacy Name" || cfg.LegacySMSWebhookSecret != "legacy-webhook" || cfg.SMSWebhookSecret != "" {
+		t.Fatalf("legacy mapping failed: %+v", cfg)
+	}
+	if cfg.PaymentTTL != 7*time.Minute || cfg.AmountQuarantine != 12*time.Hour {
+		t.Fatalf("legacy durations failed: ttl=%s quarantine=%s", cfg.PaymentTTL, cfg.AmountQuarantine)
+	}
+}
+
+func TestValidateServeLegacyWebhookIsExplicit(t *testing.T) {
+	base := Config{UPIID: "operator@bank", APIKey: testAPISecret, SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour}
+	base.LegacySMSWebhookEnabled = true
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "WEBHOOK_SECRET") {
+		t.Fatalf("legacy route without legacy secret error = %v", err)
+	}
+	base.LegacySMSWebhookSecret = "old-secret"
+	if err := base.ValidateServe(); err != nil {
+		t.Fatalf("explicit legacy route config rejected: %v", err)
+	}
+}
+
+func TestLoadRejectsMalformedEnvironmentValues(t *testing.T) {
+	t.Setenv("PAYMENT_TTL", "five-minutes")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PAYMENT_TTL") {
+		t.Fatalf("invalid duration error = %v", err)
+	}
+
+	t.Setenv("PAYMENT_TTL", "5m")
+	t.Setenv("PAYGATE_RATE_LIMITS_ENABLED", "sometimes")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PAYGATE_RATE_LIMITS_ENABLED") {
+		t.Fatalf("invalid bool error = %v", err)
+	}
+}

@@ -1,63 +1,40 @@
-# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+# Dependencies
+node_modules/
 
-# dependencies
-/node_modules
-**/node_modules
-/.pnp
-.pnp.*
-.yarn/*
-!.yarn/patches
-!.yarn/plugins
-!.yarn/releases
-!.yarn/versions
+# Runtime data (PocketBase / legacy prototype)
+pb_data/
+data/
+*.db
+*.db-shm
+*.db-wal
 
-# testing
-/coverage
+# Build/test output
+dist/
+build/
+coverage/
+*.test
+*.out
+*.tsbuildinfo
 
-# next.js
-/.next/
-/out/
-
-# production
-/build
-/data
-/src/server/admin/public
-
-# misc
-.DS_Store
-*.pem
-
-# debug
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# env files (can opt-in for committing if needed)
+# Environment / secrets
 .env
 .env.local
 .env.production
-/pg-testing*
+.env.*.local
+*.pem
 
-# vercel
-.vercel
-
-# typescript
-*.tsbuildinfo
-next-env.d.ts
-
-.dev.vars
-.wrangler
-
-# build artifacts
-/dist
-
-# test files
-test*.js
-
-# logs & test output
+# Logs / temporary files
 *.log
-e2e_error.txt
-test-out.txt
-mail.txt
-e2e_log*.txt
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+.tmp/
+tmp/
+
+# Tooling
+.vscode/
+.idea/
+.vercel/
+.dev.vars
+.wrangler/

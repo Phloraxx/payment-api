@@ -1,529 +1,326 @@
-<div align="center">
+# PayGate
 
-# Payment API
+Self-hosted UPI payment verification for applications that receive money directly into a configured UPI/bank account.
 
-**v0.6.81**
+PayGate creates a unique payable amount using a paise fingerprint, observes bank-credit SMS evidence, matches the **exact** amount and UPI reference, persists the payment lifecycle in PocketBase/SQLite, and exposes status through an HTTP API, realtime operator UI and optional signed outgoing webhooks.
 
-A zero-fee UPI payment gateway that uses **Dynamic Decimal Matching** to resolve payments by parsing bank SMS notifications. Built with Fastify, SQLite, and TypeScript.
+PayGate does **not** custody, route or settle funds. The payer pays the configured UPI account directly. SMS-based verification is an evidence mechanism, not a bank/acquirer API and not a settlement guarantee.
 
-</div>
+## Runtime
 
-<div align="center">
+The production deployment is intentionally one small service:
 
-![Node](https://img.shields.io/badge/node-%3E%3D22-339933?logo=node.js)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript)
-![Fastify](https://img.shields.io/badge/Fastify-5-000000?logo=fastify)
-![SQLite](https://img.shields.io/badge/SQLite-better_sqlite3-003B57?logo=sqlite)
-
-</div>
-
----
-
-## Table of Contents
-
-- [Architecture](#architecture)
-- [Data Flow](#data-flow)
-- [Dynamic Decimal Matching](#dynamic-decimal-matching)
-- [SMS Processing](#sms-processing)
-- [Timer & Expiry System](#timer--expiry-system)
-- [API Reference](#api-reference)
-- [Database Schema](#database-schema)
-- [Configuration](#configuration)
-- [Project Structure](#project-structure)
-- [Running](#running)
-
----
-
-## Architecture
-
-```
-Fastify Server
-│
-├── Routes ────────▶ Services ──────────▶ SQLite (app.db)
-│   POST /api/ticket    TicketService        tickets table
-│   GET  /api/status    DecimalPool
-│   POST /api/webhook   PaymentService
-│   GET  /api/health
-│
-├── Middleware
-│   Rate limit (@fastify/rate-limit)
-│   Request logger (Pino)
-│   Error handler (unified JSON responses)
-│
-├── In-Memory State
-│   Map<base_amount, Set<taken_decimal>>
-│   Map<ticket_id, setTimeout>  (expiry timers)
+```text
+Android phone / bank SMS
+        │
+        ├── Google Messages → libgm ──┐
+        │                             │
+        └── legacy Android relay ─────┤
+                                      ▼
+                         ┌──────────────────────────┐
+                         │       PayGate (Go)       │
+                         │                          │
+                         │ PocketBase 0.39.9        │
+                         │ SQLite + migrations      │
+                         │ payment/SMS services     │
+                         │ webhook outbox/worker    │
+                         │ optional libgm manager   │
+                         │ React/Vite operator UI   │
+                         └────────────┬─────────────┘
+                                      │
+                                  /app/pb_data
+                              persistent volume
 ```
 
-### Components
+There is no Redis, external queue, second database or custom realtime server. PocketBase provides SQLite, auth, SSE realtime, cron, logs, backups and its raw admin UI at `/_/`.
 
-| Component | Role |
-|-----------|------|
-| **Fastify** | HTTP server with built-in rate limiting (`@fastify/rate-limit`), schema validation (`@sinclair/typebox`), and security headers (`@fastify/helmet`) |
-| **TicketService** | Ticket CRUD via prepared statements. Manages per-ticket `setTimeout` handles for TTL expiry and decimal release |
-| **DecimalPoolService** | In-memory pool of taken decimal values. `allocate()` finds the first free decimal 0-99, `release()` removes from the taken set |
-| **PaymentService** | Parses incoming SMS using regex, dispatches to `confirmFromBankSms()` or `fillFromGenericSms()` |
-| **SQLite** | Single `tickets` table in WAL mode. Synchronous driver (`better-sqlite3`) — no connection pool overhead |
+## Payment model
 
----
+A caller requests a **whole rupee** amount. PayGate reserves one of 99 paise fingerprints for that rupee value.
 
-## Data Flow
+Example:
 
-### Ticket Creation
-
-```
-POST /api/ticket { amount: 100 }
-
-  1. toPaisa(100) → 10000 paisa
-  2. DecimalPool.allocate(10000)
-     → base = 10000
-     → scan 0..99, decimal 00 is free
-     → mark 00 as taken
-     → return { amount: 10000, baseAmount: 10000, decimalVal: 0 }
-  3. INSERT INTO tickets (...) VALUES ('TICKET...', 10000, 'pending', 10000, 0)
-  4. setTimeout(() => onTtlReached(ticket), 2 * 60_000)
-  5. Response: { ticketId: 'TICKET...', amount: 100, status: 'pending' }
-
-ticket.amount = 10000 paisa = ₹100.00
+```text
+requested ₹100
+possible payable amounts: ₹100.01 ... ₹100.99
 ```
 
-### Payment Confirmation
+`.00` is never allocated and allocation never spills into the next rupee. All money is integer paise internally.
 
-```
-Two SMSes arrive at POST /api/webhook { sms: "..." }
+The reservation is transactional and persisted. A payment remains `pending` until it is paid, cancelled or expires. Resolved/expired amounts are quarantined before reuse so a delayed SMS cannot normally confirm a newer payment.
 
-  BANK SMS (settlement notification):
-    "Received Rs.100.00 from user@paytm UPI Ref:123456789"
-    → parseSms → method: "bank", amount: 10000
-    → confirmFromBankSms
-      → SELECT WHERE base_amount = 10000 AND status = 'pending'
-      → markPaid(ticket)
-        → UPDATE status = 'paid', rrn = '123456789'
-        → clearTimers() (cancel expiry + grace timers)
-        → DecimalPool.release(10000, 0)
-    → Response: { action: "marked_paid", ticketId: "TICKET..." }
+An additional stale-evidence guard compares the SMS/provider occurrence timestamp with the payment's persisted `created_at`: an old Google Messages catch-up event that predates a reused payment cannot confirm that newer payment.
 
-  GENERIC SMS (UPI app notification, includes ticketId):
-    "TICKET17123456780000 SOURAV paid you ₹100.00 UPI Ref:123456789"
-    → parseSms → method: "generic", ticketId: "TICKET...", senderName: "SOURAV"
-    → fillFromGenericSms
-      → UPDATE sender_name = 'SOURAV' WHERE id = 'TICKET...'
-    → Response: { action: "name_filled", ticketId: "TICKET..." }
-```
+A finite quarantine cannot make amount-only verification mathematically unique forever: someone who deliberately pays an old QR **after** its amount has eventually been reused creates a new bank transaction at the current time and is indistinguishable from a new payer if the bank evidence exposes only amount/RRN. PayGate therefore fails closed where it can, keeps a long configurable quarantine, and treats official bank/acquirer references as the long-term path when stronger correlation is required.
 
-The bank SMS is the authoritative payment signal. The generic SMS only fills the payer's name. Either can arrive first — `fillSenderName` works regardless of payment status.
+Statuses:
 
----
+- `pending`
+- `paid`
+- `expired`
+- `cancelled`
+- `late` — an exact credit arrived after expiry/cancellation but while that amount was still quarantined
 
-## Dynamic Decimal Matching
+## API
 
-### Problem
+### Create a payment
 
-UPI payments only provide a transaction amount and reference number. Without a payment gateway callback, there is no way to know which customer paid for which ticket when multiple tickets share the same price.
+```http
+POST /api/payments
+Authorization: Bearer <PAYGATE_API_KEY>
+Idempotency-Key: <unique key>
+Content-Type: application/json
 
-### Solution
-
-Replace the standard `₹100.00` amount with a unique `₹100.xx` amount drawn from a pool of 100 decimal variations. The exact amount encodes which ticket was paid.
-
-### Pool Structure
-
-```
-Map<base_amount, Set<taken_decimal>>
-
-base 10000 (₹100):  Set{ 00, 03, 07, 15 }    → 96 free slots
-base 10100 (₹101):  Set{ 01, 02 }              → 98 free slots
-base 10200 (₹102):  Set{ }                     → 100 free slots (untouched)
+{
+  "amount": 100,
+  "externalId": "order-123",
+  "metadata": {"cart": "abc"}
+}
 ```
 
-The pool stores only **taken** decimals. Free decimals are anything in 0..99 not in the set.
+`amount` may also be an integer string such as `"100"`. Fractional requested amounts are rejected.
 
-### Allocation
+Example response:
 
-```
-allocate(10000 paisa):
-  1. base = baseAmountFromPaisa(10000) → 10000
-  2. set = pools.get(10000) ?? new Set()
-  3. for i = 0..99:
-       if !set.has(i): set.add(i); return { amount: 10000 + i, baseAmount: 10000, decimalVal: i }
-  4. All 100 taken → spillover
-     for block = 10100, 10200, ...:
-       set = pools.get(block) ?? new Set()
-       if set.size < 100: return allocateFromBlock(block)
-  5. throw POOL_EXHAUSTED
-```
-
-Sequential allocation (0, 1, 2, ...) is used rather than random to minimise fragmentation.
-
-### Release Semantics
-
-| Trigger | Decimal Release | Rationale |
-|---------|----------------|-----------|
-| **Paid** | Immediate | RRN deduplication in the DB prevents the same decimal from being double-matched |
-| **Expired** | 30s delay | Prevents rapid recycling: a delayed SMS could match a freshly re-allocated decimal |
-| **Cancelled** | 30s delay | Same anti-race protection |
-
-### Spillover
-
-When all 100 decimal slots for a base amount are taken, the next integer block is used. For example, ticket #101 for `₹100` will be allocated `₹101.00`. The price drift is bounded by the number of concurrent tickets at that price point.
-
-### Startup Recovery
-
-On server restart:
-
-```sql
-UPDATE tickets SET status = 'expired' WHERE status = 'pending';
-SELECT base_amount, decimal_val, status FROM tickets;
-```
-
-1. All pending tickets are mass-expired (TTL state was in-memory and lost)
-2. The pool is rebuilt from remaining `pending` and `paid` ticket decimals
-3. No per-ticket timers are restored — fresh timers are created for new tickets
-
----
-
-## SMS Processing
-
-### SMS Formats
-
-**Bank SMS** (settlement notification, no ticket ID):
-```
-Confirmed payment for Received Rs.100.00 in your Kotak Bank AC X4959
-from user@oksbi on 08-03-26.UPI Ref:606703736480.
-```
-→ Extracts `amount` (10000 paisa), `rrn`, `upi_id` → matches by `base_amount` → marks paid
-
-**Generic** (UPI app notification, includes ticket ID):
-```
-TICKET17123456780000 SOURAV paid you ₹100.00 UPI Ref:606703736479
-```
-→ Extracts `ticketId`, `senderName` → matches by ID → fills `sender_name`
-
-### RRN Deduplication
-
-The `rrn` column has a `UNIQUE` constraint. If two webhook calls arrive with the same RRN (duplicate delivery), the second `UPDATE` throws a constraint error, which is caught and surfaced as `RRN_DUPLICATE`. This prevents the same transaction from marking two different tickets as paid.
-
----
-
-## Timer & Expiry System
-
-Each ticket has three associated timers managed in-memory:
-
-```
-Ticket Created
-│
-├── 2 min TTL ──────────▶ onTtlReached()
-│                           │
-│                           ├── 30s grace period
-│                           │   ticket stays 'pending', bank SMS can still arrive
-│                           │
-│                           ▼
-│                        graceExpired()
-│                           │
-│                           ├── UPDATE status = 'expired'
-│                           └── 30s ──▶ DecimalPool.release()
-│
-├── Paid (via bank SMS) ──▶ clearTimers()
-│                            └── DecimalPool.release()  (immediate)
-│
-└── Cancelled ─────────────▶ clearTimers()
-                             └── 30s ──▶ DecimalPool.release()
-```
-
-On server restart, all timers are lost. The startup routine mass-expires any remaining pending tickets to maintain consistency:
-
-```sql
-UPDATE tickets SET status = 'expired', updated_at = datetime('now')
-WHERE status = 'pending';
-```
-
----
-
-## API Reference
-
-### `POST /api/ticket`
-
-Create a payment ticket. A unique decimal amount is allocated from the pool.
-
-```
-Rate limit: 5 requests/minute/IP
-```
-
-**Request:**
-```json
-{ "amount": 100 }
-```
-
-**Response `200`:**
 ```json
 {
-  "ticketId": "TICKET17123456780000",
-  "amount": 100,
-  "amountPaisa": 10000,
+  "id": "...",
+  "paymentId": "...",
+  "requestedAmount": 100,
+  "requestedAmountPaise": 10000,
+  "payableAmount": "100.37",
+  "payableAmountPaise": 10037,
   "status": "pending",
-  "createdAt": "2026-06-01T12:00:00"
+  "expiresAt": "...",
+  "paidAt": null,
+  "externalId": "order-123",
+  "upiUri": "upi://pay?..."
 }
 ```
 
-**Errors:**
-| Code | Status | Condition |
-|------|--------|-----------|
-| `INVALID_AMOUNT` | 400 | Amount is not a positive number with ≤2 decimals |
-| `POOL_EXHAUSTED` | 503 | All decimal slots for this and adjacent blocks are taken |
+The same `Idempotency-Key` and identical parameters return the original payment. Reusing a key with different parameters returns `IDEMPOTENCY_CONFLICT`.
 
----
+### Read public payment status
 
-### `GET /api/status/:id`
-
-Get the current status of a ticket.
-
-```
-Rate limit: 60 requests/minute/IP
+```http
+GET /api/payments/{id}
 ```
 
-**Response `200`:**
-```json
+This deliberately returns the limited public payment view. Bank evidence such as RRN, payer UPI ID and payer name is not exposed here.
+
+### Cancel
+
+```http
+POST /api/payments/{id}/cancel
+Authorization: Bearer <PAYGATE_API_KEY>
+```
+
+### Primary SMS ingestion
+
+```http
+POST /api/events/sms
+X-Webhook-Secret: <SMS_WEBHOOK_SECRET>
+Content-Type: application/json
+
 {
-  "ticketId": "TICKET17123456780000",
-  "amount": 100,
-  "amountPaisa": 10000,
-  "status": "paid",
-  "createdAt": "2026-06-01T12:00:00",
-  "paidAt": "2026-06-01T12:02:30",
-  "senderName": "SOURAV",
-  "rrn": "606703736479",
-  "upiId": "user@paytm"
+  "sms": "Received Rs.100.37 ... UPI Ref:123456789012",
+  "source": "android_webhook",
+  "sourceId": "provider-message-id",
+  "sender": "bank-sender",
+  "timestamp": "2026-07-25T12:34:56Z"
 }
 ```
 
-`status` is one of: `pending`, `paid`, `cancelled`, `expired`.
+`source` must be `android_webhook`, `gmessages` or `manual`. Supplying `sourceId` and the original `timestamp` is strongly recommended for durable deduplication and stale-message protection.
 
-**Errors:**
-| Code | Status | Condition |
-|------|--------|-----------|
-| `TICKET_NOT_FOUND` | 404 | No ticket with the given ID |
+### Legacy Android relay
 
----
+`POST /api/webhook` accepts the old `{ "sms": "..." }` payload only when `LEGACY_SMS_WEBHOOK_ENABLED=true`. It authenticates with the separate legacy `WEBHOOK_SECRET` and always records the source as `android_webhook`.
 
-### `POST /api/webhook`
+This compatibility route exists for migration only. The production default is disabled. Rotate the old relay to `SMS_WEBHOOK_SECRET` and `/api/events/sms`, then disable the legacy route.
 
-Receive a bank SMS notification. Requires the `X-Webhook-Secret` header.
+### Health
 
-```
-Rate limit: 30 requests/minute/IP
-```
+- `GET /api/health` — PocketBase liveness endpoint, used by the container healthcheck.
+- `GET /api/paygate/health` — PayGate readiness, database state and a redacted connector summary.
 
-**Headers:**
-```
-X-Webhook-Secret: <shared-secret>
-```
+Unknown `/api/*` paths remain JSON 404 responses; the React SPA fallback never converts API errors into HTML 200 responses.
 
-**Request:**
-```json
-{ "sms": "Confirmed payment for Received Rs.100.00 in your Kotak Bank AC X4959 from user@oksbi on 08-03-26.UPI Ref:606703736480." }
-```
+## Matching and idempotency
 
-**Response `200` (Bank SMS):**
-```json
-{
-  "status": "ok",
-  "ticketId": "TICKET17123456780000",
-  "action": "marked_paid",
-  "ticket": { "ticketId": "...", "amount": 100, "status": "paid", ... }
-}
-```
+Bank SMS processing follows these rules:
 
-**Response `200` (Generic):**
-```json
-{
-  "status": "ok",
-  "ticketId": "TICKET17123456780000",
-  "action": "name_filled",
-  "ticket": { "ticketId": "...", "amount": 100, "status": "pending", ... }
-}
-```
+1. persist the SMS evidence event;
+2. parse exact amount, RRN and optional payer information;
+3. reject automatic matching if amount or RRN is missing;
+4. treat an already-seen RRN with the same amount as an idempotent duplicate;
+5. treat the same RRN with a different amount as `RRN_AMOUNT_MISMATCH`;
+6. match a pending payment only by the exact payable paise amount and eligible timestamp;
+7. if no pending payment matches, check an expired/cancelled payment still in quarantine and mark it `late`;
+8. never silently assign ambiguous evidence.
 
-**Errors:**
-| Code | Status | Condition |
-|------|--------|-----------|
-| `WEBHOOK_UNAUTHORIZED` | 401 | Missing or invalid `X-Webhook-Secret` |
-| `TICKET_NOT_FOUND` | 404 | Bank SMS: no pending ticket matches the amount. Generic: no ticket with the given ID |
-| `AMOUNT_MISMATCH` | 400 | Bank SMS: multiple pending tickets match the same amount |
-| `RRN_DUPLICATE` | 409 | The RRN has already been processed for a different ticket |
-| `INVALID_AMOUNT` | 400 | Unrecognised SMS format |
+Google Messages catch-up messages retain their provider message timestamp. Legacy relays that omit a timestamp are treated as arriving at ingestion time, so upgrading the legacy relay to send timestamps is recommended.
 
----
+## Outgoing webhooks
 
-### `GET /health`
+Configure `OUTGOING_WEBHOOK_URL` and `OUTGOING_WEBHOOK_SECRET` to receive payment lifecycle events.
 
-```
-Rate limit: none
+Events currently include:
+
+- `payment.paid`
+- `payment.late`
+- `payment.expired`
+- `payment.cancelled`
+
+Delivery records are written transactionally to `webhook_deliveries`; network I/O happens only after the transaction commits. The worker uses durable retries and recovers stale `sending` leases after process restarts.
+
+Headers:
+
+```text
+X-PayGate-Event-Id: <stable event id>
+X-PayGate-Timestamp: <unix seconds>
+X-PayGate-Signature: v1=<hex HMAC-SHA256>
 ```
 
-**Response `200`:**
-```json
-{ "status": "healthy", "uptime": 3600, "db": "ok" }
+Signature input:
+
+```text
+<timestamp>.<raw request body>
 ```
 
----
+Consumers should verify the HMAC with `OUTGOING_WEBHOOK_SECRET` and deduplicate by event ID.
 
-## Rate Limits
+## Operator UI
 
-| Endpoint | Limit | Scope |
-|----------|-------|-------|
-| `POST /api/ticket` | 5 requests / minute | Per IP |
-| `GET /api/status/:id` | 60 requests / minute | Per IP |
-| `POST /api/webhook` | 30 requests / minute | Per IP |
-| `GET /health` | Unlimited | — |
-| All others | 100 requests / minute | Per IP |
+The React UI at `/` provides:
 
-Limits are enforced by `@fastify/rate-limit` using an in-memory sliding window.
+- dashboard and payment statistics;
+- payment creation;
+- realtime payment list/details;
+- cancellation;
+- SMS evidence records;
+- outgoing webhook delivery records;
+- Google Messages connector status and QR pairing controls;
+- safe non-secret configuration status.
 
----
+Operator accounts use the PocketBase `users` auth collection. Domain collections are read-only through PocketBase APIs for authenticated `users`; state-changing payment operations go through custom Go handlers. Direct domain writes are locked.
 
-## Database Schema
+PocketBase's own `/_/` interface remains available to superusers for low-level administration, logs, backups and schema inspection.
 
-### `tickets`
+## Google Messages connector
 
-```sql
-CREATE TABLE IF NOT EXISTS tickets (
-  id          TEXT PRIMARY KEY,
-  amount      INTEGER NOT NULL,
-  status      TEXT NOT NULL DEFAULT 'pending'
-              CHECK(status IN ('pending','paid','cancelled','expired')),
-  base_amount INTEGER NOT NULL,
-  decimal_val INTEGER NOT NULL,
-  sender_name TEXT,
-  rrn         TEXT UNIQUE,
-  upi_id      TEXT,
-  paid_at     TEXT,
-  created_at  TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
-);
+The optional connector uses `go.mau.fi/mautrix-gmessages/pkg/libgm`.
+
+Set:
+
+```text
+GMESSAGES_ENABLED=true
 ```
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | TEXT | Format: `TICKET{timestamp}{counter}`, e.g. `TICKET17123456780000` |
-| `amount` | INTEGER | Total amount in paisa (base + decimal), e.g. `10003` = ₹100.03 |
-| `status` | TEXT | `pending` / `paid` / `cancelled` / `expired` |
-| `base_amount` | INTEGER | Floor to nearest rupee in paisa, e.g. `10000` for ₹100.xx |
-| `decimal_val` | INTEGER | The allocated decimal 0-99 |
-| `rrn` | TEXT | UPI reference number, unique across all tickets |
+The connector:
 
-### Indexes
+- restores a persisted session from `pb_data/gmessages/session.json`;
+- stores the session with restrictive filesystem permissions;
+- connects using libgm's event-driven relay/long-poll implementation;
+- forwards only incoming messages that resemble supported bank-credit SMS text;
+- records the Google message ID and original timestamp;
+- reconnects/backoffs on connection failures;
+- reports paired/connected/phone-responsive state;
+- supports QR pairing and automatic QR refresh.
 
-```sql
-idx_tickets_status   ON tickets(status)
-idx_tickets_amount   ON tickets(amount)
-idx_tickets_rrn      ON tickets(rrn)
-idx_tickets_decimal  ON tickets(base_amount, decimal_val, status)
-idx_tickets_created  ON tickets(created_at)
-```
+Starting a new pairing is refused while a valid session is already paired; explicitly unpair first.
 
----
+**Live phone QR scanning is the one intentionally deferred acceptance test.** The connector code is integrated and unit-tested, but the private Google Messages protocol can change and must be validated with the actual phone before relying on it as the only ingestion source.
 
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `3000` | HTTP server port |
-| `HOST` | `0.0.0.0` | Bind address |
-| `TICKET_TTL_MINUTES` | `2` | Time before a pending ticket expires (in-memory timer) |
-| `UPI_ID` | — | UPI ID shown on tickets (e.g. `college@upi`) |
-| `UPI_PAYEE_NAME` | — | Payee name for ticket display |
-| `WEBHOOK_SECRET` | random | Shared secret for `X-Webhook-Secret` header verification |
-| `DATA_DIR` | `data` | Directory for the SQLite database file |
-| `LOG_LEVEL` | `info` | Pino log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` |
+Copy `.env.example` and provide secrets through your deployment system rather than committing them.
 
----
+Required in normal serve mode:
 
-## Project Structure
-
-```
-src/
-├── server/
-│   ├── index.ts              # Entry point, startup, graceful shutdown
-│   ├── config.ts             # Environment variable loader
-│   ├── app.ts                # Fastify app assembly (routes, plugins)
-│   ├── errors.ts             # AppError class + status code map
-│   ├── money.ts              # Paisa/rupee conversion utilities
-│   ├── db/
-│   │   ├── connection.ts     # SQLite open/close with WAL pragmas
-│   │   └── schema.ts         # CREATE TABLE statements
-│   ├── middleware/
-│   │   ├── error-handler.ts  # Unified error response format
-│   │   └── request-logger.ts # Pino request logging
-│   ├── routes/
-│   │   ├── health.ts         # GET /health
-│   │   ├── ticket.ts         # POST /api/ticket, GET /api/status/:id
-│   │   └── webhook.ts        # POST /api/webhook
-│   └── services/
-│       ├── decimal.service.ts    # DDM pool: allocate, release, rebuild
-│       ├── payment.service.ts    # SMS parsing, bank/generic dispatch
-│       └── ticket.service.ts     # Ticket CRUD, timer management
-├── types/
-│   └── index.ts              # Ticket, TicketResponse, ParsedSms interfaces
-└── test/                     # Vitest test suite
-    ├── helpers.ts
-    ├── decimal.test.ts
-    ├── money.test.ts
-    ├── payment.test.ts
-    └── routes.test.ts
+```text
+UPI_ID=
+PAYGATE_API_KEY=           # minimum 24 characters
+SMS_WEBHOOK_SECRET=        # minimum 24 characters
 ```
 
----
+Common optional values:
 
-## Running
+```text
+UPI_PAYEE_NAME=PayGate
+PAYMENT_TTL=5m
+PAYMENT_QUARANTINE=24h
+PAYGATE_RATE_LIMITS_ENABLED=true
+GMESSAGES_ENABLED=false
+GMESSAGES_SESSION_PATH=
+OUTGOING_WEBHOOK_URL=
+OUTGOING_WEBHOOK_SECRET=
+PB_DATA_DIR=./pb_data
+```
+
+Legacy prototype variables `UPI_NAME`, `TICKET_TTL_MINUTES`, `AMOUNT_QUARANTINE_HOURS` and `PAYMENT_WEBHOOK_*` remain understood where documented in `.env.example`. Invalid booleans/durations fail startup instead of silently falling back.
+
+`PAYGATE_TEST_MODE=true` is for controlled tests only and bypasses normal required-config validation.
+
+## Docker
 
 ```bash
-# Install
-npm install
+cp .env.example .env
+# edit .env
+docker compose up -d --build
+```
 
-# Development (with file watching)
-npm run dev
+The only state that must survive container replacement is mounted at:
 
-# TypeScript check
+```text
+/app/pb_data
+```
+
+Do not deploy this image without a persistent volume/bind mount there. PocketBase SQLite, migrations, operator accounts, SMS evidence, outgoing webhook state, backups and the Google Messages session all depend on that directory.
+
+## First operator account
+
+PocketBase can create the first superuser through `/_/`, or from the container CLI with PocketBase's `superuser upsert` command. After that, create a normal record in the `users` auth collection for the PayGate operator UI.
+
+## Tests and CI
+
+Local validation:
+
+```bash
+npm ci
 npm run typecheck
-
-# Tests
-npm test
-
-# Production build
 npm run build
 
-# Start production
-npm start
+gofmt -w cmd internal migrations
+go test -count=1 ./...
+go test -race -count=1 ./...
+go vet ./...
+
+docker build -t paygate .
 ```
 
-### Docker
+CI performs frontend install/typecheck/build, Go formatting, unit/integration tests, race tests, vet and a production container build. Deployment is intentionally not automatic: the persistent-volume and environment cutover is an operator action.
 
-```bash
-# Build
-docker build -t ddm-payment-gateway .
+## Security notes
 
-# Run
-docker run -d \
-  -p 3000:3000 \
-  -v payment_data:/app/data \
-  --env-file .env \
-  ddm-payment-gateway
+- Treat `PAYGATE_API_KEY`, SMS secrets, PocketBase auth tokens and the libgm session as credentials.
+- The Google Messages session can represent a paired Messages-for-Web client and is stored outside normal collections with restrictive permissions.
+- Keep `/app/pb_data` private and backed up.
+- Use HTTPS at the reverse proxy.
+- PocketBase rate limits are enabled by default in PayGate.
+- Do not leave the weak legacy `/api/webhook` compatibility route enabled after migration.
+- A false-positive payment confirmation is worse than a delayed/manual review; matching therefore fails closed on ambiguity.
+- SMS delivery and the private Google Messages protocol have no end-to-end latency/SLA guarantee.
 
-# With docker-compose
-docker compose up -d
-```
+## Licence
 
-### Testing
+This repository directly links against `libgm`, which is AGPL-3.0. The rebuilt project is therefore distributed under the GNU Affero General Public License; see `LICENSE` and `NOTICE`.
 
-```
-npm test            # Run all tests
-npm run test:watch  # Watch mode
-```
+A future proprietary/commercial distribution needs a separate licensing review rather than assuming architectural separation removes AGPL obligations.
 
-The test suite covers:
+## More detail
 
-- Decimal pool allocation, spillover, and recovery
-- SMS parsing for both bank and generic formats
-- Route integration (create ticket, status check, webhook)
-- Webhook authentication rejection
-- Duplicate RRN rejection
-- Immediate reuse of paid decimals
+- `ARCHITECTURE.md` — implemented system design and invariants
+- `PLAN.md` — implementation/acceptance status
+- `RESEARCH.md` — technical research and constraints behind the design
+- `IMPLEMENTATION_SPEC.md` — rebuild requirements used during implementation

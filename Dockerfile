@@ -1,20 +1,32 @@
-# Stage 1: Build server
-FROM node:22-alpine AS server-build
-WORKDIR /app
-COPY package*.json tsconfig*.json eslint.config.js vitest.config.ts ./
-RUN npm ci
-COPY src/server/ ./src/server/
-COPY src/types/ ./src/types/
-RUN npm run build
+# syntax=docker/dockerfile:1.7
 
-# Stage 2: Production
-FROM node:22-alpine
-RUN apk add --no-cache dumb-init
+FROM node:22.23.1-bookworm-slim AS web-build
+WORKDIR /src
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY web ./web
+RUN npm run typecheck && npm run build
+
+FROM golang:1.25.12-bookworm AS go-build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+COPY migrations ./migrations
+COPY --from=web-build /src/internal/web/dist ./internal/web/dist
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w" -o /out/paygate ./cmd/payment-api
+RUN mkdir -p /out/pb_data
+
+FROM gcr.io/distroless/static-debian12:nonroot
 WORKDIR /app
-COPY --from=server-build /app/dist/ ./dist/
-COPY --from=server-build /app/node_modules/ ./node_modules/
-COPY package*.json ./
+COPY --from=go-build --chown=nonroot:nonroot /out/paygate /app/paygate
+COPY --from=go-build --chown=nonroot:nonroot /out/pb_data /app/pb_data
+COPY --chown=nonroot:nonroot LICENSE NOTICE /app/
+USER nonroot:nonroot
 EXPOSE 3000
-VOLUME ["/app/data"]
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD node -e "fetch('http://localhost:3000/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["dumb-init", "node", "dist/server/index.js"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD ["/app/paygate", "healthcheck"]
+ENTRYPOINT ["/app/paygate"]
+CMD ["serve", "--http=0.0.0.0:3000"]
