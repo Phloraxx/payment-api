@@ -60,7 +60,6 @@ func (m *Manager) handleGoogleAuthFailure(err error) bool {
 func (m *Manager) markGoogleReauthRequired() {
 	m.mu.Lock()
 	client := m.client
-	m.client = nil
 	m.status.State = "reauth_required"
 	m.status.Paired = validPairingSession(m.session)
 	m.status.Connected = false
@@ -69,6 +68,8 @@ func (m *Manager) markGoogleReauthRequired() {
 	m.status.LastError = googleReauthRequiredMessage
 	m.mu.Unlock()
 	if client != nil {
+		// Keep the client pointer until ReauthenticateGoogle retires its event
+		// gate. Status() already forces connected=false in reauth_required.
 		client.Disconnect()
 	}
 }
@@ -134,9 +135,10 @@ func (m *Manager) ReauthenticateGoogle(cookieInput string) error {
 	baseCtx := m.ctx
 	m.mu.Unlock()
 
-	if oldClient != nil {
-		oldClient.Disconnect()
-	}
+	// Drain any handler that already started on the retired client before the
+	// replacement can be installed. This prevents a delayed old ClientReady or
+	// auth failure from mutating the refreshed connection's state.
+	m.retireClient(oldClient)
 
 	candidate, err := cloneAuthData(original)
 	if err != nil {
@@ -154,7 +156,7 @@ func (m *Manager) ReauthenticateGoogle(cookieInput string) error {
 	err = client.FetchConfig(probeCtx)
 	cancel()
 	if err != nil {
-		client.Disconnect()
+		m.retireClient(client)
 		m.logger.Warn().Err(err).Msg("failed to verify refreshed Google Messages cookies")
 		message := googleAuthVerifyMessage
 		if isGoogleAuthError(err) {
@@ -166,12 +168,12 @@ func (m *Manager) ReauthenticateGoogle(cookieInput string) error {
 
 	account := googleConfigAccount(client)
 	if account == "" {
-		client.Disconnect()
+		m.retireClient(client)
 		m.finishGoogleReauthFailure(original, googleAuthFailedMessage)
 		return errors.New(googleAuthFailedMessage)
 	}
 	if !strings.EqualFold(account, expectedAccount) {
-		client.Disconnect()
+		m.retireClient(client)
 		m.finishGoogleReauthFailure(original, googleWrongAccountMessage)
 		return errors.New(googleWrongAccountMessage)
 	}
@@ -185,7 +187,7 @@ func (m *Manager) ReauthenticateGoogle(cookieInput string) error {
 	m.mu.Lock()
 	if m.session != original || m.status.State != "reauthenticating" {
 		m.mu.Unlock()
-		client.Disconnect()
+		m.retireClient(client)
 		return errors.New("google messages pairing changed while authentication was being refreshed; try again")
 	}
 	if err := saveSession(m.cfg.GMessagesSessionPath, candidate); err != nil {
@@ -193,7 +195,7 @@ func (m *Manager) ReauthenticateGoogle(cookieInput string) error {
 		m.status.Connected = false
 		m.status.LastError = "Refreshed Google authentication could not be persisted"
 		m.mu.Unlock()
-		client.Disconnect()
+		m.retireClient(client)
 		m.logger.Error().Err(err).Msg("failed to persist reauthenticated Google Messages session")
 		return errors.New("refreshed Google authentication could not be persisted")
 	}
