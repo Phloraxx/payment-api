@@ -12,7 +12,12 @@ import (
 	"go.mau.fi/mautrix-gmessages/pkg/libgm/events"
 )
 
-const googleReauthRequiredMessage = "Google account authentication expired; refresh the Google login to reconnect"
+const (
+	googleReauthRequiredMessage = "Google account authentication expired; refresh the Google login to reconnect"
+	googleAuthFailedMessage      = "google account authentication failed; refresh the browser cookies and try again"
+	googleAuthVerifyMessage      = "google account authentication could not be verified; try again"
+	googleWrongAccountMessage    = "google login belongs to a different account; use the account already paired with this phone"
+)
 
 func isGoogleAuthError(err error) bool {
 	if err == nil {
@@ -37,12 +42,12 @@ func (m *Manager) connectionEventsSuppressed() bool {
 func (m *Manager) googleAccountPairingExists() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.session != nil && m.session.IsGoogleAccount() && m.session.Browser != nil && m.session.Mobile != nil
+	return validPairingSession(m.session) && m.session.IsGoogleAccount()
 }
 
 func (m *Manager) handleGoogleAuthFailure(err error) bool {
 	m.mu.RLock()
-	googleSession := m.session != nil && m.session.IsGoogleAccount()
+	googleSession := validPairingSession(m.session) && m.session.IsGoogleAccount()
 	m.mu.RUnlock()
 	if !googleSession || !isGoogleAuthError(err) {
 		return false
@@ -57,7 +62,7 @@ func (m *Manager) markGoogleReauthRequired() {
 	client := m.client
 	m.client = nil
 	m.status.State = "reauth_required"
-	m.status.Paired = m.session != nil && m.session.Browser != nil && m.session.Mobile != nil
+	m.status.Paired = validPairingSession(m.session)
 	m.status.Connected = false
 	m.status.PairingMethod = sessionPairingMethod(m.session)
 	m.status.AccountEmail = sessionAccountEmail(m.session)
@@ -107,7 +112,7 @@ func (m *Manager) ReauthenticateGoogle(cookieInput string) error {
 
 	m.mu.Lock()
 	original := m.session
-	if original == nil || !original.IsGoogleAccount() || original.Browser == nil || original.Mobile == nil {
+	if !validPairingSession(original) || !original.IsGoogleAccount() {
 		m.mu.Unlock()
 		return errors.New("google account pairing is not available to reauthenticate")
 	}
@@ -123,6 +128,7 @@ func (m *Manager) ReauthenticateGoogle(cookieInput string) error {
 	oldClient := m.client
 	m.client = nil
 	m.status.State = "reauthenticating"
+	m.status.Paired = true
 	m.status.Connected = false
 	m.status.LastError = ""
 	baseCtx := m.ctx
@@ -150,27 +156,31 @@ func (m *Manager) ReauthenticateGoogle(cookieInput string) error {
 	if err != nil {
 		client.Disconnect()
 		m.logger.Warn().Err(err).Msg("failed to verify refreshed Google Messages cookies")
-		message := "Google account authentication could not be verified; try again"
+		message := googleAuthVerifyMessage
 		if isGoogleAuthError(err) {
-			message = "Google account authentication failed; refresh the browser cookies and try again"
+			message = googleAuthFailedMessage
 		}
 		m.finishGoogleReauthFailure(original, message)
-		return errors.New(strings.ToLower(message[:1]) + message[1:])
+		return errors.New(message)
 	}
 
 	account := googleConfigAccount(client)
 	if account == "" {
 		client.Disconnect()
-		message := "Google account authentication failed; refresh the browser cookies and try again"
-		m.finishGoogleReauthFailure(original, message)
-		return errors.New(strings.ToLower(message[:1]) + message[1:])
+		m.finishGoogleReauthFailure(original, googleAuthFailedMessage)
+		return errors.New(googleAuthFailedMessage)
 	}
 	if !strings.EqualFold(account, expectedAccount) {
 		client.Disconnect()
-		message := "Google login belongs to a different account; use the account already paired with this phone"
-		m.finishGoogleReauthFailure(original, message)
-		return errors.New(strings.ToLower(message[:1]) + message[1:])
+		m.finishGoogleReauthFailure(original, googleWrongAccountMessage)
+		return errors.New(googleWrongAccountMessage)
 	}
+
+	// The live failure that motivated this flow occurred while libgm's stored
+	// Tachyon expiry still claimed the token was valid for many more hours.
+	// Clearing only the expiry forces libgm.Connect to use the existing signed
+	// refresh key to obtain fresh relay auth, while preserving the phone pairing.
+	candidate.TachyonExpiry = time.Time{}
 
 	m.mu.Lock()
 	if m.session != original || m.status.State != "reauthenticating" {
@@ -217,7 +227,7 @@ func (m *Manager) finishGoogleReauthFailure(original *libgm.AuthData, message st
 		return
 	}
 	m.status.State = "reauth_required"
-	m.status.Paired = true
+	m.status.Paired = validPairingSession(original)
 	m.status.Connected = false
 	m.status.PairingMethod = "google"
 	m.status.AccountEmail = sessionAccountEmail(original)
