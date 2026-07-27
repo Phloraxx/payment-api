@@ -38,18 +38,19 @@ func main() {
 	migratecmd.MustRegister(app, app.RootCmd, migratecmd.Config{Automigrate: false})
 
 	zeroLogger := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"}).With().Timestamp().Logger()
+	gmessagesLogger := gmessages.ProductionLogger(zeroLogger)
 	stdLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	webhookService := webhooks.NewService(app, cfg)
 	webhookService.Logger = stdLogger
 	paymentService := payments.NewService(app, cfg, webhookService)
 	smsService := sms.NewService(app, paymentService)
-	gmessagesManager := gmessages.NewManager(cfg, zeroLogger, func(input sms.Input) error {
+	gmessagesManager := gmessages.NewManager(cfg, gmessagesLogger, func(input sms.Input) error {
 		_, err := smsService.Ingest(input)
 		return err
 	})
 	api.New(cfg, paymentService, smsService, gmessagesManager).Register(app)
-	registerPairCommand(app, cfg, zeroLogger)
+	registerPairCommand(app, cfg, gmessagesLogger)
 	registerHealthcheckCommand(app)
 
 	rootCtx, rootCancel := context.WithCancel(context.Background())
