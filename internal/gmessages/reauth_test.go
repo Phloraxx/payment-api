@@ -1,9 +1,11 @@
 package gmessages
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/google/uuid"
@@ -105,5 +107,41 @@ func TestReauthenticateGoogleRequiresExistingGooglePairing(t *testing.T) {
 	manager := &Manager{cfg: config.Config{GMessagesEnabled: true}, logger: zerolog.Nop()}
 	if err := manager.ReauthenticateGoogle(testCookieHeader); err == nil {
 		t.Fatal("reauthentication without an existing Google pairing was accepted")
+	}
+}
+
+func TestStaleReconnectTimerCannotReplaceNewClient(t *testing.T) {
+	session := googleTestSession(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	manager := &Manager{
+		cfg:     config.Config{GMessagesEnabled: true},
+		logger:  zerolog.Nop(),
+		session: session,
+		ctx:     ctx,
+		cancel:  cancel,
+		status:  Status{Enabled: true, State: "degraded", Paired: true, PairingMethod: "google"},
+	}
+	oldClient := manager.newClient(session)
+	manager.client = oldClient
+	manager.scheduleReconnect()
+
+	replacementSession, err := cloneAuthData(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementClient := manager.newClient(replacementSession)
+	manager.mu.Lock()
+	manager.session = replacementSession
+	manager.client = replacementClient
+	manager.status.State = "connecting"
+	manager.mu.Unlock()
+
+	time.Sleep(2300 * time.Millisecond)
+	manager.mu.RLock()
+	current := manager.client
+	manager.mu.RUnlock()
+	if current != replacementClient {
+		t.Fatal("stale reconnect timer replaced the newly installed client")
 	}
 }
