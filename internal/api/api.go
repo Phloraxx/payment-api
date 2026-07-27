@@ -50,6 +50,7 @@ func (a *API) Register(app core.App) {
 		e.Router.GET("/api/dashboard", a.dashboard)
 		e.Router.GET("/api/connector/gmessages/status", a.gmessagesStatus)
 		e.Router.POST("/api/connector/gmessages/pair/google", a.gmessagesGooglePair).Bind(apis.BodyLimit(maxGMessagesPairBytes))
+		e.Router.POST("/api/connector/gmessages/reauth/google", a.gmessagesGoogleReauth).Bind(apis.BodyLimit(maxGMessagesPairBytes))
 		e.Router.POST("/api/connector/gmessages/pair/qr", a.gmessagesPair)
 		e.Router.POST("/api/connector/gmessages/pair/qr/refresh", a.gmessagesPairRefresh)
 		// Backward-compatible QR aliases from the first PayGate rebuild.
@@ -287,6 +288,23 @@ func (a *API) gmessagesGooglePair(e *core.RequestEvent) error {
 		"accountEmail": accountEmail,
 		"status":       a.GMessages.Status(),
 	})
+}
+
+func (a *API) gmessagesGoogleReauth(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("dashboard authentication is required", nil)
+	}
+	if a.GMessages == nil {
+		return e.BadRequestError("Google Messages connector is unavailable", nil)
+	}
+	var body googleMessagesPairBody
+	if err := decodeJSON(e, &body); err != nil {
+		return e.BadRequestError("invalid JSON body", err)
+	}
+	if err := a.GMessages.ReauthenticateGoogle(strings.TrimSpace(body.CookieData)); err != nil {
+		return e.BadRequestError(err.Error(), nil)
+	}
+	return e.JSON(http.StatusOK, a.GMessages.Status())
 }
 
 func (a *API) gmessagesPair(e *core.RequestEvent) error {
