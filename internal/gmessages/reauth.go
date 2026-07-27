@@ -209,7 +209,7 @@ func (m *Manager) ReauthenticateGoogle(cookieInput string) error {
 	m.mu.Unlock()
 
 	if connectCtx != nil {
-		go m.connectWithBackoff(connectCtx)
+		go m.connectReauthenticatedClient(connectCtx, client)
 	} else {
 		m.mu.Lock()
 		if m.client == client && m.status.State == "connecting" {
@@ -218,6 +218,21 @@ func (m *Manager) ReauthenticateGoogle(cookieInput string) error {
 		m.mu.Unlock()
 	}
 	return nil
+}
+
+func (m *Manager) connectReauthenticatedClient(ctx context.Context, client *libgm.Client) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
+	if err := client.Connect(); err != nil {
+		if m.handleGoogleAuthFailure(err) {
+			return
+		}
+		m.setError("degraded", err)
+		m.scheduleReconnect()
+	}
+	// A nil return only starts libgm's asynchronous listener. ClientReady or
+	// ListenRecovered will move the manager from connecting to connected.
 }
 
 func (m *Manager) finishGoogleReauthFailure(original *libgm.AuthData, message string) {
