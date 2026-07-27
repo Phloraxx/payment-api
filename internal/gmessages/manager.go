@@ -195,9 +195,7 @@ func (m *Manager) connectWithBackoff(ctx context.Context) {
 
 func (m *Manager) newClient(session *libgm.AuthData) *libgm.Client {
 	client := libgm.NewClient(session, nil, m.logger.With().Str("component", "libgm").Logger())
-	client.SetEventHandler(func(raw any) {
-		m.handleClientEvent(client, raw)
-	})
+	m.registerClientEventHandler(client)
 	return client
 }
 
