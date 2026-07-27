@@ -42,7 +42,8 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
         setPairingEmoji(status.pairingEmoji ?? "");
         setPairingAccount(status.accountEmail ?? "");
       }
-      if (status.paired) {
+      const refreshingGoogleAuth = status.state === "reauth_required" || status.state === "reauthenticating";
+      if (status.paired && !refreshingGoogleAuth) {
         setCookieData("");
         setPairingEmoji("");
         setQrUrl("");
@@ -101,6 +102,27 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
     }
   }
 
+  async function refreshGoogleLogin() {
+    if (!cookieData.trim()) {
+      notify("Paste a fresh Google Messages Copy-as-cURL request first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const status = await api<Connector>("/api/connector/gmessages/reauth/google", {
+        method: "POST",
+        body: JSON.stringify({ cookieData }),
+      });
+      setCookieData("");
+      setConnector(status);
+      notify("Google login refreshed. Reconnecting with the existing phone pairing.");
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Google login could not be refreshed.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function startQRPairing() {
     setBusy(true);
     try {
@@ -140,10 +162,14 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
 
   const enabled = connector?.enabled ?? false;
   const pairing = connector?.state === "pairing";
+  const googleReauth = connector?.paired && connector.pairingMethod === "google" &&
+    (connector.state === "reauth_required" || connector.state === "reauthenticating");
+  const displayState = connector?.state?.replaceAll("_", " ") ?? "loading";
+
   return <>
     <section className="card">
       <div className="section-title">
-        <div><p className="eyebrow">GOOGLE MESSAGES</p><h2>{enabled ? connector?.state ?? "loading" : "disabled"}</h2></div>
+        <div><p className="eyebrow">GOOGLE MESSAGES</p><h2>{enabled ? displayState : "disabled"}</h2></div>
         <Badge status={connector?.connected ? "connected" : connector?.state ?? "disabled"} />
       </div>
       <p className="muted">{connector?.lastError || "Read-only SMS connector. Google account + emoji pairing is preferred; QR remains available as a fallback."}</p>
@@ -175,6 +201,25 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
         </div>
       </div>}
 
+      {googleReauth && <div className="google-pair-setup">
+        <h3>Refresh Google login</h3>
+        <p className="muted">The phone pairing and encryption keys are still saved. Only the Google browser login expired, so no emoji or new device pairing is required.</p>
+        <p className="muted">Open Google Messages Web with <strong>{connector?.accountEmail || "the already paired Google account"}</strong>, then DevTools → Network → reload → <code>config</code> → <strong>Copy as cURL</strong>. Paste the fresh request below.</p>
+        <p><a href={googleMessagesConfigURL} target="_blank" rel="noreferrer">Open Google Messages account/config ↗</a></p>
+        <textarea
+          value={cookieData}
+          onChange={(event) => setCookieData(event.target.value)}
+          placeholder="Paste a fresh Copy-as-cURL request"
+          autoComplete="off"
+          spellCheck={false}
+          rows={7}
+        />
+        <p className="muted">PayGate verifies that the cookies belong to the same Google account before replacing the stored authentication. Cookie values are never echoed back or written to application logs.</p>
+        <div className="actions">
+          <button className="primary" disabled={busy || !cookieData.trim()} onClick={() => void refreshGoogleLogin()}>{busy ? "Refreshing…" : "Refresh Google login"}</button>
+        </div>
+      </div>}
+
       {pairing && connector?.pairingMethod === "google" && <div className="pair-panel">
         <p className="eyebrow">PAIRING EMOJI</p>
         <div className="pair-emoji" aria-label={`Pairing emoji ${pairingEmoji || connector.pairingEmoji || ""}`}>{pairingEmoji || connector.pairingEmoji || "…"}</div>
@@ -186,7 +231,7 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
       {qrImage && connector?.pairingMethod === "qr" && <div className="pair-panel"><img src={qrImage} alt="Google Messages pairing QR" /><p>Google Messages → Device pairing → Switch to QR pairing → scan this code.</p><p className="muted">The QR refreshes automatically before the token expires.</p></div>}
 
       <div className="actions">
-        <button disabled={!enabled || !connector?.paired || busy} onClick={() => void reconnect()}>Reconnect</button>
+        <button disabled={!enabled || !connector?.paired || googleReauth || busy} onClick={() => void reconnect()}>Reconnect</button>
         <button className="danger" disabled={!enabled || (!connector?.paired && !pairing) || busy} onClick={() => void unpair()}>{pairing ? "Cancel pairing" : "Unpair"}</button>
       </div>
     </section>
