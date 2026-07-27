@@ -126,6 +126,10 @@ func (m *Manager) Status() Status {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	status := m.status
+	if status.State == "reauth_required" || status.State == "reauthenticating" {
+		status.Connected = false
+		return status
+	}
 	if m.client != nil && status.Paired {
 		status.Connected = m.client.IsConnected()
 		if status.Connected && status.State == "disconnected" {
@@ -143,6 +147,10 @@ func (m *Manager) connectWithBackoff(ctx context.Context) {
 		}
 
 		m.mu.Lock()
+		if m.status.State == "reauth_required" || m.status.State == "reauthenticating" {
+			m.mu.Unlock()
+			return
+		}
 		if !validSession(m.session) {
 			m.status.State = "unpaired"
 			m.status.Paired = false
@@ -154,10 +162,13 @@ func (m *Manager) connectWithBackoff(ctx context.Context) {
 		}
 		client := m.client
 		m.status.State = "connecting"
+		m.status.Connected = false
 		m.mu.Unlock()
 
+		// libgm starts its long-poll listener asynchronously. A nil return here
+		// only means the listener was started, not that Google accepted it.
+		// ClientReady/ListenRecovered are the authoritative connected events.
 		if err := client.Connect(); err == nil {
-			m.markConnected()
 			return
 		} else {
 			m.setError("degraded", err)
@@ -198,6 +209,7 @@ func (m *Manager) handleEvent(raw any) {
 		m.status.PairingEmoji = ""
 		m.status.PairingMethod = sessionPairingMethod(m.session)
 		m.status.AccountEmail = sessionAccountEmail(m.session)
+		m.status.LastError = ""
 		m.mu.Unlock()
 		if err := m.saveCurrentSession(); err != nil {
 			m.logger.Error().Err(err).Msg("failed to persist Google Messages session")
@@ -207,11 +219,17 @@ func (m *Manager) handleEvent(raw any) {
 			m.logger.Error().Err(err).Msg("failed to persist refreshed Google Messages auth")
 		}
 	case *events.PhoneNotResponding:
+		if m.connectionEventsSuppressed() {
+			return
+		}
 		m.mu.Lock()
 		m.status.PhoneResponsive = false
 		m.status.State = "degraded"
 		m.mu.Unlock()
 	case *events.PhoneRespondingAgain:
+		if m.connectionEventsSuppressed() {
+			return
+		}
 		m.mu.Lock()
 		m.status.PhoneResponsive = true
 		m.status.State = "connected"
@@ -222,11 +240,21 @@ func (m *Manager) handleEvent(raw any) {
 	case *events.ListenRecovered:
 		m.markConnected()
 	case *events.ListenFatalError:
+		if m.handleGoogleAuthFailure(event.Error) {
+			return
+		}
 		m.setError("degraded", event.Error)
 		m.scheduleReconnect()
 	case *events.PingFailed:
+		if m.handleGoogleAuthFailure(event.Error) {
+			return
+		}
 		m.setError("degraded", event.Error)
 	case *events.GaiaLoggedOut:
+		if m.googleAccountPairingExists() {
+			m.markGoogleReauthRequired()
+			return
+		}
 		m.markLoggedOut()
 	case *libgm.WrappedMessage:
 		m.handleMessage(event)
@@ -308,7 +336,7 @@ func normalizeTimestampMS(timestamp int64) int64 {
 
 func (m *Manager) scheduleReconnect() {
 	m.mu.Lock()
-	if m.reconnecting || m.ctx == nil || !validSession(m.session) {
+	if m.reconnecting || m.ctx == nil || !validSession(m.session) || m.status.State == "reauth_required" || m.status.State == "reauthenticating" {
 		m.mu.Unlock()
 		return
 	}
@@ -334,6 +362,10 @@ func (m *Manager) scheduleReconnect() {
 		case <-timer.C:
 		}
 		m.mu.Lock()
+		if m.status.State == "reauth_required" || m.status.State == "reauthenticating" {
+			m.mu.Unlock()
+			return
+		}
 		m.client = nil
 		m.mu.Unlock()
 		m.connectWithBackoff(ctx)
@@ -347,19 +379,28 @@ func (m *Manager) Reconnect() error {
 	m.mu.RLock()
 	client := m.client
 	paired := validSession(m.session)
+	state := m.status.State
 	m.mu.RUnlock()
 	if !paired {
 		return errors.New("google messages is not paired")
+	}
+	if state == "reauth_required" || state == "reauthenticating" {
+		return errors.New("google account authentication must be refreshed before reconnecting")
 	}
 	if client == nil {
 		m.scheduleReconnect()
 		return nil
 	}
+	m.mu.Lock()
+	if m.client == client {
+		m.status.State = "connecting"
+		m.status.Connected = false
+	}
+	m.mu.Unlock()
 	if err := client.Reconnect(); err != nil {
 		m.setError("degraded", err)
 		return err
 	}
-	m.markConnected()
 	return m.saveCurrentSession()
 }
 
@@ -568,6 +609,10 @@ func (m *Manager) Unpair() error {
 func (m *Manager) markConnected() {
 	now := time.Now().UTC()
 	m.mu.Lock()
+	if m.status.State == "reauth_required" || m.status.State == "reauthenticating" {
+		m.mu.Unlock()
+		return
+	}
 	m.status.State = "connected"
 	m.status.Paired = true
 	m.status.Connected = true
@@ -597,6 +642,10 @@ func (m *Manager) markLoggedOut() {
 
 func (m *Manager) setError(state string, err error) {
 	m.mu.Lock()
+	if m.status.State == "reauth_required" || m.status.State == "reauthenticating" {
+		m.mu.Unlock()
+		return
+	}
 	m.status.State = state
 	m.status.Connected = false
 	if err != nil {
