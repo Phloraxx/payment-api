@@ -1,0 +1,41 @@
+name: PR19 client event gate fix
+
+on:
+  push:
+    branches: [hotfix/gmessages-google-reauth]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: hotfix/gmessages-google-reauth
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Wire event gate
+        shell: python
+        run: |
+          from pathlib import Path
+          path = Path('internal/gmessages/manager.go')
+          source = path.read_text()
+          old = '''func (m *Manager) newClient(session *libgm.AuthData) *libgm.Client {\n\tclient := libgm.NewClient(session, nil, m.logger.With().Str("component", "libgm").Logger())\n\tclient.SetEventHandler(func(raw any) {\n\t\tm.handleClientEvent(client, raw)\n\t})\n\treturn client\n}\n'''
+          new = '''func (m *Manager) newClient(session *libgm.AuthData) *libgm.Client {\n\tclient := libgm.NewClient(session, nil, m.logger.With().Str("component", "libgm").Logger())\n\tm.registerClientEventHandler(client)\n\treturn client\n}\n'''
+          if source.count(old) != 1:
+              raise SystemExit(f'expected one newClient block, found {source.count(old)}')
+          path.write_text(source.replace(old, new, 1))
+      - name: Format
+        run: gofmt -w internal/gmessages/manager.go internal/gmessages/client_events.go internal/gmessages/reauth.go
+      - name: Commit manager wiring
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add internal/gmessages/manager.go internal/gmessages/client_events.go internal/gmessages/reauth.go
+          git diff --cached --check
+          git commit -m "Drain retired Google Messages client events"
+          git push origin HEAD:hotfix/gmessages-google-reauth
