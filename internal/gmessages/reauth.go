@@ -14,9 +14,9 @@ import (
 
 const (
 	googleReauthRequiredMessage = "Google account authentication expired; refresh the Google login to reconnect"
-	googleAuthFailedMessage      = "google account authentication failed; refresh the browser cookies and try again"
-	googleAuthVerifyMessage      = "google account authentication could not be verified; try again"
-	googleWrongAccountMessage    = "google login belongs to a different account; use the account already paired with this phone"
+	googleAuthFailedMessage     = "google account authentication failed; refresh the browser cookies and try again"
+	googleAuthVerifyMessage     = "google account authentication could not be verified; try again"
+	googleWrongAccountMessage   = "google login belongs to a different account; use the account already paired with this phone"
 )
 
 func isGoogleAuthError(err error) bool {
