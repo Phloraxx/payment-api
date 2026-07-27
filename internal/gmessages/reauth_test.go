@@ -145,3 +145,26 @@ func TestStaleReconnectTimerCannotReplaceNewClient(t *testing.T) {
 		t.Fatal("stale reconnect timer replaced the newly installed client")
 	}
 }
+
+func TestRetiredClientEventsAreIgnored(t *testing.T) {
+	session := googleTestSession(t)
+	manager := &Manager{
+		cfg:     config.Config{GMessagesEnabled: true},
+		logger:  zerolog.Nop(),
+		session: session,
+		status:  Status{Enabled: true, State: "connecting", Paired: true, PairingMethod: "google"},
+	}
+	retired := manager.newClient(session)
+	current := manager.newClient(session)
+	manager.client = current
+
+	manager.handleClientEvent(retired, &events.ClientReady{})
+	if got := manager.Status(); got.State != "connecting" || got.Connected {
+		t.Fatalf("retired client event changed status: %#v", got)
+	}
+
+	manager.handleClientEvent(current, &events.ClientReady{})
+	if got := manager.Status(); got.State != "connected" || !got.Connected {
+		t.Fatalf("current client event was ignored: %#v", got)
+	}
+}
