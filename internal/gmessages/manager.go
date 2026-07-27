@@ -64,17 +64,24 @@ func NewManager(cfg config.Config, logger zerolog.Logger, ingest IngestFunc) *Ma
 		logger.Warn().Err(err).Msg("ignoring invalid Google Messages session")
 		return m
 	}
-	if !validSession(session) {
+	if !validPairingSession(session) {
 		m.status = Status{Enabled: true, State: "unpaired"}
 		return m
 	}
 	m.session = session
+	state := "disconnected"
+	lastError := ""
+	if session.IsGoogleAccount() && !googleSessionHasRequiredCookies(session) {
+		state = "reauth_required"
+		lastError = googleReauthRequiredMessage
+	}
 	m.status = Status{
 		Enabled:       true,
-		State:         "disconnected",
+		State:         state,
 		Paired:        true,
 		PairingMethod: sessionPairingMethod(session),
 		AccountEmail:  sessionAccountEmail(session),
+		LastError:     lastError,
 	}
 	return m
 }
@@ -117,9 +124,7 @@ func (m *Manager) Stop() {
 	if pairCancel != nil {
 		pairCancel()
 	}
-	if client != nil {
-		client.Disconnect()
-	}
+	m.retireClient(client)
 }
 
 func (m *Manager) Status() Status {
@@ -365,9 +370,7 @@ func (m *Manager) scheduleReconnect() {
 			m.reconnecting = false
 			m.mu.Unlock()
 		}()
-		if client != nil {
-			client.Disconnect()
-		}
+		m.retireClient(client)
 		timer := time.NewTimer(2 * time.Second)
 		select {
 		case <-ctx.Done():
@@ -392,13 +395,14 @@ func (m *Manager) Reconnect() error {
 	}
 	m.mu.RLock()
 	client := m.client
-	paired := validSession(m.session)
+	pairingExists := validPairingSession(m.session)
+	authReady := validSession(m.session)
 	state := m.status.State
 	m.mu.RUnlock()
-	if !paired {
+	if !pairingExists {
 		return errors.New("google messages is not paired")
 	}
-	if state == "reauth_required" || state == "reauthenticating" {
+	if state == "reauth_required" || state == "reauthenticating" || !authReady {
 		return errors.New("google account authentication must be refreshed before reconnecting")
 	}
 	if client == nil {
@@ -431,7 +435,7 @@ func (m *Manager) BeginGooglePair(cookieInput string) (string, string, error) {
 	}
 
 	m.mu.Lock()
-	if validSession(m.session) {
+	if validPairingSession(m.session) {
 		m.mu.Unlock()
 		return "", "", errors.New("google messages is already paired; unpair it before starting a new pairing")
 	}
@@ -458,9 +462,7 @@ func (m *Manager) BeginGooglePair(cookieInput string) (string, string, error) {
 	if oldPairCancel != nil {
 		oldPairCancel()
 	}
-	if oldClient != nil {
-		oldClient.Disconnect()
-	}
+	m.retireClient(oldClient)
 
 	if err := client.FetchConfig(pairCtx); err != nil {
 		pairCancel()
@@ -514,12 +516,9 @@ func (m *Manager) awaitGooglePairResult(client *libgm.Client, cancel context.Can
 }
 
 func (m *Manager) failPairing(client *libgm.Client, err error) {
-	if client != nil {
-		client.Disconnect()
-	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.client != client {
+		m.mu.Unlock()
 		return
 	}
 	if m.pairCancel != nil {
@@ -532,6 +531,8 @@ func (m *Manager) failPairing(client *libgm.Client, err error) {
 	if err != nil {
 		m.status.LastError = err.Error()
 	}
+	m.mu.Unlock()
+	m.retireClient(client)
 }
 
 func googlePairingError(err error) error {
@@ -559,7 +560,7 @@ func (m *Manager) BeginPair() (string, error) {
 		return "", errors.New("google messages connector is disabled")
 	}
 	m.mu.Lock()
-	if validSession(m.session) {
+	if validPairingSession(m.session) {
 		m.mu.Unlock()
 		return "", errors.New("google messages is already paired; unpair it before starting a new pairing")
 	}
@@ -573,9 +574,7 @@ func (m *Manager) BeginPair() (string, error) {
 	client := m.client
 	m.status = Status{Enabled: true, State: "pairing", PairingMethod: "qr"}
 	m.mu.Unlock()
-	if oldClient != nil {
-		oldClient.Disconnect()
-	}
+	m.retireClient(oldClient)
 	qrURL, err := client.StartLogin()
 	if err != nil {
 		m.setError("degraded", err)
@@ -600,7 +599,7 @@ func (m *Manager) Unpair() error {
 	m.mu.Lock()
 	client := m.client
 	pairCancel := m.pairCancel
-	wasPaired := validSession(m.session)
+	wasPaired := validPairingSession(m.session)
 	m.client = nil
 	m.pairCancel = nil
 	m.session = nil
@@ -615,7 +614,7 @@ func (m *Manager) Unpair() error {
 				m.logger.Warn().Err(err).Msg("remote Google Messages unpair failed; deleting local session anyway")
 			}
 		}
-		client.Disconnect()
+		m.retireClient(client)
 	}
 	if err := os.Remove(m.cfg.GMessagesSessionPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -653,6 +652,7 @@ func (m *Manager) markLoggedOut() {
 	}
 	if client != nil {
 		client.Disconnect()
+		go m.retireClient(client)
 	}
 	_ = os.Remove(m.cfg.GMessagesSessionPath)
 }
@@ -683,18 +683,7 @@ func (m *Manager) saveCurrentSession() error {
 }
 
 func validSession(session *libgm.AuthData) bool {
-	return session != nil &&
-		googleSessionHasRequiredCookies(session) &&
-		session.Browser != nil &&
-		session.Mobile != nil &&
-		session.RequestCrypto != nil &&
-		len(session.RequestCrypto.AESKey) == 32 &&
-		len(session.RequestCrypto.HMACKey) > 0 &&
-		session.RefreshKey != nil &&
-		len(session.RefreshKey.D) > 0 &&
-		len(session.RefreshKey.X) > 0 &&
-		len(session.RefreshKey.Y) > 0 &&
-		len(session.TachyonAuthToken) > 0
+	return validPairingSession(session) && googleSessionHasRequiredCookies(session)
 }
 
 func googleSessionHasRequiredCookies(session *libgm.AuthData) bool {
