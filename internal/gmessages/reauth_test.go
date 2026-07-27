@@ -159,12 +159,20 @@ func TestRetiredClientEventsAreIgnored(t *testing.T) {
 	manager.client = current
 
 	manager.handleClientEvent(retired, &events.ClientReady{})
-	if got := manager.Status(); got.State != "connecting" || got.Connected {
-		t.Fatalf("retired client event changed status: %#v", got)
+	manager.mu.RLock()
+	retiredState := manager.status.State
+	retiredConnected := manager.status.Connected
+	manager.mu.RUnlock()
+	if retiredState != "connecting" || retiredConnected {
+		t.Fatalf("retired client event changed manager state: state=%s connected=%t", retiredState, retiredConnected)
 	}
 
 	manager.handleClientEvent(current, &events.ClientReady{})
-	if got := manager.Status(); got.State != "connected" || !got.Connected {
-		t.Fatalf("current client event was ignored: %#v", got)
+	manager.mu.RLock()
+	currentState := manager.status.State
+	currentConnected := manager.status.Connected
+	manager.mu.RUnlock()
+	if currentState != "connected" || !currentConnected {
+		t.Fatalf("current client event was ignored: state=%s connected=%t", currentState, currentConnected)
 	}
 }
