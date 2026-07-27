@@ -12,11 +12,11 @@ func TestGoogleMessagesReauthEndpointRequiresDashboardAuth(t *testing.T) {
 	scenarios := []tests.ApiScenario{
 		{
 			Name: "reauth requires dashboard auth", Method: http.MethodPost,
-			URL: "/api/connector/gmessages/reauth/google",
-			Headers: map[string]string{"Content-Type": "application/json"},
-			Body: strings.NewReader(`{"cookieData":"SID=missing-rest"}`),
-			TestAppFactory: func(t testing.TB) *tests.TestApp { return apiTestFactoryWithGMessages(t) },
-			ExpectedStatus: http.StatusUnauthorized,
+			URL:             "/api/connector/gmessages/reauth/google",
+			Headers:         map[string]string{"Content-Type": "application/json"},
+			Body:            strings.NewReader(`{"cookieData":"SID=missing-rest"}`),
+			TestAppFactory:  func(t testing.TB) *tests.TestApp { return apiTestFactoryWithGMessages(t) },
+			ExpectedStatus:  http.StatusUnauthorized,
 			ExpectedContent: []string{"Dashboard authentication is required."},
 		},
 		{
@@ -26,9 +26,9 @@ func TestGoogleMessagesReauthEndpointRequiresDashboardAuth(t *testing.T) {
 				"Authorization": "Bearer api-secret",
 				"Content-Type":  "application/json",
 			},
-			Body: strings.NewReader(`{"cookieData":"SID=missing-rest"}`),
-			TestAppFactory: func(t testing.TB) *tests.TestApp { return apiTestFactoryWithGMessages(t) },
-			ExpectedStatus: http.StatusUnauthorized,
+			Body:            strings.NewReader(`{"cookieData":"SID=missing-rest"}`),
+			TestAppFactory:  func(t testing.TB) *tests.TestApp { return apiTestFactoryWithGMessages(t) },
+			ExpectedStatus:  http.StatusUnauthorized,
 			ExpectedContent: []string{"Dashboard authentication is required."},
 		},
 	}
