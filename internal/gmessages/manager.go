@@ -171,6 +171,9 @@ func (m *Manager) connectWithBackoff(ctx context.Context) {
 		if err := client.Connect(); err == nil {
 			return
 		} else {
+			if m.handleGoogleAuthFailure(err) {
+				return
+			}
 			m.setError("degraded", err)
 		}
 
@@ -362,7 +365,7 @@ func (m *Manager) scheduleReconnect() {
 		case <-timer.C:
 		}
 		m.mu.Lock()
-		if m.status.State == "reauth_required" || m.status.State == "reauthenticating" {
+		if m.status.State == "reauth_required" || m.status.State == "reauthenticating" || m.client != client {
 			m.mu.Unlock()
 			return
 		}
@@ -398,6 +401,9 @@ func (m *Manager) Reconnect() error {
 	}
 	m.mu.Unlock()
 	if err := client.Reconnect(); err != nil {
+		if m.handleGoogleAuthFailure(err) {
+			return errors.New("google account authentication must be refreshed before reconnecting")
+		}
 		m.setError("degraded", err)
 		return err
 	}
