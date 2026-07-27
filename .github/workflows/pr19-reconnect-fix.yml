@@ -1,0 +1,59 @@
+name: PR19 reconnect ownership fix
+
+on:
+  push:
+    branches: [hotfix/gmessages-google-reauth]
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: hotfix/gmessages-google-reauth
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - name: Apply reviewed reconnect fixes
+        shell: python
+        run: |
+          from pathlib import Path
+
+          path = Path('internal/gmessages/manager.go')
+          source = path.read_text()
+
+          replacements = [
+              (
+                  '''\t\tif err := client.Connect(); err == nil {\n\t\t\treturn\n\t\t} else {\n\t\t\tm.setError("degraded", err)\n\t\t}\n''',
+                  '''\t\tif err := client.Connect(); err == nil {\n\t\t\treturn\n\t\t} else {\n\t\t\tif m.handleGoogleAuthFailure(err) {\n\t\t\t\treturn\n\t\t\t}\n\t\t\tm.setError("degraded", err)\n\t\t}\n''',
+              ),
+              (
+                  '''\t\tm.mu.Lock()\n\t\tif m.status.State == "reauth_required" || m.status.State == "reauthenticating" {\n\t\t\tm.mu.Unlock()\n\t\t\treturn\n\t\t}\n\t\tm.client = nil\n''',
+                  '''\t\tm.mu.Lock()\n\t\tif m.status.State == "reauth_required" || m.status.State == "reauthenticating" || m.client != client {\n\t\t\tm.mu.Unlock()\n\t\t\treturn\n\t\t}\n\t\tm.client = nil\n''',
+              ),
+              (
+                  '''\tif err := client.Reconnect(); err != nil {\n\t\tm.setError("degraded", err)\n\t\treturn err\n\t}\n''',
+                  '''\tif err := client.Reconnect(); err != nil {\n\t\tif m.handleGoogleAuthFailure(err) {\n\t\t\treturn errors.New("google account authentication must be refreshed before reconnecting")\n\t\t}\n\t\tm.setError("degraded", err)\n\t\treturn err\n\t}\n''',
+              ),
+          ]
+
+          for old, new in replacements:
+              if source.count(old) != 1:
+                  raise SystemExit(f'expected exactly one replacement, found {source.count(old)}')
+              source = source.replace(old, new, 1)
+
+          path.write_text(source)
+      - name: Format
+        run: gofmt -w internal/gmessages/manager.go
+      - name: Commit only manager fix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add internal/gmessages/manager.go
+          git diff --cached --check
+          git commit -m "Fix Google reconnect ownership race"
+          git push origin HEAD:hotfix/gmessages-google-reauth
