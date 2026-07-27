@@ -195,8 +195,21 @@ func (m *Manager) connectWithBackoff(ctx context.Context) {
 
 func (m *Manager) newClient(session *libgm.AuthData) *libgm.Client {
 	client := libgm.NewClient(session, nil, m.logger.With().Str("component", "libgm").Logger())
-	client.SetEventHandler(m.handleEvent)
+	client.SetEventHandler(func(raw any) {
+		m.handleClientEvent(client, raw)
+	})
 	return client
+}
+
+func (m *Manager) handleClientEvent(client *libgm.Client, raw any) {
+	m.mu.RLock()
+	current := m.client == client
+	m.mu.RUnlock()
+	if !current {
+		m.logger.Debug().Type("event_type", raw).Msg("ignoring Google Messages event from retired client")
+		return
+	}
+	m.handleEvent(raw)
 }
 
 func (m *Manager) handleEvent(raw any) {
