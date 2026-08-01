@@ -14,21 +14,36 @@ import (
 const minPrimarySecretLength = 24
 
 type Config struct {
-	DataDir                 string
-	UPIID                   string
-	UPIPayeeName            string
-	APIKey                  string
-	SMSWebhookSecret        string
-	LegacySMSWebhookSecret  string
-	LegacySMSWebhookEnabled bool
-	PaymentTTL              time.Duration
-	AmountQuarantine        time.Duration
-	OutgoingWebhookURL      string
-	OutgoingWebhookSecret   string
-	GMessagesEnabled        bool
-	GMessagesSessionPath    string
-	TestMode                bool
-	RateLimitsEnabled       bool
+	DataDir                    string
+	UPIID                      string
+	UPIPayeeName               string
+	APIKey                     string
+	SMSWebhookSecret           string
+	LegacySMSWebhookSecret     string
+	LegacySMSWebhookEnabled    bool
+	PaymentTTL                 time.Duration
+	AmountQuarantine           time.Duration
+	OutgoingWebhookURL         string
+	OutgoingWebhookSecret      string
+	GMessagesEnabled           bool
+	GMessagesSessionPath       string
+	TestMode                   bool
+	RateLimitsEnabled          bool
+	RetentionEnabled           bool
+	SMSRawRetention            time.Duration
+	ReconciliationRawRetention time.Duration
+	AuditRetention             time.Duration
+	BackupCron                 string
+	BackupMaxKeep              int
+	BackupS3Enabled            bool
+	BackupS3Bucket             string
+	BackupS3Region             string
+	BackupS3Endpoint           string
+	BackupS3AccessKey          string
+	BackupS3Secret             string
+	BackupS3ForcePathStyle     bool
+	OperatorAlertWebhookURL    string
+	OperatorAlertWebhookSecret string
 }
 
 func Load() (Config, error) {
@@ -64,23 +79,66 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	retentionEnabled, err := boolEnv("PAYGATE_RETENTION_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	smsRawRetention, err := durationEnv("SMS_RAW_RETENTION", 90*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	reconciliationRetention, err := durationEnv("RECONCILIATION_RAW_RETENTION", 365*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	auditRetention, err := durationEnv("AUDIT_RETENTION", 2*365*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	backupMaxKeep, err := intEnv("PAYGATE_BACKUP_MAX_KEEP", 14)
+	if err != nil {
+		return Config{}, err
+	}
+	backupS3Enabled, err := boolEnv("PAYGATE_BACKUP_S3_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
+	backupS3ForcePathStyle, err := boolEnv("PAYGATE_BACKUP_S3_FORCE_PATH_STYLE", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	dataDir := strings.TrimSpace(env("PB_DATA_DIR", "./pb_data"))
 	cfg := Config{
-		DataDir:                 dataDir,
-		UPIID:                   strings.TrimSpace(os.Getenv("UPI_ID")),
-		UPIPayeeName:            strings.TrimSpace(firstNonEmpty(os.Getenv("UPI_PAYEE_NAME"), os.Getenv("UPI_NAME"), "PayGate")),
-		APIKey:                  strings.TrimSpace(os.Getenv("PAYGATE_API_KEY")),
-		SMSWebhookSecret:        strings.TrimSpace(os.Getenv("SMS_WEBHOOK_SECRET")),
-		LegacySMSWebhookSecret:  strings.TrimSpace(os.Getenv("WEBHOOK_SECRET")),
-		LegacySMSWebhookEnabled: legacyEnabled,
-		PaymentTTL:              paymentTTL,
-		AmountQuarantine:        quarantine,
-		OutgoingWebhookURL:      strings.TrimSpace(firstNonEmpty(os.Getenv("OUTGOING_WEBHOOK_URL"), os.Getenv("PAYMENT_WEBHOOK_URL"))),
-		OutgoingWebhookSecret:   strings.TrimSpace(firstNonEmpty(os.Getenv("OUTGOING_WEBHOOK_SECRET"), os.Getenv("PAYMENT_WEBHOOK_SECRET"))),
-		GMessagesEnabled:        gmessagesEnabled,
-		TestMode:                testMode,
-		RateLimitsEnabled:       rateLimitsEnabled,
+		DataDir:                    dataDir,
+		UPIID:                      strings.TrimSpace(os.Getenv("UPI_ID")),
+		UPIPayeeName:               strings.TrimSpace(firstNonEmpty(os.Getenv("UPI_PAYEE_NAME"), os.Getenv("UPI_NAME"), "PayGate")),
+		APIKey:                     strings.TrimSpace(os.Getenv("PAYGATE_API_KEY")),
+		SMSWebhookSecret:           strings.TrimSpace(os.Getenv("SMS_WEBHOOK_SECRET")),
+		LegacySMSWebhookSecret:     strings.TrimSpace(os.Getenv("WEBHOOK_SECRET")),
+		LegacySMSWebhookEnabled:    legacyEnabled,
+		PaymentTTL:                 paymentTTL,
+		AmountQuarantine:           quarantine,
+		OutgoingWebhookURL:         strings.TrimSpace(firstNonEmpty(os.Getenv("OUTGOING_WEBHOOK_URL"), os.Getenv("PAYMENT_WEBHOOK_URL"))),
+		OutgoingWebhookSecret:      strings.TrimSpace(firstNonEmpty(os.Getenv("OUTGOING_WEBHOOK_SECRET"), os.Getenv("PAYMENT_WEBHOOK_SECRET"))),
+		GMessagesEnabled:           gmessagesEnabled,
+		TestMode:                   testMode,
+		RateLimitsEnabled:          rateLimitsEnabled,
+		RetentionEnabled:           retentionEnabled,
+		SMSRawRetention:            smsRawRetention,
+		ReconciliationRawRetention: reconciliationRetention,
+		AuditRetention:             auditRetention,
+		BackupCron:                 strings.TrimSpace(env("PAYGATE_BACKUP_CRON", "0 3 * * *")),
+		BackupMaxKeep:              backupMaxKeep,
+		BackupS3Enabled:            backupS3Enabled,
+		BackupS3Bucket:             strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_BUCKET")),
+		BackupS3Region:             strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_REGION")),
+		BackupS3Endpoint:           strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_ENDPOINT")),
+		BackupS3AccessKey:          strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_ACCESS_KEY")),
+		BackupS3Secret:             strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_SECRET")),
+		BackupS3ForcePathStyle:     backupS3ForcePathStyle,
+		OperatorAlertWebhookURL:    strings.TrimSpace(os.Getenv("OPERATOR_ALERT_WEBHOOK_URL")),
+		OperatorAlertWebhookSecret: strings.TrimSpace(os.Getenv("OPERATOR_ALERT_WEBHOOK_SECRET")),
 	}
 	cfg.GMessagesSessionPath = strings.TrimSpace(os.Getenv("GMESSAGES_SESSION_PATH"))
 	if cfg.GMessagesSessionPath == "" {
@@ -129,6 +187,31 @@ func (c Config) ValidateServe() error {
 			return fmt.Errorf("OUTGOING_WEBHOOK_SECRET must be at least %d characters when OUTGOING_WEBHOOK_URL is configured", minPrimarySecretLength)
 		}
 	}
+	if c.RetentionEnabled && (c.SMSRawRetention <= 0 || c.ReconciliationRawRetention <= 0 || c.AuditRetention <= 0) {
+		return errors.New("retention durations must be positive when PAYGATE_RETENTION_ENABLED=true")
+	}
+	if c.BackupCron != "" && c.BackupMaxKeep < 1 {
+		return errors.New("PAYGATE_BACKUP_MAX_KEEP must be at least 1 when backups are enabled")
+	}
+	if (c.OperatorAlertWebhookURL == "") != (c.OperatorAlertWebhookSecret == "") {
+		return errors.New("OPERATOR_ALERT_WEBHOOK_URL and OPERATOR_ALERT_WEBHOOK_SECRET must be configured together")
+	}
+	if c.OperatorAlertWebhookURL != "" {
+		if err := validateHTTPURL("OPERATOR_ALERT_WEBHOOK_URL", c.OperatorAlertWebhookURL); err != nil {
+			return err
+		}
+		if len(c.OperatorAlertWebhookSecret) < minPrimarySecretLength {
+			return fmt.Errorf("OPERATOR_ALERT_WEBHOOK_SECRET must be at least %d characters", minPrimarySecretLength)
+		}
+	}
+	if c.BackupS3Enabled {
+		if c.BackupS3Bucket == "" || c.BackupS3Region == "" || c.BackupS3Endpoint == "" || c.BackupS3AccessKey == "" || c.BackupS3Secret == "" {
+			return errors.New("all PAYGATE_BACKUP_S3_* values are required when S3 backup storage is enabled")
+		}
+		if err := validateHTTPURL("PAYGATE_BACKUP_S3_ENDPOINT", c.BackupS3Endpoint); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -164,6 +247,18 @@ func boolEnv(name string, fallback bool) (bool, error) {
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
 		return false, fmt.Errorf("%s must be true or false: %w", name, err)
+	}
+	return parsed, nil
+}
+
+func intEnv(name string, fallback int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be an integer: %w", name, err)
 	}
 	return parsed, nil
 }

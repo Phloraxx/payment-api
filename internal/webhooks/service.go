@@ -50,6 +50,20 @@ func (s *Service) Enabled() bool {
 }
 
 func (s *Service) Schedule(app core.App, event string, payment *core.Record, at time.Time) error {
+	if payment == nil {
+		return errors.New("payment is required for webhook scheduling")
+	}
+	return s.schedule(app, event, payment, nil, at)
+}
+
+func (s *Service) ScheduleRefund(app core.App, event string, payment, refund *core.Record, at time.Time) error {
+	if payment == nil || refund == nil {
+		return errors.New("payment and refund are required for refund webhook scheduling")
+	}
+	return s.schedule(app, event, payment, refund, at)
+}
+
+func (s *Service) schedule(app core.App, event string, payment, refund *core.Record, at time.Time) error {
 	if !s.Enabled() {
 		return nil
 	}
@@ -58,23 +72,35 @@ func (s *Service) Schedule(app core.App, event string, payment *core.Record, at 
 		return err
 	}
 	eventID := "evt_" + security.RandomString(24)
-	body, err := json.Marshal(map[string]any{
-		"id":        eventID,
-		"type":      event,
-		"createdAt": at.UTC().Format(time.RFC3339Nano),
-		"data": map[string]any{
-			"payment": map[string]any{
-				"id":                   payment.Id,
-				"requestedAmountPaise": payment.GetInt("requested_amount"),
-				"payableAmountPaise":   payment.GetInt("payable_amount"),
-				"status":               payment.GetString("status"),
-				"rrn":                  payment.GetString("rrn"),
-				"upiId":                payment.GetString("upi_id"),
-				"payerName":            payment.GetString("payer_name"),
-				"paidAt":               payment.GetDateTime("paid_at").String(),
-				"externalId":           payment.GetString("external_id"),
-			},
+	data := map[string]any{
+		"payment": map[string]any{
+			"id":                   payment.Id,
+			"requestedAmountPaise": payment.GetInt("requested_amount"),
+			"payableAmountPaise":   payment.GetInt("payable_amount"),
+			"status":               payment.GetString("status"),
+			"rrn":                  payment.GetString("rrn"),
+			"upiId":                payment.GetString("upi_id"),
+			"payerName":            payment.GetString("payer_name"),
+			"paidAt":               payment.GetDateTime("paid_at").String(),
+			"externalId":           payment.GetString("external_id"),
 		},
+	}
+	if refund != nil {
+		data["refund"] = map[string]any{
+			"id":          refund.Id,
+			"amountPaise": refund.GetInt("amount"),
+			"status":      refund.GetString("status"),
+			"reason":      refund.GetString("reason"),
+			"reference":   refund.GetString("reference"),
+			"externalId":  refund.GetString("external_id"),
+			"requestedAt": refund.GetDateTime("requested_at").String(),
+			"completedAt": refund.GetDateTime("completed_at").String(),
+		}
+	}
+	body, err := json.Marshal(map[string]any{
+		"id": eventID, "type": event,
+		"createdAt": at.UTC().Format(time.RFC3339Nano),
+		"data":      data,
 	})
 	if err != nil {
 		return fmt.Errorf("marshal webhook payload: %w", err)
@@ -83,6 +109,9 @@ func (s *Service) Schedule(app core.App, event string, payment *core.Record, at 
 	record.Set("event_id", eventID)
 	record.Set("event", event)
 	record.Set("payment", payment.Id)
+	if refund != nil {
+		record.Set("refund", refund.Id)
+	}
 	record.Set("url", s.Config.OutgoingWebhookURL)
 	record.Set("body", string(body))
 	record.Set("attempts", 0)

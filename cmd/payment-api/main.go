@@ -12,10 +12,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Phloraxx/payment-api/internal/alerts"
 	"github.com/Phloraxx/payment-api/internal/api"
+	"github.com/Phloraxx/payment-api/internal/audit"
+	"github.com/Phloraxx/payment-api/internal/backups"
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/reconciliation"
+	"github.com/Phloraxx/payment-api/internal/refunds"
+	"github.com/Phloraxx/payment-api/internal/retention"
+	"github.com/Phloraxx/payment-api/internal/reviews"
 	"github.com/Phloraxx/payment-api/internal/sms"
 	"github.com/Phloraxx/payment-api/internal/webhooks"
 	_ "github.com/Phloraxx/payment-api/migrations"
@@ -44,26 +51,42 @@ func main() {
 	webhookService := webhooks.NewService(app, cfg)
 	webhookService.Logger = stdLogger
 	paymentService := payments.NewService(app, cfg, webhookService)
+	auditService := audit.NewService(app)
+	alertService := alerts.NewService(app)
+	alertService.ConfigureWebhook(cfg.OperatorAlertWebhookURL, cfg.OperatorAlertWebhookSecret)
+	reviewService := reviews.NewService(app, paymentService, auditService)
 	smsService := sms.NewService(app, paymentService)
+	smsService.Reviews = reviewService
+	reconciliationService := reconciliation.NewService(app, reviewService, alertService, auditService)
+	refundService := refunds.NewService(app, auditService, webhookService)
+	retentionService := retention.NewService(app, cfg)
+	backupService := backups.NewService(app, cfg, alertService)
+	backupService.RegisterHooks()
 	gmessagesManager := gmessages.NewManager(cfg, gmessagesLogger, func(input sms.Input) error {
 		_, err := smsService.Ingest(input)
 		return err
 	})
-	api.New(cfg, paymentService, smsService, gmessagesManager).Register(app)
+	apiService := api.New(cfg, paymentService, smsService, gmessagesManager)
+	apiService.Reviews = reviewService
+	apiService.Reconciliation = reconciliationService
+	apiService.Alerts = alertService
+	apiService.Refunds = refundService
+	apiService.Backups = backupService
+	apiService.Register(app)
 	registerPairCommand(app, cfg, gmessagesLogger)
 	registerHealthcheckCommand(app)
+	registerBackupCommands(app, backupService)
 
 	rootCtx, rootCancel := context.WithCancel(context.Background())
 	app.OnServe().BindFunc(func(e *core.ServeEvent) error {
 		rateLimits := &e.App.Settings().RateLimits
 		rateLimits.Enabled = cfg.RateLimitsEnabled
-		rateLimits.Rules = append([]core.RateLimitRule{
-			{Label: "POST /api/events/sms", MaxRequests: 60, Duration: 60},
-			{Label: "POST /api/webhook", MaxRequests: 30, Duration: 60},
-			{Label: "POST /api/payments", MaxRequests: 120, Duration: 60},
-		}, rateLimits.Rules...)
+		rateLimits.Rules = mergeManagedRateLimitRules(rateLimits.Rules)
 		if err := cfg.ValidateServe(); err != nil {
 			return err
+		}
+		if err := backupService.Configure(); err != nil {
+			return fmt.Errorf("configure backups: %w", err)
 		}
 		if cfg.LegacySMSWebhookEnabled {
 			stdLogger.Warn("legacy /api/webhook compatibility route is enabled; rotate the old relay to SMS_WEBHOOK_SECRET and disable it")
@@ -90,6 +113,57 @@ func main() {
 	})
 	app.Cron().MustAdd("paygate-webhook-retries", "* * * * *", func() {
 		webhookService.Wake()
+	})
+	app.Cron().MustAdd("paygate-operator-alert-deliveries", "* * * * *", func() { alertService.Wake() })
+	app.Cron().MustAdd("paygate-operational-alerts", "* * * * *", func() {
+		if err := alertService.CheckConnector(gmessagesManager.Status()); err != nil {
+			stdLogger.Error("connector alert check failed", "error", err)
+		}
+		capacity, err := paymentService.Capacity()
+		if err != nil {
+			stdLogger.Error("capacity alert calculation failed", "error", err)
+		} else if err := alertService.CheckCapacity(capacity); err != nil {
+			stdLogger.Error("capacity alert check failed", "error", err)
+		}
+		if err := alertService.CheckWebhookExhaustion(); err != nil {
+			stdLogger.Error("webhook exhaustion alert check failed", "error", err)
+		}
+	})
+	app.Cron().MustAdd("paygate-retention", "17 2 * * *", func() {
+		result, err := retentionService.Run()
+		if err != nil {
+			stdLogger.Error("retention job failed", "error", err)
+			return
+		}
+		if result.SMSEventsRedacted+result.ReconciliationEntriesRedacted+result.AuditEventsDeleted > 0 {
+			stdLogger.Info("retention job completed", "smsRedacted", result.SMSEventsRedacted, "reconciliationRedacted", result.ReconciliationEntriesRedacted, "auditDeleted", result.AuditEventsDeleted)
+		}
+	})
+	app.Cron().MustAdd("paygate-backup-verify", "23 4 * * *", func() {
+		if cfg.BackupCron == "" {
+			return
+		}
+		status, err := backupService.GetStatus(context.Background(), true)
+		if err != nil {
+			stdLogger.Error("backup verification failed", "error", err)
+			return
+		}
+		if !status.LatestVerified {
+			stdLogger.Error("latest backup is not verified", "error", status.VerificationError)
+		}
+	})
+	app.Cron().MustAdd("paygate-restore-drill", "41 4 1 * *", func() {
+		if cfg.BackupCron == "" {
+			return
+		}
+		result, err := backupService.RestoreDrill(context.Background())
+		if err != nil {
+			stdLogger.Error("monthly backup restore drill failed", "error", err)
+			_, _, _ = alertService.Open(alerts.Input{Kind: "backup_failed", Severity: "critical", DedupeKey: "backup:restore-drill", Message: "Monthly backup restore drill failed", Details: map[string]any{"error": err.Error()}})
+			return
+		}
+		_ = alertService.Resolve("backup:restore-drill")
+		stdLogger.Info("monthly backup restore drill passed", "backup", result.BackupName, "databases", result.IntegrityChecked)
 	})
 
 	if err := app.Start(); err != nil {
@@ -133,4 +207,67 @@ func registerHealthcheckCommand(app *pocketbase.PocketBase) {
 	}
 	cmd.Flags().StringVar(&endpoint, "url", "http://127.0.0.1:3000/api/health", "health endpoint URL")
 	app.RootCmd.AddCommand(cmd)
+}
+
+func mergeManagedRateLimitRules(existing []core.RateLimitRule) []core.RateLimitRule {
+	managed := []core.RateLimitRule{
+		{Label: "POST /api/events/sms", MaxRequests: 60, Duration: 60},
+		{Label: "POST /api/webhook", MaxRequests: 30, Duration: 60},
+		{Label: "POST /api/payments", MaxRequests: 120, Duration: 60},
+	}
+	labels := make(map[string]struct{}, len(managed))
+	for _, rule := range managed {
+		labels[rule.Label] = struct{}{}
+	}
+	result := append([]core.RateLimitRule(nil), managed...)
+	for _, rule := range existing {
+		if _, controlled := labels[rule.Label]; controlled {
+			continue
+		}
+		result = append(result, rule)
+	}
+	return result
+}
+
+func registerBackupCommands(app *pocketbase.PocketBase, service *backups.Service) {
+	createCmd := &cobra.Command{
+		Use:   "backup-create",
+		Short: "Create a PayGate/PocketBase backup now",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name, err := service.Create(cmd.Context())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), name)
+			return nil
+		},
+	}
+	verifyCmd := &cobra.Command{
+		Use:   "backup-verify",
+		Short: "Download and verify the latest PayGate backup archive",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			status, err := service.GetStatus(cmd.Context(), true)
+			if err != nil {
+				return err
+			}
+			if !status.LatestVerified {
+				return fmt.Errorf("backup verification failed: %s", status.VerificationError)
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "verified %s (%d bytes)\n", status.Latest.Name, status.Latest.Size)
+			return nil
+		},
+	}
+	restoreDrillCmd := &cobra.Command{
+		Use:   "backup-restore-drill",
+		Short: "Restore the latest backup into a temporary directory and run database integrity checks",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			result, err := service.RestoreDrill(cmd.Context())
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "restore drill passed for %s (%d database files)\n", result.BackupName, result.IntegrityChecked)
+			return nil
+		},
+	}
+	app.RootCmd.AddCommand(createCmd, verifyCmd, restoreDrillCmd)
 }

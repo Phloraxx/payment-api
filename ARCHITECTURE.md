@@ -362,3 +362,21 @@ web/                      React/Vite source
 10. Domain writes are backend-owned.
 11. Google Messages is a replaceable evidence connector, not the payment model.
 12. `/app/pb_data` must be persistent in production.
+
+## 20. Operational hardening
+
+The hardening migration adds six operator-domain collections:
+
+- `review_cases` links unresolved SMS or reconciliation evidence to candidate payments and records audited resolution;
+- `audit_events` stores attributable operator actions separately from application logs;
+- `reconciliation_runs` and `reconciliation_entries` preserve statement import results without auto-mutating payments;
+- `alerts` deduplicates connector/capacity/webhook/reconciliation/backup failures and maintains a durable signed notification delivery state;
+- `refunds` records manual refund intent, bank reference and lifecycle while enforcing aggregate amount bounds.
+
+Automatic matching and manual matching share the monetary invariants: exact amount equality, globally unique RRN and evidence time not earlier than payment creation. Manual review selects the intended record but cannot override those checks.
+
+Bank evidence time is authoritative for on-time/late classification. Ingestion time remains operational metadata. An SMS delivered after expiry can still confirm `paid` when its provider timestamp proves that the bank transaction occurred within the original payment window.
+
+Statement imports are intentionally report-first. Exact RRN+amount rows reconcile; contradictions create review cases. XLSX files are ZIP-validated before parsing to limit path traversal and decompression expansion.
+
+Backup configuration uses PocketBase's backup filesystem and cron. Archive verification reads every ZIP member. Restore drills extract to a temporary directory and run SQLite integrity checks without replacing production data.

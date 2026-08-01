@@ -124,9 +124,11 @@ func TestIngestIgnoresUnrelatedMessagesButKeepsAuditRecord(t *testing.T) {
 func TestIngestPersistsMissingRRNFailure(t *testing.T) {
 	service, _, app, _ := smsTestService(t)
 	result, err := service.Ingest(Input{Source: "android_webhook", SourceEventID: "missing-rrn", Body: "Received Rs.100.01 from user@oksbi"})
-	var domainErr *domain.Error
-	if !errors.As(err, &domainErr) || domainErr.Code != "SMS_MISSING_RRN" {
+	if err != nil {
 		t.Fatalf("error = %v", err)
+	}
+	if result.Status != "review_required" || result.Action != "missing_rrn" {
+		t.Fatalf("result = %+v", result)
 	}
 	event, findErr := app.FindRecordById("sms_events", result.EventID)
 	if findErr != nil {
@@ -143,7 +145,7 @@ func TestIngestUnmatchedBankCreditDoesNotMutatePayments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "unmatched" || result.PaymentID != "" {
+	if result.Status != "review_required" || result.Action != "unmatched" || result.PaymentID != "" {
 		t.Fatalf("result = %+v", result)
 	}
 	count, _ := app.CountRecords("payments")
@@ -179,8 +181,8 @@ func TestDelayedOldSMSCannotConfirmReusedAmount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "unmatched" || result.PaymentID != "" {
-		t.Fatalf("old catch-up SMS result = %+v; want unmatched", result)
+	if result.Status != "review_required" || result.Action != "unmatched" || result.PaymentID != "" {
+		t.Fatalf("old catch-up SMS result = %+v; want review_required unmatched", result)
 	}
 	storedSecond, err := paymentService.Get(second.ID)
 	if err != nil {

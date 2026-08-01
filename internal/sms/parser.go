@@ -10,26 +10,42 @@ import (
 )
 
 var (
-	// Intentionally anchored to credit language. We do not infer payments from
-	// arbitrary messages that merely contain a rupee amount.
-	bankCreditPattern = regexp.MustCompile(`(?i)(?:payment\s+for\s+)?received\s*(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)`)
-	rrnPattern        = regexp.MustCompile(`(?i)(?:upi\s*ref(?:erence)?|rrn|ref(?:erence)?)(?:\s*(?:no|number|id))?\s*[:.#\- ]*([0-9]{8,24})`)
-	upiPattern        = regexp.MustCompile(`(?i)[a-z0-9][a-z0-9._-]{0,127}@[a-z0-9][a-z0-9._-]{0,127}`)
-	fromPattern       = regexp.MustCompile(`(?i)\bfrom\s+(.+?)(?:\s+on\s+|\s+upi\s+ref|\.|$)`)
+	currencyAmount       = `(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)`
+	creditAmountPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(?:payment\s+for\s+)?received\s*(?:payment\s+of\s*)?` + currencyAmount),
+		regexp.MustCompile(`(?i)` + currencyAmount + `\s*(?:has\s+been\s+)?(?:received|credited|deposited)\b`),
+		regexp.MustCompile(`(?i)\b(?:credited|deposited)\b.{0,120}?` + currencyAmount),
+		regexp.MustCompile(`(?i)\b(?:a/?c|account)\b.{0,100}?\bcredited\b.{0,80}?` + currencyAmount),
+	}
+	// Reversal/refund/cashback credits are not customer checkout payments and
+	// must never satisfy a PayGate order merely because the amount happens to match.
+	nonPaymentCreditPattern = regexp.MustCompile(`(?i)\b(?:reversal|reversed|refund(?:ed)?|cashback|reward|interest|salary|chargeback)\b`)
+	debitPattern            = regexp.MustCompile(`(?i)\b(?:debited|sent|paid\s+to|withdrawn|purchase)\b`)
+	rrnPatterns             = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\bupi\s*(?:ref(?:erence)?|txn|transaction)(?:\s*(?:no|number|id))?\s*[:.#\- ]*([a-z0-9]{8,35})`),
+		regexp.MustCompile(`(?i)\brrn(?:\s*(?:no|number|id))?\s*[:.#\- ]*([a-z0-9]{8,35})`),
+		regexp.MustCompile(`(?i)\butr(?:\s*(?:no|number|id))?\s*[:.#\- ]*([a-z0-9]{8,35})`),
+		regexp.MustCompile(`(?i)\bref(?:erence)?(?:\s*(?:no|number|id))?\s*[:.#\- ]*([a-z0-9]{8,35})`),
+	}
+	upiPattern  = regexp.MustCompile(`(?i)[a-z0-9][a-z0-9._-]{0,127}@[a-z0-9][a-z0-9._-]{0,127}`)
+	fromPattern = regexp.MustCompile(`(?i)\b(?:from|by)\s+(.+?)(?:\s+on\s+|\s+(?:upi\s+)?(?:ref|rrn|utr)|\.|$)`)
 )
 
 var ErrUnrecognized = errors.New("SMS is not a recognized bank credit message")
 
 func LooksLikeBankCredit(body string) bool {
-	return bankCreditPattern.MatchString(body)
+	if nonPaymentCreditPattern.MatchString(body) || debitPattern.MatchString(body) {
+		return false
+	}
+	return findCreditAmount(body) != ""
 }
 
 func Parse(body string) (domain.ParsedSMS, error) {
-	match := bankCreditPattern.FindStringSubmatch(body)
-	if len(match) < 2 {
+	if !LooksLikeBankCredit(body) {
 		return domain.ParsedSMS{}, ErrUnrecognized
 	}
-	amount, err := money.ParseAmount(match[1])
+	amountText := findCreditAmount(body)
+	amount, err := money.ParseAmount(amountText)
 	if err != nil || amount <= 0 {
 		if err != nil {
 			return domain.ParsedSMS{}, err
@@ -37,14 +53,11 @@ func Parse(body string) (domain.ParsedSMS, error) {
 		return domain.ParsedSMS{}, money.ErrInvalidAmount
 	}
 
-	rrn := ""
-	if match := rrnPattern.FindStringSubmatch(body); len(match) > 1 {
-		rrn = strings.TrimSpace(match[1])
-	}
+	rrn := ExtractReference(body)
 	upiID := strings.TrimSpace(upiPattern.FindString(body))
 	payerName := ""
 	if from := fromPattern.FindStringSubmatch(body); len(from) > 1 {
-		payerName = strings.TrimSpace(from[1])
+		payerName = cleanPayerName(from[1])
 		if strings.EqualFold(payerName, upiID) {
 			payerName = ""
 		}
@@ -52,10 +65,37 @@ func Parse(body string) (domain.ParsedSMS, error) {
 
 	return domain.ParsedSMS{
 		AmountPaise: amount,
-		RRN:         rrn,
+		RRN:         truncateRunes(rrn, 64),
 		UPIId:       truncateRunes(upiID, 255),
 		PayerName:   truncateRunes(payerName, 255),
 	}, nil
+}
+
+func ExtractReference(body string) string {
+	for _, pattern := range rrnPatterns {
+		if match := pattern.FindStringSubmatch(body); len(match) > 1 {
+			return truncateRunes(strings.ToUpper(strings.TrimSpace(match[1])), 64)
+		}
+	}
+	return ""
+}
+
+func findCreditAmount(body string) string {
+	for _, pattern := range creditAmountPatterns {
+		if match := pattern.FindStringSubmatch(body); len(match) > 1 {
+			return match[1]
+		}
+	}
+	return ""
+}
+
+func cleanPayerName(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, " ,;:-")
+	if upi := upiPattern.FindString(value); upi != "" {
+		value = strings.TrimSpace(strings.Replace(value, upi, "", 1))
+	}
+	return value
 }
 
 func truncateRunes(value string, max int) string {

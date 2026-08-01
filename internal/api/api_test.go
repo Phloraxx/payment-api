@@ -292,7 +292,7 @@ func TestLegacyWebhookAliasIsExplicitlyGated(t *testing.T) {
 			}, nil)
 		},
 		ExpectedStatus:  http.StatusAccepted,
-		ExpectedContent: []string{`"status":"unmatched"`},
+		ExpectedContent: []string{`"status":"review_required"`, `"action":"unmatched"`},
 		AfterTestFunc: func(t testing.TB, app *tests.TestApp, _ *http.Response) {
 			records, err := app.FindRecordsByFilter("sms_events", "", "-created", 1, 0)
 			if err != nil || len(records) != 1 {

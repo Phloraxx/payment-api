@@ -4,10 +4,15 @@ import { formatDate } from "../components/common";
 import { pb } from "../pb";
 
 const smsFields = ["source", "source_event_id", "message_time", "sender", "body", "amount", "rrn", "upi_id", "payer_name", "processing_status", "matched_payment", "error"];
+const auditFields = ["action", "actor_email", "entity_type", "entity_id", "summary", "details", "occurred_at"];
 const webhookFields = ["event_id", "event", "payment", "status", "attempts", "response_code", "next_attempt_at", "last_attempt_at", "delivered_at", "last_error"];
 
 export function SMSEvents() {
   return <Records collection="sms_events" title="SMS evidence" fields={smsFields} />;
+}
+
+export function AuditEvents() {
+  return <Records collection="audit_events" title="Operator audit trail" fields={auditFields} />;
 }
 
 export function WebhookDeliveries() {
