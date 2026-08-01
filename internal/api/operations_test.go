@@ -256,3 +256,33 @@ func TestDashboardCapacityAndBackupOperatorRoutes(t *testing.T) {
 		t.Fatalf("drill status=%d body=%s", res.StatusCode, data)
 	}
 }
+
+func TestConfigReportsOperationalFeatureFlags(t *testing.T) {
+	fixture := newOperationsFixture(t)
+	res, data := fixture.request(t, http.MethodGet, "/api/config", nil, "", true)
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("status=%d body=%s", res.StatusCode, data)
+	}
+	if !bytes.Contains(data, []byte(`"operatorAlertWebhookConfigured":false`)) {
+		t.Fatalf("missing operator alert flag: %s", data)
+	}
+}
+
+func TestOperatorSPAUsesSecurityHeadersAndRejectsUnknownBrowserRoutes(t *testing.T) {
+	fixture := newOperationsFixture(t)
+	res, data := fixture.request(t, http.MethodGet, "/", nil, "", false)
+	if res.StatusCode != http.StatusOK || !bytes.Contains(data, []byte("PayGate")) {
+		t.Fatalf("root status=%d body=%s", res.StatusCode, data)
+	}
+	for _, name := range []string{"Content-Security-Policy", "Permissions-Policy", "Referrer-Policy", "Strict-Transport-Security"} {
+		if res.Header.Get(name) == "" {
+			t.Fatalf("missing %s", name)
+		}
+	}
+	for _, path := range []string{"/contact/", "/robots.txt", "/sitemap.xml"} {
+		res, _ := fixture.request(t, http.MethodGet, path, nil, "", false)
+		if res.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s status=%d", path, res.StatusCode)
+		}
+	}
+}

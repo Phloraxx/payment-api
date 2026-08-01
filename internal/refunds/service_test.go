@@ -205,3 +205,45 @@ func TestRefundEventsPersistThroughRealWebhookOutbox(t *testing.T) {
 		t.Fatalf("events requested=%v processing=%v", foundRequested, foundProcessing)
 	}
 }
+
+func TestFailedRefundCannotBeReactivatedBeyondRemainingAmount(t *testing.T) {
+	service, paymentService, _, now, actor, _ := refundTestService(t)
+	payment := createPaidPayment(t, paymentService, *now, 100, "909090909090")
+	first, _, err := service.Request(RequestInput{PaymentID: payment.ID, AmountPaise: payment.PayablePaise, Reason: "First attempt", Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Update(UpdateInput{RefundID: first.Id, Status: "failed", Note: "Bank transfer failed", Actor: actor}); err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := service.Request(RequestInput{PaymentID: payment.ID, AmountPaise: payment.PayablePaise, Reason: "Replacement attempt", Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.Update(UpdateInput{RefundID: first.Id, Status: "processing", Note: "Unsafe retry", Actor: actor})
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != "REFUND_AMOUNT_EXCEEDS_AVAILABLE" {
+		t.Fatalf("reactivation error=%v", err)
+	}
+	if _, err := service.Update(UpdateInput{RefundID: second.Id, Status: "cancelled", Note: "Replacement cancelled", Actor: actor}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Update(UpdateInput{RefundID: first.Id, Status: "processing", Note: "Retry after capacity released", Actor: actor}); err != nil {
+		t.Fatalf("retry after capacity released: %v", err)
+	}
+}
+
+func TestRefundIdempotencyIncludesMetadata(t *testing.T) {
+	service, paymentService, _, now, actor, _ := refundTestService(t)
+	payment := createPaidPayment(t, paymentService, *now, 50, "505050505050")
+	input := RequestInput{PaymentID: payment.ID, AmountPaise: 1000, Reason: "Metadata test", IdempotencyKey: "refund-metadata-idem", Metadata: map[string]any{"order": "A"}, Actor: actor}
+	if _, _, err := service.Request(input); err != nil {
+		t.Fatal(err)
+	}
+	input.Metadata = map[string]any{"order": "B"}
+	_, _, err := service.Request(input)
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != "REFUND_IDEMPOTENCY_CONFLICT" {
+		t.Fatalf("metadata idempotency error=%v", err)
+	}
+}

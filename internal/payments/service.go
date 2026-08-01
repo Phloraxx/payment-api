@@ -22,6 +22,8 @@ import (
 	"github.com/pocketbase/pocketbase/tools/types"
 )
 
+const EvidenceTimestampTolerance = 2 * time.Second
+
 type WebhookScheduler interface {
 	Schedule(app core.App, event string, payment *core.Record, at time.Time) error
 	Wake()
@@ -286,16 +288,18 @@ func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time
 		return nil, "error", false, err
 	}
 
+	createdBefore := evidenceAt.Add(EvidenceTimestampTolerance)
+
 	// Match by when the bank says the credit occurred, not merely when the SMS
 	// happened to reach PayGate. This prevents an on-time payment from becoming
 	// "late" solely because the bank/phone delivered the SMS after expiry.
 	onTime, err := tx.FindRecordsByFilter(
 		"payments",
-		"payable_amount = {:amount} && created_at <= {:evidenceAt} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
+		"payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
 		"created",
 		2,
 		0,
-		dbx.Params{"amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt)},
+		dbx.Params{"amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
 	)
 	if err != nil {
 		return nil, "error", false, err
@@ -323,11 +327,11 @@ func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time
 
 	late, err := tx.FindRecordsByFilter(
 		"payments",
-		"payable_amount = {:amount} && (status = 'expired' || status = 'cancelled') && reuse_after > {:now} && created_at <= {:evidenceAt}",
+		"payable_amount = {:amount} && (status = 'expired' || status = 'cancelled') && reuse_after > {:now} && created_at <= {:createdBefore}",
 		"-created",
 		2,
 		0,
-		dbx.Params{"amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt)},
+		dbx.Params{"amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
 	)
 	if err != nil {
 		return nil, "error", queued, err
@@ -391,8 +395,12 @@ func (s *Service) ManualMatchInApp(tx core.App, paymentID string, parsed domain.
 		evidenceAt = now
 	}
 	createdAt := record.GetDateTime("created_at").Time()
-	if !createdAt.IsZero() && evidenceAt.Before(createdAt) {
+	if !createdAt.IsZero() && evidenceAt.Add(EvidenceTimestampTolerance).Before(createdAt) {
 		return nil, "stale", false, domain.New("STALE_BANK_EVIDENCE", "bank evidence predates this payment", http.StatusConflict)
+	}
+	reuseAfter := record.GetDateTime("reuse_after").Time()
+	if !reuseAfter.IsZero() && evidenceAt.After(reuseAfter) {
+		return nil, "stale", false, domain.New("PAYMENT_QUARANTINE_ELAPSED", "bank transaction occurred after this amount fingerprint became reusable", http.StatusConflict)
 	}
 
 	target := domain.StatusLate

@@ -20,6 +20,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/audit"
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/money"
+	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/reviews"
 	"github.com/Phloraxx/payment-api/internal/sms"
 	"github.com/pocketbase/dbx"
@@ -34,11 +35,12 @@ const (
 )
 
 type Service struct {
-	App     core.App
-	Reviews *reviews.Service
-	Alerts  *alerts.Service
-	Audit   *audit.Service
-	Now     func() time.Time
+	App               core.App
+	Reviews           *reviews.Service
+	Alerts            *alerts.Service
+	Audit             *audit.Service
+	Now               func() time.Time
+	StatementLocation *time.Location
 }
 
 type ImportInput struct {
@@ -74,7 +76,11 @@ type columns struct {
 }
 
 func NewService(app core.App, reviewService *reviews.Service, alertService *alerts.Service, auditService *audit.Service) *Service {
-	return &Service{App: app, Reviews: reviewService, Alerts: alertService, Audit: auditService, Now: time.Now}
+	location, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		location = time.FixedZone("IST", 5*60*60+30*60)
+	}
+	return &Service{App: app, Reviews: reviewService, Alerts: alertService, Audit: auditService, Now: time.Now, StatementLocation: location}
 }
 
 func (s *Service) Import(input ImportInput) (Result, error) {
@@ -100,7 +106,7 @@ func (s *Service) Import(input ImportInput) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	rows, parseErr := parseStatement(input.Filename, input.Data)
+	rows, parseErr := parseStatement(input.Filename, input.Data, s.statementLocation())
 	if parseErr != nil {
 		s.failRun(run, parseErr, now)
 		return Result{}, domain.New("STATEMENT_PARSE_FAILED", parseErr.Error(), 422)
@@ -279,9 +285,12 @@ func reconciliationCandidates(app core.App, amount int64, transactionTime, now t
 	if !transactionTime.IsZero() {
 		return app.FindRecordsByFilter(
 			"payments",
-			"payable_amount = {:amount} && created_at <= {:at} && reuse_after >= {:at}",
+			"payable_amount = {:amount} && created_at <= {:createdBefore} && reuse_after >= {:at}",
 			"-created_at", 10, 0,
-			dbx.Params{"amount": amount, "at": formatDate(transactionTime)},
+			dbx.Params{
+				"amount": amount, "at": formatDate(transactionTime),
+				"createdBefore": formatDate(transactionTime.Add(payments.EvidenceTimestampTolerance)),
+			},
 		)
 	}
 	return app.FindRecordsByFilter(
@@ -290,7 +299,7 @@ func reconciliationCandidates(app core.App, amount int64, transactionTime, now t
 	)
 }
 
-func parseStatement(filename string, data []byte) ([]statementRow, error) {
+func parseStatement(filename string, data []byte, location *time.Location) ([]statementRow, error) {
 	ext := strings.ToLower(filepath.Ext(filename))
 	var table [][]string
 	var err error
@@ -305,7 +314,7 @@ func parseStatement(filename string, data []byte) ([]statementRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	return normalizeTable(table)
+	return normalizeTable(table, location)
 }
 
 func parseDelimited(data []byte) ([][]string, error) {
@@ -399,7 +408,7 @@ func validateXLSXArchive(data []byte) error {
 	return nil
 }
 
-func normalizeTable(table [][]string) ([]statementRow, error) {
+func normalizeTable(table [][]string, location *time.Location) ([]statementRow, error) {
 	headerIndex, cols, headers, err := detectHeader(table)
 	if err != nil {
 		return nil, err
@@ -410,7 +419,7 @@ func normalizeTable(table [][]string) ([]statementRow, error) {
 		if rowEmpty(row) {
 			continue
 		}
-		statement, include := parseRow(index+1, row, cols, headers)
+		statement, include := parseRow(index+1, row, cols, headers, location)
 		if include {
 			result = append(result, statement)
 		}
@@ -450,7 +459,7 @@ func detectHeader(table [][]string) (int, columns, []string, error) {
 	return -1, columns{}, nil, errors.New("could not identify statement headers; include an amount/credit column and narration/reference column")
 }
 
-func parseRow(rowNumber int, row []string, cols columns, headers []string) (statementRow, bool) {
+func parseRow(rowNumber int, row []string, cols columns, headers []string, location *time.Location) (statementRow, bool) {
 	get := func(index int) string {
 		if index < 0 || index >= len(row) {
 			return ""
@@ -487,7 +496,7 @@ func parseRow(rowNumber int, row []string, cols columns, headers []string) (stat
 		return parsed, true
 	}
 	parsed.AmountPaise = amount
-	parsed.TransactionTime = parseStatementDate(get(cols.date))
+	parsed.TransactionTime = parseStatementDate(get(cols.date), location)
 	parsed.RRN = normalizeReference(get(cols.rrn))
 	if parsed.RRN == "" {
 		parsed.RRN = sms.ExtractReference(parsed.Description)
@@ -504,7 +513,7 @@ func parseStatementAmount(value string) (int64, error) {
 	return money.ParseAmount(value)
 }
 
-func parseStatementDate(value string) time.Time {
+func parseStatementDate(value string, location *time.Location) time.Time {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return time.Time{}
@@ -514,14 +523,17 @@ func parseStatementDate(value string) time.Time {
 		"02/01/2006", "02-01-2006 15:04:05", "02-01-2006", "02 Jan 2006", "02-Jan-2006",
 		"01/02/2006", "01/02/2006 15:04:05",
 	}
+	if location == nil {
+		location = time.UTC
+	}
 	for _, format := range formats {
-		if parsed, err := time.ParseInLocation(format, value, time.Local); err == nil {
+		if parsed, err := time.ParseInLocation(format, value, location); err == nil {
 			return parsed.UTC()
 		}
 	}
 	if serial, err := strconv.ParseFloat(value, 64); err == nil && serial > 1 {
 		if parsed, err := excelize.ExcelDateToTime(serial, false); err == nil {
-			return parsed.UTC()
+			return time.Date(parsed.Year(), parsed.Month(), parsed.Day(), parsed.Hour(), parsed.Minute(), parsed.Second(), parsed.Nanosecond(), location).UTC()
 		}
 	}
 	return time.Time{}
@@ -585,6 +597,13 @@ func truncate(value string, max int) string {
 		return value
 	}
 	return value[:max]
+}
+
+func (s *Service) statementLocation() *time.Location {
+	if s.StatementLocation == nil {
+		return time.UTC
+	}
+	return s.StatementLocation
 }
 
 func (s *Service) now() time.Time {

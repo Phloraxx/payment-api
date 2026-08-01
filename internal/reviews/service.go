@@ -3,7 +3,6 @@ package reviews
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
 
@@ -276,26 +275,4 @@ func truncate(value string, max int) string {
 		return value
 	}
 	return value[:max]
-}
-
-func CandidatePaymentIDs(app core.App, amountPaise int64, now time.Time) ([]string, error) {
-	if amountPaise <= 0 {
-		return nil, nil
-	}
-	records, err := app.FindRecordsByFilter(
-		"payments",
-		"payable_amount = {:amount} && reuse_after > {:now}",
-		"-created_at",
-		10,
-		0,
-		dbx.Params{"amount": amountPaise, "now": now.UTC().Format("2006-01-02 15:04:05.000Z")},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("find review candidates: %w", err)
-	}
-	ids := make([]string, 0, len(records))
-	for _, record := range records {
-		ids = append(ids, record.Id)
-	}
-	return ids, nil
 }

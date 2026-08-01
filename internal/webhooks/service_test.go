@@ -152,3 +152,36 @@ func TestConcurrentWebhookPassesClaimDeliveryOnce(t *testing.T) {
 		t.Fatalf("HTTP requests = %d; want exactly 1", got)
 	}
 }
+
+func TestWebhookClientDoesNotFollowRedirects(t *testing.T) {
+	app := webhookTestApp(t)
+	now := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	var redirected atomic.Int32
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer destination.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+	cfg := config.Config{PaymentTTL: time.Minute, AmountQuarantine: time.Hour, OutgoingWebhookURL: redirector.URL, OutgoingWebhookSecret: "redirect-secret"}
+	paymentID := createWebhookTestPayment(t, app, cfg, now)
+	payment, _ := app.FindRecordById("payments", paymentID)
+	service := NewService(app, cfg)
+	service.Now = func() time.Time { return now }
+	if err := service.Schedule(app, "payment.paid", payment, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SendPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if redirected.Load() != 0 {
+		t.Fatalf("redirect destination received %d requests", redirected.Load())
+	}
+	records, _ := app.FindAllRecords("webhook_deliveries")
+	if len(records) != 1 || records[0].GetString("status") != "failed" || records[0].GetInt("response_code") != http.StatusTemporaryRedirect {
+		t.Fatalf("delivery=%v", records)
+	}
+}

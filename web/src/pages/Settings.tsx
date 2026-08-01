@@ -21,6 +21,7 @@ type SafeConfig = {
   backupMaxKeep: number;
   backupOffsite: boolean;
   operatorAlertWebhookConfigured: boolean;
+  statementTimezone: string;
   connector: Connector;
 };
 
@@ -292,6 +293,7 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
         <div><dt>Backup schedule</dt><dd>{config.backupEnabled ? `${config.backupCron} · keep ${config.backupMaxKeep}` : "Disabled"}</dd></div>
         <div><dt>Backup storage</dt><dd>{config.backupOffsite ? "S3-compatible offsite" : "Local persistent volume"}</dd></div>
         <div><dt>Operator alert webhook</dt><dd>{config.operatorAlertWebhookConfigured ? "Configured with signed retries" : "Dashboard only"}</dd></div>
+        <div><dt>Statement timezone</dt><dd>{config.statementTimezone || "Asia/Kolkata"}</dd></div>
       </dl> : <p className="empty">Loading configuration…</p>}
     </section>
 

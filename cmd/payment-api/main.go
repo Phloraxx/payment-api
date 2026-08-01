@@ -58,6 +58,11 @@ func main() {
 	smsService := sms.NewService(app, paymentService)
 	smsService.Reviews = reviewService
 	reconciliationService := reconciliation.NewService(app, reviewService, alertService, auditService)
+	statementLocation, err := time.LoadLocation(cfg.StatementTimezone)
+	if err != nil {
+		log.Fatal(err)
+	}
+	reconciliationService.StatementLocation = statementLocation
 	refundService := refunds.NewService(app, auditService, webhookService)
 	retentionService := retention.NewService(app, cfg)
 	backupService := backups.NewService(app, cfg, alertService)
@@ -91,7 +96,7 @@ func main() {
 		if cfg.LegacySMSWebhookEnabled {
 			stdLogger.Warn("legacy /api/webhook compatibility route is enabled; rotate the old relay to SMS_WEBHOOK_SECRET and disable it")
 		}
-		go webhookService.Run(rootCtx)
+		startBackgroundRunners(rootCtx, webhookService, alertService)
 		gmessagesManager.Start(rootCtx)
 		return e.Next()
 	})
@@ -207,6 +212,18 @@ func registerHealthcheckCommand(app *pocketbase.PocketBase) {
 	}
 	cmd.Flags().StringVar(&endpoint, "url", "http://127.0.0.1:3000/api/health", "health endpoint URL")
 	app.RootCmd.AddCommand(cmd)
+}
+
+type backgroundRunner interface {
+	Run(context.Context)
+}
+
+func startBackgroundRunners(ctx context.Context, runners ...backgroundRunner) {
+	for _, runner := range runners {
+		if runner != nil {
+			go runner.Run(ctx)
+		}
+	}
 }
 
 func mergeManagedRateLimitRules(existing []core.RateLimitRule) []core.RateLimitRule {

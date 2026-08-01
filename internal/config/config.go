@@ -44,6 +44,7 @@ type Config struct {
 	BackupS3ForcePathStyle     bool
 	OperatorAlertWebhookURL    string
 	OperatorAlertWebhookSecret string
+	StatementTimezone          string
 }
 
 func Load() (Config, error) {
@@ -139,6 +140,7 @@ func Load() (Config, error) {
 		BackupS3ForcePathStyle:     backupS3ForcePathStyle,
 		OperatorAlertWebhookURL:    strings.TrimSpace(os.Getenv("OPERATOR_ALERT_WEBHOOK_URL")),
 		OperatorAlertWebhookSecret: strings.TrimSpace(os.Getenv("OPERATOR_ALERT_WEBHOOK_SECRET")),
+		StatementTimezone:          strings.TrimSpace(env("STATEMENT_TIMEZONE", "Asia/Kolkata")),
 	}
 	cfg.GMessagesSessionPath = strings.TrimSpace(os.Getenv("GMESSAGES_SESSION_PATH"))
 	if cfg.GMessagesSessionPath == "" {
@@ -148,27 +150,26 @@ func Load() (Config, error) {
 }
 
 func (c Config) ValidateServe() error {
-	if c.TestMode {
-		return nil
-	}
-	var missing []string
-	if c.UPIID == "" {
-		missing = append(missing, "UPI_ID")
-	}
-	if c.APIKey == "" {
-		missing = append(missing, "PAYGATE_API_KEY")
-	}
-	if c.SMSWebhookSecret == "" {
-		missing = append(missing, "SMS_WEBHOOK_SECRET")
-	}
-	if len(missing) > 0 {
-		return fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
-	}
-	if len(c.APIKey) < minPrimarySecretLength {
-		return fmt.Errorf("PAYGATE_API_KEY must be at least %d characters", minPrimarySecretLength)
-	}
-	if len(c.SMSWebhookSecret) < minPrimarySecretLength {
-		return fmt.Errorf("SMS_WEBHOOK_SECRET must be at least %d characters", minPrimarySecretLength)
+	if !c.TestMode {
+		var missing []string
+		if c.UPIID == "" {
+			missing = append(missing, "UPI_ID")
+		}
+		if c.APIKey == "" {
+			missing = append(missing, "PAYGATE_API_KEY")
+		}
+		if c.SMSWebhookSecret == "" {
+			missing = append(missing, "SMS_WEBHOOK_SECRET")
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))
+		}
+		if len(c.APIKey) < minPrimarySecretLength {
+			return fmt.Errorf("PAYGATE_API_KEY must be at least %d characters", minPrimarySecretLength)
+		}
+		if len(c.SMSWebhookSecret) < minPrimarySecretLength {
+			return fmt.Errorf("SMS_WEBHOOK_SECRET must be at least %d characters", minPrimarySecretLength)
+		}
 	}
 	if c.PaymentTTL <= 0 {
 		return errors.New("PAYMENT_TTL must be positive")
@@ -176,8 +177,13 @@ func (c Config) ValidateServe() error {
 	if c.AmountQuarantine < 0 {
 		return errors.New("PAYMENT_QUARANTINE cannot be negative")
 	}
-	if c.LegacySMSWebhookEnabled && c.LegacySMSWebhookSecret == "" {
-		return errors.New("WEBHOOK_SECRET is required when LEGACY_SMS_WEBHOOK_ENABLED=true")
+	if c.LegacySMSWebhookEnabled {
+		if c.LegacySMSWebhookSecret == "" {
+			return errors.New("WEBHOOK_SECRET is required when LEGACY_SMS_WEBHOOK_ENABLED=true")
+		}
+		if len(c.LegacySMSWebhookSecret) < minPrimarySecretLength {
+			return fmt.Errorf("WEBHOOK_SECRET must be at least %d characters when LEGACY_SMS_WEBHOOK_ENABLED=true", minPrimarySecretLength)
+		}
 	}
 	if c.OutgoingWebhookURL != "" {
 		if err := validateHTTPURL("OUTGOING_WEBHOOK_URL", c.OutgoingWebhookURL); err != nil {
@@ -186,6 +192,12 @@ func (c Config) ValidateServe() error {
 		if len(c.OutgoingWebhookSecret) < minPrimarySecretLength {
 			return fmt.Errorf("OUTGOING_WEBHOOK_SECRET must be at least %d characters when OUTGOING_WEBHOOK_URL is configured", minPrimarySecretLength)
 		}
+	}
+	if c.StatementTimezone == "" {
+		return errors.New("STATEMENT_TIMEZONE is required")
+	}
+	if _, err := time.LoadLocation(c.StatementTimezone); err != nil {
+		return fmt.Errorf("STATEMENT_TIMEZONE is invalid: %w", err)
 	}
 	if c.RetentionEnabled && (c.SMSRawRetention <= 0 || c.ReconciliationRawRetention <= 0 || c.AuditRetention <= 0) {
 		return errors.New("retention durations must be positive when PAYGATE_RETENTION_ENABLED=true")

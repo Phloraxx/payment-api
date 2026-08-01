@@ -9,7 +9,10 @@ import (
 	"github.com/pocketbase/pocketbase/tools/types"
 )
 
-const redactedMarker = "[redacted after retention period]"
+const (
+	redactedMarker     = "[redacted after retention period]"
+	retentionBatchSize = 250
+)
 
 type Result struct {
 	SMSEventsRedacted             int `json:"smsEventsRedacted"`
@@ -33,18 +36,53 @@ func (s *Service) Run() (Result, error) {
 	}
 	now := s.now()
 	result := Result{}
+
+	for {
+		count, err := s.redactSMSBatch(now.Add(-s.Config.SMSRawRetention))
+		if err != nil {
+			return result, err
+		}
+		result.SMSEventsRedacted += count
+		if count < retentionBatchSize {
+			break
+		}
+	}
+	for {
+		count, err := s.redactReconciliationBatch(now.Add(-s.Config.ReconciliationRawRetention))
+		if err != nil {
+			return result, err
+		}
+		result.ReconciliationEntriesRedacted += count
+		if count < retentionBatchSize {
+			break
+		}
+	}
+	for {
+		count, err := s.deleteAuditBatch(now.Add(-s.Config.AuditRetention))
+		if err != nil {
+			return result, err
+		}
+		result.AuditEventsDeleted += count
+		if count < retentionBatchSize {
+			break
+		}
+	}
+	return result, nil
+}
+
+func (s *Service) redactSMSBatch(cutoff time.Time) (int, error) {
+	count := 0
 	err := s.App.RunInTransaction(func(tx core.App) error {
-		smsCutoff := now.Add(-s.Config.SMSRawRetention)
-		smsRecords, err := tx.FindRecordsByFilter(
+		records, err := tx.FindRecordsByFilter(
 			"sms_events",
 			"((message_time != '' && message_time < {:cutoff}) || (message_time = '' && created < {:cutoff})) && body != {:redacted}",
-			"created", 250, 0,
-			dbx.Params{"cutoff": filterDate(smsCutoff), "redacted": redactedMarker},
+			"created", retentionBatchSize, 0,
+			dbx.Params{"cutoff": filterDate(cutoff), "redacted": redactedMarker},
 		)
 		if err != nil {
 			return err
 		}
-		for _, record := range smsRecords {
+		for _, record := range records {
 			record.Set("body", redactedMarker)
 			record.Set("raw_payload", nil)
 			record.Set("sender", "")
@@ -53,45 +91,57 @@ func (s *Service) Run() (Result, error) {
 			if err := tx.Save(record); err != nil {
 				return err
 			}
-			result.SMSEventsRedacted++
 		}
+		count = len(records)
+		return nil
+	})
+	return count, err
+}
 
-		reconciliationCutoff := now.Add(-s.Config.ReconciliationRawRetention)
-		entries, err := tx.FindRecordsByFilter(
+func (s *Service) redactReconciliationBatch(cutoff time.Time) (int, error) {
+	count := 0
+	err := s.App.RunInTransaction(func(tx core.App) error {
+		records, err := tx.FindRecordsByFilter(
 			"reconciliation_entries",
 			"((transaction_time != '' && transaction_time < {:cutoff}) || (transaction_time = '' && created < {:cutoff})) && description != {:redacted}",
-			"created", 250, 0,
-			dbx.Params{"cutoff": filterDate(reconciliationCutoff), "redacted": redactedMarker},
+			"created", retentionBatchSize, 0,
+			dbx.Params{"cutoff": filterDate(cutoff), "redacted": redactedMarker},
 		)
 		if err != nil {
 			return err
 		}
-		for _, record := range entries {
+		for _, record := range records {
 			record.Set("description", redactedMarker)
 			record.Set("raw_row", nil)
 			if err := tx.Save(record); err != nil {
 				return err
 			}
-			result.ReconciliationEntriesRedacted++
 		}
+		count = len(records)
+		return nil
+	})
+	return count, err
+}
 
-		auditCutoff := now.Add(-s.Config.AuditRetention)
-		auditRecords, err := tx.FindRecordsByFilter(
-			"audit_events", "occurred_at < {:cutoff}", "occurred_at", 250, 0,
-			dbx.Params{"cutoff": filterDate(auditCutoff)},
+func (s *Service) deleteAuditBatch(cutoff time.Time) (int, error) {
+	count := 0
+	err := s.App.RunInTransaction(func(tx core.App) error {
+		records, err := tx.FindRecordsByFilter(
+			"audit_events", "occurred_at < {:cutoff}", "occurred_at", retentionBatchSize, 0,
+			dbx.Params{"cutoff": filterDate(cutoff)},
 		)
 		if err != nil {
 			return err
 		}
-		for _, record := range auditRecords {
+		for _, record := range records {
 			if err := tx.Delete(record); err != nil {
 				return err
 			}
-			result.AuditEventsDeleted++
 		}
+		count = len(records)
 		return nil
 	})
-	return result, err
+	return count, err
 }
 
 func (s *Service) now() time.Time {
