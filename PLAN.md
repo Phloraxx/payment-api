@@ -232,4 +232,4 @@ For this rebuild, v1 is considered complete when:
 - [x] the production Swarm/Dokploy service runs the reviewed image content;
 - [x] `/app/pb_data` is persistent across production task replacements;
 - [x] the API/UI/payment/Google Messages path is verified in production and the unused legacy path is disabled;
-- [x] no known correctness/security blocker remains; long-duration soak metrics and optional external destinations remain operational follow-up items rather than code blockers.
+- [x] no known correctness/security blocker remains; the isolated synthetic validation payment was removed and a clean backup/restore drill passed. Long-duration soak metrics and optional external destinations remain operational follow-up items rather than code blockers.

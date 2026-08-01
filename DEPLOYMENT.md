@@ -47,6 +47,26 @@ A second forced task replacement then proved:
 - managed rate-limit rules remain idempotent across startup;
 - Docker health returns to `healthy`.
 
+
+## Post-cutover synthetic-data cleanup
+
+A read-only scan of every operational table was performed for the acceptance, test and production-validation markers used during release testing. The production database contained only one synthetic row: a cancelled payment with external ID `production-hardening-validation`.
+
+The row had no RRN and no references from SMS evidence, webhooks, review cases, refunds or reconciliation records. The service was scaled to zero, the isolated row was deleted in a single SQLite transaction, `PRAGMA integrity_check` returned `ok`, and the service was scaled back to one replica.
+
+After restart:
+
+- Google Messages returned to paired, connected and phone-responsive;
+- all operational tables were rescanned and contained zero synthetic markers;
+- the production database contained 15 payments and 8 Google Messages evidence events;
+- no refund, audit, review, reconciliation or webhook acceptance records existed in production;
+- a fresh backup `paygate_manual_20260801_110619.zip` was created;
+- archive verification passed;
+- temporary restore and integrity checks passed for both SQLite databases;
+- the clean archive was exported to the protected host backup directory and its SHA-256 sidecar verified.
+
+The earlier concern about an `ACCEPTANCE-REFUND-123` production record was incorrect: that record existed only in the disposable fresh-volume acceptance environment, not in production.
+
 ## Rollback
 
 Application rollback:
