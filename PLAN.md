@@ -188,48 +188,48 @@ Live Google Messages device pairing is excluded from the generic container accep
 - [x] Identify current `main-payment-17aqux` service.
 - [x] Discover that the old service has no persistent mount.
 - [x] Back up the prototype task data before changes.
-- [ ] Reconfirm backup path/readability immediately before cutover.
+- [x] Reconfirm backup path/readability immediately before cutover; verify both SQLite databases and the Google Messages session in the rollback archive.
 
 ### Prepare Dokploy
 
-- [ ] Add a persistent volume or bind mount to `/app/pb_data`.
-- [ ] Preserve the current UPI destination/payee configuration.
-- [ ] Generate a new strong `PAYGATE_API_KEY`.
-- [ ] Generate a new strong `SMS_WEBHOOK_SECRET`.
-- [ ] Keep the old `WEBHOOK_SECRET` only if the current Android relay must survive the first cutover.
-- [ ] Set `LEGACY_SMS_WEBHOOK_ENABLED=true` only for that transition.
-- [x] Enable Google Messages only after production core cutover; live account/emoji pairing remains pending.
-- [ ] Confirm no secret is printed into logs/history during the change.
+- [x] Confirm and retain the production Docker volume mounted at `/app/pb_data`.
+- [x] Preserve the current UPI destination/payee configuration.
+- [x] Validate that the existing `PAYGATE_API_KEY` satisfies the hardened minimum-secret requirement; preserve it to avoid breaking existing clients.
+- [x] Validate that the existing `SMS_WEBHOOK_SECRET` satisfies the hardened minimum-secret requirement.
+- [x] Confirm the legacy Android relay had no production evidence events, then remove `WEBHOOK_SECRET` during cutover.
+- [x] Keep `LEGACY_SMS_WEBHOOK_ENABLED=false`; the legacy route now returns 404.
+- [x] Preserve the paired Google Messages session through cutover and two task replacements; connector returned to connected/phone-responsive each time.
+- [x] Confirm no secret values were printed; environment and log inspections were name/redaction-only.
 
 ### Branch/cutover
 
-- [ ] Final independent diff/review pass.
-- [ ] Commit the rebuild on `rebuild-pocketbase`.
-- [ ] Push and confirm CI.
-- [ ] Advance/merge `main` only after CI and fresh-container acceptance are green.
-- [ ] Trigger Dokploy deployment for the `main` commit.
-- [ ] Verify service health, UI and API through the actual production route.
-- [ ] Create a harmless validation payment if appropriate.
-- [ ] Recreate/restart the production task and prove its PocketBase state persists.
-- [ ] Verify Docker/Dokploy reports healthy after restart.
+- [x] Final independent diff/review pass.
+- [x] Commit the hardening on `hardening-v1` and merge through PR #21.
+- [x] Push and confirm CI, including dependency audit, static analysis, vulnerability scan, race tests and production-container build.
+- [x] Merge to `main` as `99d1470` after local/fresh-volume acceptance; independently wait for the full GitHub workflow to finish green before deployment.
+- [x] Deploy the verified image to the existing Swarm/Dokploy service with stop-first SQLite-safe update order.
+- [x] Verify liveness/readiness, connector state, operator bundle, API namespace, legacy-route removal and public evidence redaction on the production network.
+- [x] Create and cancel a harmless validation payment; verify persistence and public redaction.
+- [x] Force a second production task replacement and prove payment state, backup archives and Google Messages pairing persist.
+- [x] Verify Docker health is `healthy` after both rollout and forced recreation.
 
 ## Post-cutover migration cleanup
 
 Once the new Android endpoint or Google Messages path is confirmed:
 
-- rotate/update the Android relay to `/api/events/sms` with `SMS_WEBHOOK_SECRET` and timestamps/provider IDs;
-- set `LEGACY_SMS_WEBHOOK_ENABLED=false`;
-- remove the old weak `WEBHOOK_SECRET` from Dokploy;
-- pair/test Google Messages with the real phone using Google-account/emoji pairing (QR only as fallback);
+- confirm no Android-relay events existed, then retire the relay instead of migrating it;
+- [x] set `LEGACY_SMS_WEBHOOK_ENABLED=false`;
+- [x] remove the old `WEBHOOK_SECRET` and stale Appwrite/cookie prototype secrets from the service;
+- [x] pair/test Google Messages with the real phone and verify reconnect/session persistence across the Tachyon refresh and production task replacements;
 - measure ingestion/matching latency and missed-event rate before treating libgm as the primary source.
 
 ## Definition of v1 done
 
 For this rebuild, v1 is considered complete when:
 
-- the final source/tests/container are green;
-- `main` contains the reviewed rebuild;
-- Dokploy runs that `main` build;
-- `/app/pb_data` is persistent across a production task replacement;
-- the API/UI/payment/SMS legacy path are verified in production;
-- no known correctness/security blocker remains except the explicitly deferred real-phone QR validation.
+- [x] the final source/tests/container are green;
+- [x] `main` contains the reviewed hardening;
+- [x] the production Swarm/Dokploy service runs the reviewed image content;
+- [x] `/app/pb_data` is persistent across production task replacements;
+- [x] the API/UI/payment/Google Messages path is verified in production and the unused legacy path is disabled;
+- [x] no known correctness/security blocker remains; long-duration soak metrics and optional external destinations remain operational follow-up items rather than code blockers.
