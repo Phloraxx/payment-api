@@ -62,7 +62,7 @@ This document records what was implemented and what must be proven before/after 
 - [x] Accept/validate upstream-required cookie JSON, raw Cookie headers and DevTools Copy-as-cURL input without logging values.
 - [x] Keep QR pairing as a fallback and auto-refresh short-lived QR data.
 - [x] Refuse accidental re-pair over an existing session or another pairing in progress.
-- [ ] Complete a real phone Google-account/emoji pairing and verify reconnect/session persistence.
+- [x] Complete real-phone Google-account/emoji pairing, reconnect/session persistence and post-Tachyon-refresh connectivity verification.
 
 ### API/security
 
@@ -104,6 +104,21 @@ This document records what was implemented and what must be proven before/after 
 - [x] Google-account/emoji pairing UI plus QR fallback rendering/refresh.
 - [x] Periodic auth refresh and 401 sign-out.
 - [x] UI create retries preserve idempotency key.
+
+
+### Operational hardening
+
+- [x] Persistent exception/review cases for parse, RRN, unmatched, ambiguity and reconciliation failures.
+- [x] Audited manual resolution that preserves exact amount, unique RRN and stale-evidence invariants.
+- [x] Bank occurrence-time classification so delayed SMS does not mislabel an on-time payment as late.
+- [x] CSV/TSV/XLSX statement reconciliation with duplicate-file/row detection and archive expansion limits.
+- [x] Fingerprint-pool capacity telemetry and warning/critical alerts.
+- [x] Persistent connector, webhook exhaustion, reconciliation and backup alerts.
+- [x] Optional signed durable operator-alert webhook with retries and anti-spam dedupe.
+- [x] Refund lifecycle records, aggregate amount bounds, audit trail and signed events without automatic fund movement.
+- [x] Configurable evidence retention/redaction.
+- [x] Scheduled local/S3-compatible backups, archive verification and temporary SQLite restore drills.
+- [x] Operator UI pages for reviews, reconciliation, alerts, refunds, audit, capacity and disaster recovery.
 
 ## Automated verification
 

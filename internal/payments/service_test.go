@@ -309,3 +309,98 @@ func TestEarlyResolutionNeverShortensOriginalQuarantine(t *testing.T) {
 		t.Fatalf("cancelled reuse_after shortened: original=%s cancelled=%s", originalSecond, cancelled.ReuseAfter)
 	}
 }
+
+func TestDelayedOnTimeEvidenceRemainsPaidAfterExpiry(t *testing.T) {
+	service, _, now := paymentTestService(t)
+	payment, _, err := service.Create(CreateInput{AmountRupees: 700})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceAt := now.Add(2 * time.Minute)
+	*now = now.Add(8 * time.Minute)
+	result, err := service.Match(domain.ParsedSMS{
+		AmountPaise: payment.PayablePaise,
+		RRN:         "700700700700",
+		OccurredAt:  evidenceAt,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "marked_paid" || result.Payment.Status != domain.StatusPaid {
+		t.Fatalf("delayed on-time evidence = %+v", result)
+	}
+	if !result.Payment.PaidAt.Equal(evidenceAt) {
+		t.Fatalf("paidAt=%s want %s", result.Payment.PaidAt, evidenceAt)
+	}
+}
+
+func TestManualMatchKeepsExactAmountAndRRNInvariants(t *testing.T) {
+	service, _, now := paymentTestService(t)
+	payment, _, err := service.Create(CreateInput{AmountRupees: 800})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var matched *core.Record
+	err = service.App.RunInTransaction(func(tx core.App) error {
+		var action string
+		var queued bool
+		var matchErr error
+		matched, action, queued, matchErr = service.ManualMatchInApp(tx, payment.ID, domain.ParsedSMS{
+			AmountPaise: payment.PayablePaise,
+			RRN:         "800800800800",
+			OccurredAt:  *now,
+		}, *now)
+		if matchErr != nil {
+			return matchErr
+		}
+		if action != "marked_paid" || !queued {
+			t.Fatalf("action=%s queued=%v", action, queued)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matched.GetString("status") != "paid" {
+		t.Fatalf("status=%s", matched.GetString("status"))
+	}
+
+	other, _, err := service.Create(CreateInput{AmountRupees: 801})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = service.App.RunInTransaction(func(tx core.App) error {
+		_, _, _, err := service.ManualMatchInApp(tx, other.ID, domain.ParsedSMS{
+			AmountPaise: other.PayablePaise,
+			RRN:         "800800800800",
+		}, *now)
+		return err
+	})
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != "RRN_ALREADY_ASSIGNED" {
+		t.Fatalf("duplicate manual RRN error=%v", err)
+	}
+}
+
+func TestCapacitySnapshotReportsBlockedFingerprintPools(t *testing.T) {
+	service, _, _ := paymentTestService(t)
+	for i := 0; i < 70; i++ {
+		if _, _, err := service.Create(CreateInput{AmountRupees: 900}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot, err := service.Capacity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Pools) != 1 {
+		t.Fatalf("pools=%d", len(snapshot.Pools))
+	}
+	pool := snapshot.Pools[0]
+	if pool.Blocked != 70 || pool.Available != 29 || pool.Level != "warning" {
+		t.Fatalf("pool=%+v", pool)
+	}
+	if snapshot.WarningPools != 1 {
+		t.Fatalf("warningPools=%d", snapshot.WarningPools)
+	}
+}

@@ -2,7 +2,7 @@ import QRCode from "qrcode";
 import { useCallback, useEffect, useState } from "react";
 import { Badge, formatDate } from "../components/common";
 import { api } from "../pb";
-import type { Connector } from "../types";
+import type { BackupStatus, Connector } from "../types";
 
 type SafeConfig = {
   upiId: string;
@@ -12,6 +12,15 @@ type SafeConfig = {
   webhookConfigured: boolean;
   rateLimitsEnabled: boolean;
   legacySMSWebhookEnabled: boolean;
+  retentionEnabled: boolean;
+  smsRawRetentionSeconds: number;
+  reconciliationRawRetentionSeconds: number;
+  auditRetentionSeconds: number;
+  backupEnabled: boolean;
+  backupCron: string;
+  backupMaxKeep: number;
+  backupOffsite: boolean;
+  operatorAlertWebhookConfigured: boolean;
   connector: Connector;
 };
 
@@ -29,15 +38,19 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
   const [qrUrl, setQrUrl] = useState("");
   const [qrImage, setQrImage] = useState("");
   const [busy, setBusy] = useState(false);
+  const [backup, setBackup] = useState<BackupStatus | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, status] = await Promise.all([
+      const [cfg, status, backupStatus] = await Promise.all([
         api<SafeConfig>("/api/config"),
         api<Connector>("/api/connector/gmessages/status"),
+        api<BackupStatus>("/api/paygate/backups/status"),
       ]);
       setConfig(cfg);
       setConnector(status);
+      setBackup(backupStatus);
       if (status.pairingMethod === "google" && status.state === "pairing") {
         setPairingEmoji(status.pairingEmoji ?? "");
         setPairingAccount(status.accountEmail ?? "");
@@ -160,6 +173,35 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
     } finally { setBusy(false); }
   }
 
+  async function createBackup() {
+    setBackupBusy(true);
+    try {
+      const result = await api<{ name: string }>("/api/paygate/backups", { method: "POST" });
+      notify(`Backup created: ${result.name}`);
+      await refresh();
+    } catch (err) { notify(err instanceof Error ? err.message : "Backup creation failed."); }
+    finally { setBackupBusy(false); }
+  }
+
+  async function verifyBackup() {
+    setBackupBusy(true);
+    try {
+      const result = await api<BackupStatus>("/api/paygate/backups/verify", { method: "POST" });
+      setBackup(result);
+      notify(result.latestVerified ? "Latest backup archive verified." : result.verificationError || "Backup verification failed.");
+    } catch (err) { notify(err instanceof Error ? err.message : "Backup verification failed."); }
+    finally { setBackupBusy(false); }
+  }
+
+  async function runRestoreDrill() {
+    setBackupBusy(true);
+    try {
+      const result = await api<{ backupName: string; integrityChecked: number }>("/api/paygate/backups/restore-drill", { method: "POST" });
+      notify(`Restore drill passed for ${result.backupName}: ${result.integrityChecked} database file(s) verified.`);
+    } catch (err) { notify(err instanceof Error ? err.message : "Restore drill failed."); }
+    finally { setBackupBusy(false); }
+  }
+
   const enabled = connector?.enabled ?? false;
   const pairing = connector?.state === "pairing";
   const googleReauth = connector?.paired && connector.pairingMethod === "google" &&
@@ -246,7 +288,24 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
         <div><dt>Outgoing webhook</dt><dd>{config.webhookConfigured ? "Configured" : "Disabled"}</dd></div>
         <div><dt>API rate limits</dt><dd>{config.rateLimitsEnabled ? "Enabled" : "Disabled"}</dd></div>
         <div><dt>Legacy /api/webhook</dt><dd>{config.legacySMSWebhookEnabled ? "Enabled (migration only)" : "Disabled"}</dd></div>
+        <div><dt>Evidence retention</dt><dd>{config.retentionEnabled ? `SMS ${Math.round(config.smsRawRetentionSeconds / 86400)}d · statements ${Math.round(config.reconciliationRawRetentionSeconds / 86400)}d · audit ${Math.round(config.auditRetentionSeconds / 86400)}d` : "Disabled"}</dd></div>
+        <div><dt>Backup schedule</dt><dd>{config.backupEnabled ? `${config.backupCron} · keep ${config.backupMaxKeep}` : "Disabled"}</dd></div>
+        <div><dt>Backup storage</dt><dd>{config.backupOffsite ? "S3-compatible offsite" : "Local persistent volume"}</dd></div>
+        <div><dt>Operator alert webhook</dt><dd>{config.operatorAlertWebhookConfigured ? "Configured with signed retries" : "Dashboard only"}</dd></div>
       </dl> : <p className="empty">Loading configuration…</p>}
+    </section>
+
+    <section className="card">
+      <div className="section-title"><div><p className="eyebrow">DISASTER RECOVERY</p><h2>Backups</h2></div><Badge status={backup?.latestVerified ? "verified" : backup?.enabled ? "configured" : "disabled"} /></div>
+      <dl className="settings compact">
+        <div><dt>Archives</dt><dd>{backup?.backupCount ?? 0}</dd></div>
+        <div><dt>Latest</dt><dd>{backup?.latest?.name || "—"}</dd></div>
+        <div><dt>Latest modified</dt><dd>{formatDate(backup?.latest?.modTime)}</dd></div>
+        <div><dt>Offsite</dt><dd>{backup?.offsite ? "Yes" : "No"}</dd></div>
+        <div><dt>Verification</dt><dd>{backup?.verificationError || (backup?.latestVerified ? "Passed" : "Not run")}</dd></div>
+      </dl>
+      <div className="actions"><button className="primary" disabled={backupBusy} onClick={() => void createBackup()}>{backupBusy ? "Working…" : "Create backup now"}</button><button disabled={backupBusy || !backup?.latest} onClick={() => void verifyBackup()}>Verify latest archive</button><button disabled={backupBusy || !backup?.latest} onClick={() => void runRestoreDrill()}>Run restore drill</button></div>
+      <p className="muted">Verification downloads the archive, reads every ZIP entry and confirms a database file exists. A separate restore drill should still be run periodically on a temporary volume.</p>
     </section>
   </>;
 }

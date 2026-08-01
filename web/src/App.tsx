@@ -4,10 +4,11 @@ import type { Page } from "./types";
 import { Dashboard } from "./pages/Dashboard";
 import { Login } from "./pages/Login";
 import { Payments } from "./pages/Payments";
-import { SMSEvents, WebhookDeliveries } from "./pages/Records";
+import { AuditEvents, SMSEvents, WebhookDeliveries } from "./pages/Records";
+import { AlertsPage, ReconciliationPage, RefundsPage, ReviewsPage } from "./pages/Operations";
 import { Settings } from "./pages/Settings";
 
-const pages: Page[] = ["dashboard", "payments", "sms", "webhooks", "settings"];
+const pages: Page[] = ["dashboard", "payments", "reviews", "reconciliation", "sms", "alerts", "refunds", "webhooks", "audit", "settings"];
 
 function pageFromHash(): Page {
   const value = window.location.hash.replace(/^#\/?/, "") as Page;
@@ -63,8 +64,13 @@ export function App() {
       {notice && <div className="notice" role="status" onClick={() => setNotice("")}>{notice}</div>}
       {page === "dashboard" && <Dashboard />}
       {page === "payments" && <Payments notify={setNotice} />}
+      {page === "reviews" && <ReviewsPage notify={setNotice} />}
+      {page === "reconciliation" && <ReconciliationPage notify={setNotice} />}
       {page === "sms" && <SMSEvents />}
+      {page === "alerts" && <AlertsPage />}
+      {page === "refunds" && <RefundsPage notify={setNotice} />}
       {page === "webhooks" && <WebhookDeliveries />}
+      {page === "audit" && <AuditEvents />}
       {page === "settings" && <Settings notify={setNotice} />}
     </main>
   </div>;
@@ -72,5 +78,6 @@ export function App() {
 
 function label(value: string) {
   if (value === "sms") return "SMS Events";
+  if (value === "audit") return "Audit Trail";
   return value.charAt(0).toUpperCase() + value.slice(1);
 }

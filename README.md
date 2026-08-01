@@ -139,6 +139,25 @@ Content-Type: application/json
 
 This compatibility route exists for migration only. The production default is disabled. Rotate the old relay to `SMS_WEBHOOK_SECRET` and `/api/events/sms`, then disable the legacy route.
 
+### Operational APIs
+
+Dashboard-authenticated operations:
+
+- `GET /api/capacity` — active/quarantined suffix-pool utilization;
+- `POST /api/review-cases/{id}/resolve` — audited review resolution/manual match;
+- `POST /api/reconciliation/import` — multipart CSV/TSV/XLSX statement import;
+- `GET /api/paygate/backups/status` — redacted archive status;
+- `POST /api/paygate/backups` — create a backup now;
+- `POST /api/paygate/backups/verify` — verify the latest archive;
+- `POST /api/paygate/backups/restore-drill` — temporary extraction plus SQLite integrity checks.
+
+API-key or dashboard-authenticated refund operations:
+
+- `POST /api/refunds` with an `Idempotency-Key`;
+- `POST /api/refunds/{id}/status`.
+
+Refund endpoints record operator/bank evidence only; they never initiate a bank transfer.
+
 ### Health
 
 - `GET /api/health` — PocketBase liveness endpoint, used by the container healthcheck.
@@ -155,9 +174,10 @@ Bank SMS processing follows these rules:
 3. reject automatic matching if amount or RRN is missing;
 4. treat an already-seen RRN with the same amount as an idempotent duplicate;
 5. treat the same RRN with a different amount as `RRN_AMOUNT_MISMATCH`;
-6. match a pending payment only by the exact payable paise amount and eligible timestamp;
-7. if no pending payment matches, check an expired/cancelled payment still in quarantine and mark it `late`;
-8. never silently assign ambiguous evidence.
+6. use the bank/provider occurrence timestamp to decide whether the transaction was on time, so delayed SMS delivery alone does not turn an on-time payment into `late`;
+7. match only the exact payable paise amount and eligible evidence window;
+8. if no on-time payment matches, check an expired/cancelled payment still in quarantine and mark a genuinely late transaction `late`;
+9. persist a review case instead of silently assigning incomplete, unmatched, contradictory or ambiguous evidence.
 
 Google Messages catch-up messages retain their provider message timestamp. Legacy relays that omit a timestamp are treated as arriving at ingestion time, so upgrading the legacy relay to send timestamps is recommended.
 
@@ -171,6 +191,11 @@ Events currently include:
 - `payment.late`
 - `payment.expired`
 - `payment.cancelled`
+- `refund.requested`
+- `refund.processing`
+- `refund.completed`
+- `refund.failed`
+- `refund.cancelled`
 
 Delivery records are written transactionally to `webhook_deliveries`; network I/O happens only after the transaction commits. The worker uses durable retries and recovers stale `sending` leases after process restarts.
 
@@ -199,6 +224,12 @@ The React UI at `/` provides:
 - realtime payment list/details;
 - cancellation;
 - SMS evidence records;
+- persistent evidence review and audited manual matching;
+- CSV/TSV/XLSX bank-statement reconciliation;
+- fingerprint-pool capacity monitoring;
+- operational alerts and signed notification delivery state;
+- manual refund lifecycle records;
+- backup creation, verification and temporary restore drills;
 - outgoing webhook delivery records;
 - Google Messages connector status, Google-account/emoji pairing and QR fallback controls;
 - safe non-secret configuration status.
@@ -234,7 +265,7 @@ Google-account pairing is the primary path. Browser cookie input is never logged
 
 Starting a new pairing is refused while another pairing is active or a valid session is already paired; explicitly cancel/unpair first.
 
-**Live phone Google-account/emoji pairing is the remaining connector acceptance test.** The connector code is integrated and unit-tested, but the private Google Messages protocol can change and must be validated with the actual phone before relying on it as the only ingestion source.
+The production connector has completed real-phone Google-account/emoji pairing, persisted its session across restarts and remained connected through the expected Tachyon authentication refresh boundary. This is strong acceptance evidence, but the private Google Messages protocol can still change; operational alerts and a reconciliation safety net remain necessary.
 
 ## Configuration
 
@@ -259,6 +290,14 @@ GMESSAGES_ENABLED=false
 GMESSAGES_SESSION_PATH=
 OUTGOING_WEBHOOK_URL=
 OUTGOING_WEBHOOK_SECRET=
+OPERATOR_ALERT_WEBHOOK_URL=
+OPERATOR_ALERT_WEBHOOK_SECRET=
+PAYGATE_RETENTION_ENABLED=true
+SMS_RAW_RETENTION=2160h
+RECONCILIATION_RAW_RETENTION=8760h
+AUDIT_RETENTION=17520h
+PAYGATE_BACKUP_CRON="0 3 * * *"
+PAYGATE_BACKUP_MAX_KEEP=14
 PB_DATA_DIR=./pb_data
 ```
 
@@ -326,5 +365,6 @@ A future proprietary/commercial distribution needs a separate licensing review r
 
 - `ARCHITECTURE.md` — implemented system design and invariants
 - `PLAN.md` — implementation/acceptance status
+- `OPERATIONS.md` — evidence review, reconciliation, refunds, alerts, backups and incident runbook
 - `RESEARCH.md` — technical research and constraints behind the design
 - `IMPLEMENTATION_SPEC.md` — rebuild requirements used during implementation

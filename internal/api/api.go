@@ -10,11 +10,17 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Phloraxx/payment-api/internal/alerts"
+	"github.com/Phloraxx/payment-api/internal/audit"
+	"github.com/Phloraxx/payment-api/internal/backups"
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/money"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/reconciliation"
+	"github.com/Phloraxx/payment-api/internal/refunds"
+	"github.com/Phloraxx/payment-api/internal/reviews"
 	"github.com/Phloraxx/payment-api/internal/sms"
 	appweb "github.com/Phloraxx/payment-api/internal/web"
 	"github.com/pocketbase/pocketbase/apis"
@@ -22,16 +28,24 @@ import (
 )
 
 const (
-	maxPaymentRequestBytes int64 = (1 << 20) + (64 << 10)
-	maxSMSRequestBytes     int64 = 128 << 10
-	maxGMessagesPairBytes  int64 = 128 << 10
+	maxPaymentRequestBytes   int64 = (1 << 20) + (64 << 10)
+	maxSMSRequestBytes       int64 = 128 << 10
+	maxGMessagesPairBytes    int64 = 128 << 10
+	maxReviewRequestBytes    int64 = 16 << 10
+	maxRefundRequestBytes    int64 = (1 << 20) + (64 << 10)
+	maxStatementRequestBytes int64 = reconciliation.MaxFileBytes + (1 << 20)
 )
 
 type API struct {
-	Config    config.Config
-	Payments  *payments.Service
-	SMS       *sms.Service
-	GMessages *gmessages.Manager
+	Config         config.Config
+	Payments       *payments.Service
+	SMS            *sms.Service
+	GMessages      *gmessages.Manager
+	Reviews        *reviews.Service
+	Reconciliation *reconciliation.Service
+	Alerts         *alerts.Service
+	Refunds        *refunds.Service
+	Backups        *backups.Service
 }
 
 func New(cfg config.Config, paymentService *payments.Service, smsService *sms.Service, manager *gmessages.Manager) *API {
@@ -48,6 +62,15 @@ func (a *API) Register(app core.App) {
 		e.Router.GET("/api/paygate/health", a.health)
 		e.Router.GET("/api/config", a.getConfig)
 		e.Router.GET("/api/dashboard", a.dashboard)
+		e.Router.GET("/api/capacity", a.capacity)
+		e.Router.POST("/api/review-cases/{id}/resolve", a.resolveReview).Bind(apis.BodyLimit(maxReviewRequestBytes))
+		e.Router.POST("/api/reconciliation/import", a.importReconciliation).Bind(apis.BodyLimit(maxStatementRequestBytes))
+		e.Router.POST("/api/refunds", a.requestRefund).Bind(apis.BodyLimit(maxRefundRequestBytes))
+		e.Router.POST("/api/refunds/{id}/status", a.updateRefund).Bind(apis.BodyLimit(maxReviewRequestBytes))
+		e.Router.GET("/api/paygate/backups/status", a.backupStatus)
+		e.Router.POST("/api/paygate/backups", a.createBackup)
+		e.Router.POST("/api/paygate/backups/verify", a.verifyBackup)
+		e.Router.POST("/api/paygate/backups/restore-drill", a.restoreDrill)
 		e.Router.GET("/api/connector/gmessages/status", a.gmessagesStatus)
 		e.Router.POST("/api/connector/gmessages/pair/google", a.gmessagesGooglePair).Bind(apis.BodyLimit(maxGMessagesPairBytes))
 		e.Router.POST("/api/connector/gmessages/reauth/google", a.gmessagesGoogleReauth).Bind(apis.BodyLimit(maxGMessagesPairBytes))
@@ -235,14 +258,22 @@ func (a *API) getConfig(e *core.RequestEvent) error {
 		return e.UnauthorizedError("dashboard authentication is required", nil)
 	}
 	return e.JSON(http.StatusOK, map[string]any{
-		"upiId":                   a.Config.UPIID,
-		"upiPayeeName":            a.Config.UPIPayeeName,
-		"paymentTtlSeconds":       int64(a.Config.PaymentTTL / time.Second),
-		"quarantineSeconds":       int64(a.Config.AmountQuarantine / time.Second),
-		"webhookConfigured":       a.Config.OutgoingWebhookURL != "",
-		"rateLimitsEnabled":       a.Config.RateLimitsEnabled,
-		"legacySMSWebhookEnabled": a.Config.LegacySMSWebhookEnabled,
-		"connector":               a.connectorStatus(),
+		"upiId":                             a.Config.UPIID,
+		"upiPayeeName":                      a.Config.UPIPayeeName,
+		"paymentTtlSeconds":                 int64(a.Config.PaymentTTL / time.Second),
+		"quarantineSeconds":                 int64(a.Config.AmountQuarantine / time.Second),
+		"webhookConfigured":                 a.Config.OutgoingWebhookURL != "",
+		"rateLimitsEnabled":                 a.Config.RateLimitsEnabled,
+		"legacySMSWebhookEnabled":           a.Config.LegacySMSWebhookEnabled,
+		"retentionEnabled":                  a.Config.RetentionEnabled,
+		"smsRawRetentionSeconds":            int64(a.Config.SMSRawRetention / time.Second),
+		"reconciliationRawRetentionSeconds": int64(a.Config.ReconciliationRawRetention / time.Second),
+		"auditRetentionSeconds":             int64(a.Config.AuditRetention / time.Second),
+		"backupEnabled":                     a.Config.BackupCron != "",
+		"backupCron":                        a.Config.BackupCron,
+		"backupMaxKeep":                     a.Config.BackupMaxKeep,
+		"backupOffsite":                     a.Config.BackupS3Enabled,
+		"connector":                         a.connectorStatus(),
 	})
 }
 
@@ -254,7 +285,248 @@ func (a *API) dashboard(e *core.RequestEvent) error {
 	if err != nil {
 		return e.InternalServerError("failed to load dashboard", err)
 	}
-	return e.JSON(http.StatusOK, map[string]any{"stats": stats, "connector": a.connectorStatus()})
+	payload := map[string]any{"stats": stats, "connector": a.connectorStatus()}
+	if a.Payments != nil {
+		capacity, err := a.Payments.Capacity()
+		if err != nil {
+			return e.InternalServerError("failed to calculate capacity", err)
+		}
+		payload["capacity"] = capacity
+	}
+	if a.Reviews != nil {
+		count, err := a.Reviews.OpenCount()
+		if err != nil {
+			return e.InternalServerError("failed to count reviews", err)
+		}
+		payload["openReviewCount"] = count
+	}
+	if a.Alerts != nil {
+		count, err := a.Alerts.OpenCount()
+		if err != nil {
+			return e.InternalServerError("failed to count alerts", err)
+		}
+		payload["openAlertCount"] = count
+	}
+	if a.Backups != nil {
+		status, err := a.Backups.GetStatus(e.Request.Context(), false)
+		if err != nil {
+			payload["backup"] = map[string]any{"enabled": a.Config.BackupCron != "", "error": err.Error()}
+		} else {
+			payload["backup"] = status
+		}
+	}
+	return e.JSON(http.StatusOK, payload)
+}
+
+func (a *API) capacity(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("dashboard authentication is required", nil)
+	}
+	capacity, err := a.Payments.Capacity()
+	if err != nil {
+		return e.InternalServerError("failed to calculate payment capacity", err)
+	}
+	return e.JSON(http.StatusOK, capacity)
+}
+
+type reviewResolutionBody struct {
+	Action        string `json:"action"`
+	PaymentID     string `json:"paymentId"`
+	BankReference string `json:"bankReference"`
+	Note          string `json:"note"`
+}
+
+func (a *API) resolveReview(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("dashboard authentication is required", nil)
+	}
+	if a.Reviews == nil {
+		return e.NotFoundError("review service is unavailable", nil)
+	}
+	var body reviewResolutionBody
+	if err := decodeJSON(e, &body); err != nil {
+		return e.BadRequestError("invalid JSON body", err)
+	}
+	result, err := a.Reviews.Resolve(reviews.ResolveInput{
+		CaseID: e.Request.PathValue("id"), Action: body.Action,
+		PaymentID: body.PaymentID, BankReference: body.BankReference,
+		Note: body.Note, Actor: a.actor(e),
+	})
+	if err != nil {
+		return writeDomainError(e, err)
+	}
+	return e.JSON(http.StatusOK, result)
+}
+
+func (a *API) importReconciliation(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("dashboard authentication is required", nil)
+	}
+	if a.Reconciliation == nil {
+		return e.NotFoundError("reconciliation service is unavailable", nil)
+	}
+	if err := e.Request.ParseMultipartForm(reconciliation.MaxFileBytes); err != nil {
+		return e.BadRequestError("invalid multipart statement upload", err)
+	}
+	file, header, err := e.Request.FormFile("statement")
+	if err != nil {
+		return e.BadRequestError("multipart field 'statement' is required", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, reconciliation.MaxFileBytes+1))
+	if err != nil {
+		return e.BadRequestError("failed to read statement", err)
+	}
+	if len(data) > reconciliation.MaxFileBytes {
+		return e.JSON(http.StatusRequestEntityTooLarge, map[string]any{"error": map[string]any{"code": "STATEMENT_TOO_LARGE", "message": "statement exceeds 10 MiB"}})
+	}
+	result, err := a.Reconciliation.Import(reconciliation.ImportInput{Filename: header.Filename, Data: data, Actor: a.actor(e)})
+	if err != nil {
+		return writeDomainError(e, err)
+	}
+	return e.JSON(http.StatusCreated, result)
+}
+
+type refundRequestBody struct {
+	PaymentID   string          `json:"paymentId"`
+	AmountPaise int64           `json:"amountPaise"`
+	Reason      string          `json:"reason"`
+	ExternalID  string          `json:"externalId"`
+	Metadata    json.RawMessage `json:"metadata"`
+}
+
+func (a *API) requestRefund(e *core.RequestEvent) error {
+	if !a.authorizedWrite(e) {
+		return e.UnauthorizedError("API key or dashboard authentication is required", nil)
+	}
+	if a.Refunds == nil {
+		return e.NotFoundError("refund service is unavailable", nil)
+	}
+	var body refundRequestBody
+	if err := decodeJSON(e, &body); err != nil {
+		return e.BadRequestError("invalid JSON body", err)
+	}
+	var metadata any
+	if len(body.Metadata) > 0 && string(body.Metadata) != "null" {
+		if err := json.Unmarshal(body.Metadata, &metadata); err != nil {
+			return e.BadRequestError("metadata must be valid JSON", err)
+		}
+	}
+	record, replayed, err := a.Refunds.Request(refunds.RequestInput{
+		PaymentID: body.PaymentID, AmountPaise: body.AmountPaise, Reason: body.Reason,
+		ExternalID: body.ExternalID, IdempotencyKey: strings.TrimSpace(e.Request.Header.Get("Idempotency-Key")),
+		Metadata: metadata, Actor: a.actor(e),
+	})
+	if err != nil {
+		return writeDomainError(e, err)
+	}
+	status := http.StatusCreated
+	if replayed {
+		status = http.StatusOK
+		e.Response.Header().Set("X-Idempotent-Replayed", "true")
+	}
+	return e.JSON(status, refundResponse(record))
+}
+
+type refundUpdateBody struct {
+	Status    string `json:"status"`
+	Reference string `json:"reference"`
+	Note      string `json:"note"`
+}
+
+func (a *API) updateRefund(e *core.RequestEvent) error {
+	if !a.authorizedWrite(e) {
+		return e.UnauthorizedError("API key or dashboard authentication is required", nil)
+	}
+	if a.Refunds == nil {
+		return e.NotFoundError("refund service is unavailable", nil)
+	}
+	var body refundUpdateBody
+	if err := decodeJSON(e, &body); err != nil {
+		return e.BadRequestError("invalid JSON body", err)
+	}
+	record, err := a.Refunds.Update(refunds.UpdateInput{
+		RefundID: e.Request.PathValue("id"), Status: body.Status,
+		Reference: body.Reference, Note: body.Note, Actor: a.actor(e),
+	})
+	if err != nil {
+		return writeDomainError(e, err)
+	}
+	return e.JSON(http.StatusOK, refundResponse(record))
+}
+
+func (a *API) backupStatus(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("dashboard authentication is required", nil)
+	}
+	if a.Backups == nil {
+		return e.NotFoundError("backup service is unavailable", nil)
+	}
+	status, err := a.Backups.GetStatus(e.Request.Context(), false)
+	if err != nil {
+		return e.InternalServerError("failed to inspect backups", err)
+	}
+	return e.JSON(http.StatusOK, status)
+}
+
+func (a *API) createBackup(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("dashboard authentication is required", nil)
+	}
+	if a.Backups == nil {
+		return e.NotFoundError("backup service is unavailable", nil)
+	}
+	name, err := a.Backups.Create(e.Request.Context())
+	if err != nil {
+		return e.InternalServerError("failed to create backup", err)
+	}
+	return e.JSON(http.StatusCreated, map[string]any{"name": name})
+}
+
+func (a *API) verifyBackup(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("dashboard authentication is required", nil)
+	}
+	if a.Backups == nil {
+		return e.NotFoundError("backup service is unavailable", nil)
+	}
+	status, err := a.Backups.GetStatus(e.Request.Context(), true)
+	if err != nil {
+		return e.InternalServerError("failed to verify backup", err)
+	}
+	code := http.StatusOK
+	if !status.LatestVerified {
+		code = http.StatusUnprocessableEntity
+	}
+	return e.JSON(code, status)
+}
+
+func (a *API) restoreDrill(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("dashboard authentication is required", nil)
+	}
+	if a.Backups == nil {
+		return e.NotFoundError("backup service is unavailable", nil)
+	}
+	result, err := a.Backups.RestoreDrill(e.Request.Context())
+	if err != nil {
+		return e.InternalServerError("backup restore drill failed", err)
+	}
+	return e.JSON(http.StatusOK, result)
+}
+
+func refundResponse(record *core.Record) map[string]any {
+	if record == nil {
+		return nil
+	}
+	return map[string]any{
+		"id": record.Id, "paymentId": record.GetString("payment"),
+		"amountPaise": record.GetInt("amount"), "status": record.GetString("status"),
+		"reason": record.GetString("reason"), "reference": record.GetString("reference"),
+		"externalId":  record.GetString("external_id"),
+		"requestedAt": record.GetDateTime("requested_at").String(),
+		"completedAt": record.GetDateTime("completed_at").String(),
+	}
 }
 
 func (a *API) gmessagesStatus(e *core.RequestEvent) error {
@@ -359,6 +631,16 @@ func (a *API) gmessagesUnpair(e *core.RequestEvent) error {
 		return e.InternalServerError("failed to unpair Google Messages", err)
 	}
 	return e.JSON(http.StatusOK, a.GMessages.Status())
+}
+
+func (a *API) actor(e *core.RequestEvent) audit.Actor {
+	if e.Auth != nil {
+		return audit.Actor{ID: e.Auth.Id, Email: e.Auth.Email()}
+	}
+	if bearerMatches(a.Config.APIKey, e.Request.Header.Get("Authorization")) {
+		return audit.Actor{Email: "api-key"}
+	}
+	return audit.Actor{}
 }
 
 func (a *API) authorizedWrite(e *core.RequestEvent) bool {

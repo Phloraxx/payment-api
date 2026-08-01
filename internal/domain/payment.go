@@ -31,6 +31,7 @@ type Payment struct {
 	UPIId          string
 	PayerName      string
 	PaidAt         time.Time
+	ResolvedAt     time.Time
 	ExternalID     string
 	IdempotencyKey string
 }

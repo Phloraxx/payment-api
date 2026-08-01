@@ -22,17 +22,33 @@ type Input struct {
 	RawPayload    any
 }
 
+type ReviewInput struct {
+	Kind                string
+	Severity            string
+	SMSEventID          string
+	PaymentID           string
+	CandidatePaymentIDs []string
+	Reason              string
+	OpenedAt            time.Time
+}
+
+type ReviewWriter interface {
+	OpenSMSReviewInApp(app core.App, input ReviewInput) (string, error)
+}
+
 type Result struct {
-	EventID   string `json:"eventId"`
-	Status    string `json:"status"`
-	Action    string `json:"action"`
-	PaymentID string `json:"paymentId,omitempty"`
-	Duplicate bool   `json:"duplicate,omitempty"`
+	EventID      string `json:"eventId"`
+	Status       string `json:"status"`
+	Action       string `json:"action"`
+	PaymentID    string `json:"paymentId,omitempty"`
+	ReviewCaseID string `json:"reviewCaseId,omitempty"`
+	Duplicate    bool   `json:"duplicate,omitempty"`
 }
 
 type Service struct {
 	App      core.App
 	Payments *payments.Service
+	Reviews  ReviewWriter
 	Now      func() time.Time
 }
 
@@ -130,9 +146,16 @@ func (s *Service) Ingest(input Input) (Result, error) {
 			if err := tx.Save(event); err != nil {
 				return err
 			}
-			result.Status = "error"
+			caseID, err := s.openReviewInApp(tx, ReviewInput{
+				Kind: "parse_error", Severity: "warning", SMSEventID: event.Id,
+				Reason: "Bank-credit-like message could not be parsed: " + parseErr.Error(), OpenedAt: now,
+			})
+			if err != nil {
+				return err
+			}
+			result.Status = "review_required"
 			result.Action = "parse_error"
-			domainErr = domain.New("SMS_PARSE_ERROR", parseErr.Error(), 422)
+			result.ReviewCaseID = caseID
 			return nil
 		}
 
@@ -147,9 +170,20 @@ func (s *Service) Ingest(input Input) (Result, error) {
 			if err := tx.Save(event); err != nil {
 				return err
 			}
-			result.Status = "error"
+			candidates, err := candidatePaymentIDs(tx, parsed.AmountPaise, now)
+			if err != nil {
+				return err
+			}
+			caseID, err := s.openReviewInApp(tx, ReviewInput{
+				Kind: "missing_rrn", Severity: "warning", SMSEventID: event.Id,
+				CandidatePaymentIDs: candidates, Reason: "Bank credit has an amount but no usable UPI reference/RRN", OpenedAt: now,
+			})
+			if err != nil {
+				return err
+			}
+			result.Status = "review_required"
 			result.Action = "missing_rrn"
-			domainErr = domain.New("SMS_MISSING_RRN", "bank credit has no usable UPI reference/RRN", 422)
+			result.ReviewCaseID = caseID
 			return nil
 		}
 
@@ -163,9 +197,25 @@ func (s *Service) Ingest(input Input) (Result, error) {
 				if err := tx.Save(event); err != nil {
 					return err
 				}
-				result.Status = "error"
+				kind := "ambiguous"
+				severity := "critical"
+				if dErr.Code == "RRN_AMOUNT_MISMATCH" {
+					kind = "rrn_conflict"
+				}
+				candidates, err := candidatePaymentIDs(tx, parsed.AmountPaise, now)
+				if err != nil {
+					return err
+				}
+				caseID, err := s.openReviewInApp(tx, ReviewInput{
+					Kind: kind, Severity: severity, SMSEventID: event.Id,
+					CandidatePaymentIDs: candidates, Reason: dErr.Message, OpenedAt: now,
+				})
+				if err != nil {
+					return err
+				}
+				result.Status = "review_required"
 				result.Action = "match_error"
-				domainErr = dErr
+				result.ReviewCaseID = caseID
 				return nil
 			}
 			return matchErr
@@ -186,7 +236,19 @@ func (s *Service) Ingest(input Input) (Result, error) {
 		case "unmatched":
 			event.Set("processing_status", "unmatched")
 			event.Set("error", "no eligible payment has this exact amount")
-			result.Status = "unmatched"
+			candidates, err := candidatePaymentIDs(tx, parsed.AmountPaise, now)
+			if err != nil {
+				return err
+			}
+			caseID, err := s.openReviewInApp(tx, ReviewInput{
+				Kind: "unmatched", Severity: "warning", SMSEventID: event.Id,
+				CandidatePaymentIDs: candidates, Reason: "No eligible payment has this exact amount", OpenedAt: now,
+			})
+			if err != nil {
+				return err
+			}
+			result.Status = "review_required"
+			result.ReviewCaseID = caseID
 		default:
 			event.Set("processing_status", "error")
 			event.Set("error", "unexpected matching action: "+action)
@@ -223,4 +285,33 @@ func validSource(source string) bool {
 	default:
 		return false
 	}
+}
+
+func (s *Service) openReviewInApp(app core.App, input ReviewInput) (string, error) {
+	if s.Reviews == nil {
+		return "", nil
+	}
+	return s.Reviews.OpenSMSReviewInApp(app, input)
+}
+
+func candidatePaymentIDs(app core.App, amountPaise int64, now time.Time) ([]string, error) {
+	if amountPaise <= 0 {
+		return nil, nil
+	}
+	records, err := app.FindRecordsByFilter(
+		"payments",
+		"payable_amount = {:amount} && reuse_after > {:now}",
+		"-created_at",
+		10,
+		0,
+		dbx.Params{"amount": amountPaise, "now": now.UTC().Format("2006-01-02 15:04:05.000Z")},
+	)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(records))
+	for _, record := range records {
+		ids = append(ids, record.Id)
+	}
+	return ids, nil
 }

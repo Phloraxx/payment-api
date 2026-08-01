@@ -95,3 +95,32 @@ textarea:focus { border-color: #82944d; box-shadow: 0 0 0 3px rgba(216,243,106,.
 .google-pair-setup a { color: #b7d2ff; }
 .google-pair-setup code { color: #d8f36a; }
 .pair-emoji { font-size: clamp(76px, 12vw, 128px); line-height: 1.15; margin: 8px 0 14px; }
+
+.grid.six { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.capacity-list { display: grid; gap: 12px; }
+.capacity-row { display: grid; grid-template-columns: minmax(190px, 1fr) minmax(160px, 2fr) auto; align-items: center; gap: 14px; }
+.capacity-row small { display: block; margin-top: 3px; color: var(--muted); }
+.capacity-meter { height: 10px; overflow: hidden; border-radius: 999px; background: var(--surface-soft); border: 1px solid var(--border); }
+.capacity-meter span { display: block; height: 100%; border-radius: inherit; background: #55a77b; }
+.capacity-meter span.warning { background: #d59c34; }
+.capacity-meter span.critical { background: #c84c4c; }
+.evidence-card { margin: 18px 0; padding: 16px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface-soft); }
+.toggle { display: inline-flex; flex-direction: row !important; align-items: center; gap: 8px; color: var(--muted); font-weight: 600; }
+.toggle input { width: auto; }
+.file-input { padding: 10px; background: var(--surface); }
+textarea { min-height: 96px; resize: vertical; }
+.badge.warning, .badge.configured, .badge.local { background: #fff1cf; color: #825b09; }
+.badge.critical { background: #ffe0e0; color: #9b2929; }
+.badge.info, .badge.verified, .badge.offsite { background: #def6e8; color: #14623b; }
+.badge.open { background: #fff1cf; color: #825b09; }
+.badge.resolved, .badge.completed, .badge.matched { background: #def6e8; color: #14623b; }
+.badge.dismissed, .badge.cancelled, .badge.failed, .badge.invalid { background: #eceff3; color: #4b5563; }
+
+@media (max-width: 1100px) { .grid.six { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 760px) {
+  .grid.six, .grid.two { grid-template-columns: 1fr 1fr; }
+  .capacity-row { grid-template-columns: 1fr auto; }
+  .capacity-meter { grid-column: 1 / -1; grid-row: 2; }
+}
+@media (max-width: 480px) { .grid.six, .grid.two { grid-template-columns: 1fr; } }
