@@ -45,6 +45,7 @@ type razorpayAPIFixture struct {
 	app      *tests.TestApp
 	server   *httptest.Server
 	token    string
+	apiKey   string
 	service  *razorpaytest.Service
 	provider *apiRazorpayProvider
 }
@@ -65,7 +66,7 @@ func newRazorpayAPIFixture(t *testing.T, enabled bool) *razorpayAPIFixture {
 	}
 	token, _ := operator.NewAuthToken()
 	cfg := config.Config{
-		TestMode: true, PaymentTTL: 5, AmountQuarantine: 0,
+		TestMode: true, APIKey: "razorpay-api-key-1234567890123456", PaymentTTL: 5, AmountQuarantine: 0,
 		RazorpayTestEnabled: enabled, RazorpayTestKeyID: "rzp_test_api",
 		RazorpayTestKeySecret: "checkout-secret-123456", RazorpayTestWebhookSecret: "webhook-secret-123456789012",
 		RazorpayTestDisplayName: "PayGate Test",
@@ -90,7 +91,7 @@ func newRazorpayAPIFixture(t *testing.T, enabled bool) *razorpayAPIFixture {
 	mux, _ := serveEvent.Router.BuildMux()
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
-	return &razorpayAPIFixture{app: app, server: server, token: token, service: service, provider: provider}
+	return &razorpayAPIFixture{app: app, server: server, token: token, apiKey: cfg.APIKey, service: service, provider: provider}
 }
 
 func (f *razorpayAPIFixture) request(t *testing.T, method, path, body string, authenticated bool, headers map[string]string) (*http.Response, string) {
@@ -115,6 +116,14 @@ func (f *razorpayAPIFixture) request(t *testing.T, method, path, body string, au
 	defer res.Body.Close()
 	raw, _ := io.ReadAll(res.Body)
 	return res, string(raw)
+}
+
+func (f *razorpayAPIFixture) apiKeyRequest(t *testing.T, method, path, body string, headers map[string]string) (*http.Response, string) {
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	headers["Authorization"] = "Bearer " + f.apiKey
+	return f.request(t, method, path, body, false, headers)
 }
 
 func TestRazorpayTestRoutesAreDisabledByDefault(t *testing.T) {
@@ -210,5 +219,29 @@ func TestRazorpayEnabledCSPAllowsOnlyRazorpayCheckoutOrigins(t *testing.T) {
 	}
 	if strings.Contains(csp, "'unsafe-inline'") || strings.Contains(csp, "'unsafe-eval'") {
 		t.Fatalf("CSP was weakened: %s", csp)
+	}
+}
+
+func TestRazorpayTestRoutesAcceptServerAPIKey(t *testing.T) {
+	fixture := newRazorpayAPIFixture(t, true)
+	res, body := fixture.apiKeyRequest(t, http.MethodGet, "/api/razorpay/test/config", "", nil)
+	if res.StatusCode != http.StatusOK || !strings.Contains(body, `"enabled":true`) {
+		t.Fatalf("config status=%d body=%s", res.StatusCode, body)
+	}
+	res, body = fixture.apiKeyRequest(t, http.MethodPost, "/api/razorpay/test/orders", `{"amountPaise":125,"externalId":"portal-test"}`, map[string]string{"Idempotency-Key": "portal-test"})
+	if res.StatusCode != http.StatusCreated || !strings.Contains(body, `"razorpayOrderId":"order_api_test"`) {
+		t.Fatalf("create status=%d body=%s", res.StatusCode, body)
+	}
+	localID := jsonStringField(t, body, "id")
+	record, err := fixture.app.FindRecordById("razorpay_test_orders", localID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.GetString("created_by") != "" {
+		t.Fatalf("API-key order unexpectedly has created_by=%q", record.GetString("created_by"))
+	}
+	res, body = fixture.apiKeyRequest(t, http.MethodGet, "/api/razorpay/test/orders/"+localID, "", nil)
+	if res.StatusCode != http.StatusOK || !strings.Contains(body, `"amountPaise":125`) {
+		t.Fatalf("get status=%d body=%s", res.StatusCode, body)
 	}
 }

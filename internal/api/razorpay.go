@@ -21,8 +21,8 @@ type razorpayTestVerifyBody struct {
 }
 
 func (a *API) razorpayTestConfig(e *core.RequestEvent) error {
-	if !a.dashboardAuth(e) {
-		return e.UnauthorizedError("dashboard authentication is required", nil)
+	if !a.authorizedWrite(e) {
+		return e.UnauthorizedError("API key or dashboard authentication is required", nil)
 	}
 	enabled := a.Config.RazorpayTestEnabled && a.RazorpayTest != nil
 	keyID := ""
@@ -38,8 +38,8 @@ func (a *API) razorpayTestConfig(e *core.RequestEvent) error {
 }
 
 func (a *API) razorpayTestCreateOrder(e *core.RequestEvent) error {
-	if !a.dashboardAuth(e) {
-		return e.UnauthorizedError("dashboard authentication is required", nil)
+	if !a.authorizedWrite(e) {
+		return e.UnauthorizedError("API key or dashboard authentication is required", nil)
 	}
 	if !a.razorpayTestAvailable() {
 		return e.NotFoundError("Razorpay test rail is disabled", nil)
@@ -50,7 +50,7 @@ func (a *API) razorpayTestCreateOrder(e *core.RequestEvent) error {
 	}
 	record, replayed, err := a.RazorpayTest.Create(e.Request.Context(), razorpaytest.CreateInput{
 		AmountPaise: body.AmountPaise, ExternalID: body.ExternalID,
-		IdempotencyKey: strings.TrimSpace(e.Request.Header.Get("Idempotency-Key")), ActorID: e.Auth.Id,
+		IdempotencyKey: strings.TrimSpace(e.Request.Header.Get("Idempotency-Key")), ActorID: a.razorpayActorID(e),
 	})
 	if err != nil {
 		return writeDomainError(e, err)
@@ -64,8 +64,8 @@ func (a *API) razorpayTestCreateOrder(e *core.RequestEvent) error {
 }
 
 func (a *API) razorpayTestGetOrder(e *core.RequestEvent) error {
-	if !a.dashboardAuth(e) {
-		return e.UnauthorizedError("dashboard authentication is required", nil)
+	if !a.authorizedWrite(e) {
+		return e.UnauthorizedError("API key or dashboard authentication is required", nil)
 	}
 	if !a.razorpayTestAvailable() {
 		return e.NotFoundError("Razorpay test rail is disabled", nil)
@@ -78,8 +78,8 @@ func (a *API) razorpayTestGetOrder(e *core.RequestEvent) error {
 }
 
 func (a *API) razorpayTestVerify(e *core.RequestEvent) error {
-	if !a.dashboardAuth(e) {
-		return e.UnauthorizedError("dashboard authentication is required", nil)
+	if !a.authorizedWrite(e) {
+		return e.UnauthorizedError("API key or dashboard authentication is required", nil)
 	}
 	if !a.razorpayTestAvailable() {
 		return e.NotFoundError("Razorpay test rail is disabled", nil)
@@ -99,8 +99,8 @@ func (a *API) razorpayTestVerify(e *core.RequestEvent) error {
 }
 
 func (a *API) razorpayTestRefresh(e *core.RequestEvent) error {
-	if !a.dashboardAuth(e) {
-		return e.UnauthorizedError("dashboard authentication is required", nil)
+	if !a.authorizedWrite(e) {
+		return e.UnauthorizedError("API key or dashboard authentication is required", nil)
 	}
 	if !a.razorpayTestAvailable() {
 		return e.NotFoundError("Razorpay test rail is disabled", nil)
@@ -131,6 +131,13 @@ func (a *API) razorpayTestWebhook(e *core.RequestEvent) error {
 		return writeDomainError(e, err)
 	}
 	return e.JSON(http.StatusOK, result)
+}
+
+func (a *API) razorpayActorID(e *core.RequestEvent) string {
+	if e.Auth != nil {
+		return e.Auth.Id
+	}
+	return ""
 }
 
 func (a *API) razorpayTestAvailable() bool {

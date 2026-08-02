@@ -84,3 +84,13 @@ Suggested scenarios:
 - no customer-facing production checkout route;
 - no automatic migration of Razorpay test orders into normal PayGate payments;
 - no raw webhook-payload retention.
+
+## Public IEEE portal proxy
+
+The approved public website is `https://pay.ieeesahrdaya.com`. The customer browser must not call the isolated Razorpay service directly. The maintained `payment-frontend` Hono server proxies only the customer-safe config/create/status/verify routes with a separate server API key. Razorpay sends the raw signed webhook through the same approved domain:
+
+```text
+https://pay.ieeesahrdaya.com/api/razorpay/test/webhook
+```
+
+The isolated Razorpay service accepts either an operator session or `PAYGATE_API_KEY` for config/order operations. The webhook remains authenticated exclusively by `X-Razorpay-Signature` over the original raw body.
