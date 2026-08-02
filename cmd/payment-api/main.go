@@ -19,6 +19,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/razorpaytest"
 	"github.com/Phloraxx/payment-api/internal/reconciliation"
 	"github.com/Phloraxx/payment-api/internal/refunds"
 	"github.com/Phloraxx/payment-api/internal/retention"
@@ -64,6 +65,11 @@ func main() {
 	}
 	reconciliationService.StatementLocation = statementLocation
 	refundService := refunds.NewService(app, auditService, webhookService)
+	var razorpayTestService *razorpaytest.Service
+	if cfg.RazorpayTestEnabled {
+		razorpayClient := razorpaytest.NewClient(cfg.RazorpayTestKeyID, cfg.RazorpayTestKeySecret)
+		razorpayTestService = razorpaytest.NewService(app, razorpayClient, cfg.RazorpayTestKeyID, cfg.RazorpayTestKeySecret, cfg.RazorpayTestWebhookSecret, cfg.RazorpayTestDisplayName)
+	}
 	retentionService := retention.NewService(app, cfg)
 	backupService := backups.NewService(app, cfg, alertService)
 	backupService.RegisterHooks()
@@ -77,6 +83,7 @@ func main() {
 	apiService.Alerts = alertService
 	apiService.Refunds = refundService
 	apiService.Backups = backupService
+	apiService.RazorpayTest = razorpayTestService
 	apiService.Register(app)
 	registerPairCommand(app, cfg, gmessagesLogger)
 	registerHealthcheckCommand(app)
@@ -231,6 +238,8 @@ func mergeManagedRateLimitRules(existing []core.RateLimitRule) []core.RateLimitR
 		{Label: "POST /api/events/sms", MaxRequests: 60, Duration: 60},
 		{Label: "POST /api/webhook", MaxRequests: 30, Duration: 60},
 		{Label: "POST /api/payments", MaxRequests: 120, Duration: 60},
+		{Label: "POST /api/razorpay/test/orders", MaxRequests: 30, Duration: 60},
+		{Label: "POST /api/razorpay/test/webhook", MaxRequests: 120, Duration: 60},
 	}
 	labels := make(map[string]struct{}, len(managed))
 	for _, rule := range managed {

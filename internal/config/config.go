@@ -45,6 +45,11 @@ type Config struct {
 	OperatorAlertWebhookURL    string
 	OperatorAlertWebhookSecret string
 	StatementTimezone          string
+	RazorpayTestEnabled        bool
+	RazorpayTestKeyID          string
+	RazorpayTestKeySecret      string
+	RazorpayTestWebhookSecret  string
+	RazorpayTestDisplayName    string
 }
 
 func Load() (Config, error) {
@@ -108,6 +113,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	razorpayTestEnabled, err := boolEnv("RAZORPAY_TEST_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	dataDir := strings.TrimSpace(env("PB_DATA_DIR", "./pb_data"))
 	cfg := Config{
@@ -141,6 +150,11 @@ func Load() (Config, error) {
 		OperatorAlertWebhookURL:    strings.TrimSpace(os.Getenv("OPERATOR_ALERT_WEBHOOK_URL")),
 		OperatorAlertWebhookSecret: strings.TrimSpace(os.Getenv("OPERATOR_ALERT_WEBHOOK_SECRET")),
 		StatementTimezone:          strings.TrimSpace(env("STATEMENT_TIMEZONE", "Asia/Kolkata")),
+		RazorpayTestEnabled:        razorpayTestEnabled,
+		RazorpayTestKeyID:          strings.TrimSpace(os.Getenv("RAZORPAY_TEST_KEY_ID")),
+		RazorpayTestKeySecret:      strings.TrimSpace(os.Getenv("RAZORPAY_TEST_KEY_SECRET")),
+		RazorpayTestWebhookSecret:  strings.TrimSpace(os.Getenv("RAZORPAY_TEST_WEBHOOK_SECRET")),
+		RazorpayTestDisplayName:    strings.TrimSpace(env("RAZORPAY_TEST_DISPLAY_NAME", "PayGate Razorpay Test")),
 	}
 	cfg.GMessagesSessionPath = strings.TrimSpace(os.Getenv("GMESSAGES_SESSION_PATH"))
 	if cfg.GMessagesSessionPath == "" {
@@ -214,6 +228,20 @@ func (c Config) ValidateServe() error {
 		}
 		if len(c.OperatorAlertWebhookSecret) < minPrimarySecretLength {
 			return fmt.Errorf("OPERATOR_ALERT_WEBHOOK_SECRET must be at least %d characters", minPrimarySecretLength)
+		}
+	}
+	if c.RazorpayTestEnabled {
+		if !strings.HasPrefix(c.RazorpayTestKeyID, "rzp_test_") {
+			return errors.New("RAZORPAY_TEST_KEY_ID must be a Test Mode key beginning with rzp_test_")
+		}
+		if len(c.RazorpayTestKeySecret) < 16 {
+			return errors.New("RAZORPAY_TEST_KEY_SECRET must be at least 16 characters")
+		}
+		if len(c.RazorpayTestWebhookSecret) < minPrimarySecretLength {
+			return fmt.Errorf("RAZORPAY_TEST_WEBHOOK_SECRET must be at least %d characters", minPrimarySecretLength)
+		}
+		if c.RazorpayTestDisplayName == "" || len(c.RazorpayTestDisplayName) > 128 {
+			return errors.New("RAZORPAY_TEST_DISPLAY_NAME must be between 1 and 128 characters")
 		}
 	}
 	if c.BackupS3Enabled {

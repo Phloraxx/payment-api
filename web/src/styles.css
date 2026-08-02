@@ -128,3 +128,6 @@ textarea { min-height: 96px; resize: vertical; }
   .capacity-meter { grid-column: 1 / -1; grid-row: 2; }
 }
 @media (max-width: 480px) { .grid.six, .grid.two { grid-template-columns: 1fr; } }
+.badge.test, .badge.captured, .badge.authorized { background: #334f36; color: #d8f36a; }
+.badge.creating, .badge.created, .badge.verification_pending { background: #34445d; color: #a9ccff; }
+.badge.create_failed, .badge.partially_refunded, .badge.refunded { background: #5b4228; color: #ffc56a; }

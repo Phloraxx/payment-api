@@ -7,8 +7,9 @@ import { Payments } from "./pages/Payments";
 import { AuditEvents, SMSEvents, WebhookDeliveries } from "./pages/Records";
 import { AlertsPage, ReconciliationPage, RefundsPage, ReviewsPage } from "./pages/Operations";
 import { Settings } from "./pages/Settings";
+import { RazorpayTestPage } from "./pages/RazorpayTest";
 
-const pages: Page[] = ["dashboard", "payments", "reviews", "reconciliation", "sms", "alerts", "refunds", "webhooks", "audit", "settings"];
+const pages: Page[] = ["dashboard", "payments", "reviews", "reconciliation", "sms", "alerts", "refunds", "webhooks", "audit", "razorpay_test", "settings"];
 
 function pageFromHash(): Page {
   const value = window.location.hash.replace(/^#\/?/, "") as Page;
@@ -71,6 +72,7 @@ export function App() {
       {page === "refunds" && <RefundsPage notify={setNotice} />}
       {page === "webhooks" && <WebhookDeliveries />}
       {page === "audit" && <AuditEvents />}
+      {page === "razorpay_test" && <RazorpayTestPage notify={setNotice} />}
       {page === "settings" && <Settings notify={setNotice} />}
     </main>
   </div>;
@@ -79,5 +81,6 @@ export function App() {
 function label(value: string) {
   if (value === "sms") return "SMS Events";
   if (value === "audit") return "Audit Trail";
+  if (value === "razorpay_test") return "Razorpay Test";
   return value.charAt(0).toUpperCase() + value.slice(1);
 }

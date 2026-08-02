@@ -38,3 +38,5 @@ tmp/
 .vercel/
 .dev.vars
 .wrangler/
+
+.env.razorpay-test
