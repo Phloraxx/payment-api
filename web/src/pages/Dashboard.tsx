@@ -66,7 +66,7 @@ export function Dashboard() {
       <div className="section-title"><div><p className="eyebrow">99-SUFFIX POOLS</p><h2>Fingerprint capacity</h2></div><span className="muted">70% warning · 95% critical</span></div>
       {!capacityPools.length ? <p className="empty">No active or quarantined fingerprint pools.</p> : <div className="capacity-list">{capacityPools.map((pool) => <div className="capacity-row" key={pool.requestedAmountPaise}>
         <div><strong>₹{pool.requestedAmount}</strong><small>{pool.pending} pending · {pool.quarantined} quarantined · {pool.available} available</small></div>
-        <div className="capacity-meter"><span className={pool.level} style={{ width: `${Math.min(pool.utilizationPercent, 100)}%` }} /></div>
+        <progress className={`capacity-meter ${pool.level}`} max={100} value={Math.min(pool.utilizationPercent, 100)} aria-label={`${pool.utilizationPercent.toFixed(0)}% utilized`} />
         <Badge status={pool.level} />
       </div>)}</div>}
     </section>

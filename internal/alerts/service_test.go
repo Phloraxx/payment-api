@@ -157,3 +157,73 @@ func TestOperatorAlertWebhookFailureSchedulesRetry(t *testing.T) {
 		t.Fatalf("next=%s", next)
 	}
 }
+
+func TestSeverityEscalationQueuesNewNotification(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	service := NewService(app)
+	service.ConfigureWebhook(server.URL, "operator-alert-secret-1234567890")
+	now := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	service.Now = func() time.Time { return now }
+	if _, _, err := service.Open(Input{Kind: "capacity_high", Severity: "warning", DedupeKey: "capacity:10000", Message: "warning"}); err != nil {
+		t.Fatal(err)
+	}
+	if processed, err := service.SendPending(context.Background()); err != nil || processed != 1 {
+		t.Fatalf("warning processed=%d err=%v", processed, err)
+	}
+	now = now.Add(time.Minute)
+	if _, created, err := service.Open(Input{Kind: "capacity_high", Severity: "critical", DedupeKey: "capacity:10000", Message: "critical"}); err != nil || created {
+		t.Fatalf("critical created=%v err=%v", created, err)
+	}
+	if processed, err := service.SendPending(context.Background()); err != nil || processed != 1 {
+		t.Fatalf("critical processed=%d err=%v", processed, err)
+	}
+	if requests != 2 {
+		t.Fatalf("requests=%d", requests)
+	}
+}
+
+func TestOperatorAlertClientDoesNotFollowRedirects(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+	var redirected int
+	destination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer destination.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, destination.URL, http.StatusTemporaryRedirect)
+	}))
+	defer redirector.Close()
+	service := NewService(app)
+	service.ConfigureWebhook(redirector.URL, "operator-alert-secret-1234567890")
+	now := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	service.Now = func() time.Time { return now }
+	id, _, err := service.Open(Input{Kind: "backup_failed", Severity: "critical", DedupeKey: "backup:redirect", Message: "redirect test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.SendPending(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if redirected != 0 {
+		t.Fatalf("redirect destination received %d requests", redirected)
+	}
+	record, _ := app.FindRecordById("alerts", id)
+	if record.GetString("notification_status") != "failed" {
+		t.Fatalf("notification status=%s", record.GetString("notification_status"))
+	}
+}

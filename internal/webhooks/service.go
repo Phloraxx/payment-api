@@ -38,7 +38,7 @@ func NewService(app core.App, cfg config.Config) *Service {
 	return &Service{
 		App:        app,
 		Config:     cfg,
-		HTTPClient: &http.Client{Timeout: 10 * time.Second},
+		HTTPClient: newDeliveryHTTPClient(),
 		Logger:     slog.Default(),
 		Now:        time.Now,
 		wake:       make(chan struct{}, 1),
@@ -231,7 +231,7 @@ func (s *Service) deliver(ctx context.Context, record *core.Record) {
 	statusCode := 0
 	if err == nil {
 		var response *http.Response
-		response, err = s.HTTPClient.Do(req)
+		response, err = s.client().Do(req)
 		if response != nil {
 			statusCode = response.StatusCode
 			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
@@ -301,10 +301,6 @@ func (s *Service) recoverStale(now time.Time) error {
 	return nil
 }
 
-func (s *Service) RetryCount() (int64, error) {
-	return s.App.CountRecords("webhook_deliveries", dbx.NewExp("status IN ('pending','failed','sending')"))
-}
-
 func Sign(secret, timestamp string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(timestamp))
@@ -338,6 +334,22 @@ func (s *Service) now() time.Time {
 		return time.Now().UTC()
 	}
 	return s.Now().UTC()
+}
+
+func newDeliveryHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
+func (s *Service) client() *http.Client {
+	if s.HTTPClient == nil {
+		return newDeliveryHTTPClient()
+	}
+	return s.HTTPClient
 }
 
 func (s *Service) logger() *slog.Logger {

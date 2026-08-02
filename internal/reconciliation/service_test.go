@@ -209,3 +209,15 @@ func TestXLSXArchiveValidationRejectsNonZipData(t *testing.T) {
 		t.Fatal("expected invalid ZIP error")
 	}
 }
+
+func TestParseStatementDateUsesIndianBankTimezone(t *testing.T) {
+	location, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parseStatementDate("01/08/2026 14:00:00", location)
+	want := time.Date(2026, 8, 1, 8, 30, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("parsed=%s want=%s", got, want)
+	}
+}

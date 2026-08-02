@@ -50,7 +50,7 @@ type Input struct {
 func NewService(app core.App) *Service {
 	return &Service{
 		App: app, Now: time.Now,
-		HTTPClient: &http.Client{Timeout: 10 * time.Second}, Logger: slog.Default(),
+		HTTPClient: newDeliveryHTTPClient(), Logger: slog.Default(),
 		problemSince: map[string]time.Time{}, wake: make(chan struct{}, 1),
 	}
 }
@@ -80,6 +80,7 @@ func (s *Service) Open(input Input) (string, bool, error) {
 		record, err := tx.FindFirstRecordByData("alerts", "dedupe_key", input.DedupeKey)
 		if err == nil {
 			wasResolved := record.GetString("status") == "resolved"
+			severityEscalated := record.GetString("severity") == "warning" && input.Severity == "critical"
 			record.Set("kind", input.Kind)
 			record.Set("status", "open")
 			record.Set("severity", input.Severity)
@@ -88,9 +89,13 @@ func (s *Service) Open(input Input) (string, bool, error) {
 			record.Set("last_seen_at", now)
 			record.Set("resolved_at", "")
 			record.Set("occurrence_count", record.GetInt("occurrence_count")+1)
-			if wasResolved || (s.NotificationsEnabled() && record.GetString("notification_status") == "disabled") {
-				s.queueNotification(record, now)
-				queued = true
+			if s.NotificationsEnabled() {
+				if wasResolved || severityEscalated || record.GetString("notification_status") == "disabled" {
+					s.queueNotification(record, now)
+					queued = true
+				}
+			} else {
+				record.Set("notification_status", "disabled")
 			}
 			if err := tx.Save(record); err != nil {
 				return err
@@ -505,9 +510,18 @@ func (s *Service) now() time.Time {
 	}
 	return s.Now().UTC()
 }
+func newDeliveryHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
+
 func (s *Service) client() *http.Client {
 	if s.HTTPClient == nil {
-		return &http.Client{Timeout: 10 * time.Second}
+		return newDeliveryHTTPClient()
 	}
 	return s.HTTPClient
 }

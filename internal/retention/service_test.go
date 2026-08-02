@@ -6,6 +6,7 @@ import (
 
 	"github.com/Phloraxx/payment-api/internal/config"
 	_ "github.com/Phloraxx/payment-api/migrations"
+	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
 )
@@ -91,5 +92,47 @@ func TestRunRedactsSensitiveEvidenceAndDeletesExpiredAudit(t *testing.T) {
 	}
 	if count, _ := app.CountRecords("audit_events"); count != 0 {
 		t.Fatalf("audit count=%d", count)
+	}
+}
+
+func TestRunProcessesMoreThanOneRetentionBatch(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+	now := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	collection, err := app.FindCollectionByNameOrId("sms_events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < retentionBatchSize+1; index++ {
+		record := core.NewRecord(collection)
+		record.Set("source", "manual")
+		record.Set("body", "Received Rs.1.01 UPI Ref 12345678")
+		record.Set("processing_status", "matched")
+		record.Set("message_time", now.Add(-91*24*time.Hour))
+		if err := app.Save(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	service := NewService(app, config.Config{
+		RetentionEnabled: true, SMSRawRetention: 90 * 24 * time.Hour,
+		ReconciliationRawRetention: 365 * 24 * time.Hour, AuditRetention: 730 * 24 * time.Hour,
+	})
+	service.Now = func() time.Time { return now }
+	result, err := service.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.SMSEventsRedacted != retentionBatchSize+1 {
+		t.Fatalf("redacted=%d", result.SMSEventsRedacted)
+	}
+	remaining, err := app.CountRecords("sms_events", dbx.NewExp("body != {:redacted}", dbx.Params{"redacted": redactedMarker}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining != 0 {
+		t.Fatalf("unredacted=%d", remaining)
 	}
 }

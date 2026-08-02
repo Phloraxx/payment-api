@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -71,7 +72,11 @@ func (s *Service) Request(input RequestInput) (*core.Record, bool, error) {
 		if input.IdempotencyKey != "" {
 			existing, err := tx.FindFirstRecordByData("refunds", "idempotency_key", input.IdempotencyKey)
 			if err == nil {
-				if existing.GetString("payment") != input.PaymentID || int64(existing.GetInt("amount")) != input.AmountPaise || existing.GetString("reason") != input.Reason || existing.GetString("external_id") != input.ExternalID {
+				existingMetadata, metadataErr := normalizeMetadata(existing.Get("metadata"))
+				if metadataErr != nil {
+					return metadataErr
+				}
+				if existing.GetString("payment") != input.PaymentID || int64(existing.GetInt("amount")) != input.AmountPaise || existing.GetString("reason") != input.Reason || existing.GetString("external_id") != input.ExternalID || !reflect.DeepEqual(existingMetadata, metadata) {
 					return domain.New("REFUND_IDEMPOTENCY_CONFLICT", "the refund idempotency key was already used with different parameters", 409)
 				}
 				result = existing.Clone()
@@ -168,11 +173,29 @@ func (s *Service) Update(input UpdateInput) (*core.Record, error) {
 		}
 		current := refund.GetString("status")
 		if current == input.Status {
+			if input.Reference != "" && input.Reference != refund.GetString("reference") {
+				return domain.New("REFUND_REFERENCE_CONFLICT", "same-status retry supplied a different refund reference", 409)
+			}
 			result = refund.Clone()
 			return nil
 		}
 		if !validTransition(current, input.Status) {
 			return domain.New("INVALID_REFUND_TRANSITION", fmt.Sprintf("refund cannot transition from %s to %s", current, input.Status), 409)
+		}
+		if !statusReservesFunds(current) && statusReservesFunds(input.Status) {
+			paymentID := refund.GetString("payment")
+			payment, err := tx.FindRecordById("payments", paymentID)
+			if err != nil {
+				return err
+			}
+			reserved, err := reservedRefundAmount(tx, paymentID)
+			if err != nil {
+				return err
+			}
+			available := int64(payment.GetInt("payable_amount")) - reserved
+			if int64(refund.GetInt("amount")) > available {
+				return domain.New("REFUND_AMOUNT_EXCEEDS_AVAILABLE", "refund amount exceeds the remaining refundable payment amount", 409)
+			}
 		}
 		if input.Reference != "" {
 			existing, findErr := tx.FindFirstRecordByData("refunds", "reference", input.Reference)
@@ -234,6 +257,15 @@ func reservedRefundAmount(app core.App, paymentID string) (int64, error) {
 		total += int64(record.GetInt("amount"))
 	}
 	return total, nil
+}
+
+func statusReservesFunds(status string) bool {
+	switch status {
+	case "requested", "processing", "completed":
+		return true
+	default:
+		return false
+	}
 }
 
 func validTransition(from, to string) bool {

@@ -12,7 +12,7 @@ const (
 )
 
 func TestValidateServeRequiresCoreSecrets(t *testing.T) {
-	cfg := Config{PaymentTTL: 5 * time.Minute, AmountQuarantine: 24 * time.Hour}
+	cfg := Config{PaymentTTL: 5 * time.Minute, AmountQuarantine: 24 * time.Hour, StatementTimezone: "Asia/Kolkata"}
 	err := cfg.ValidateServe()
 	if err == nil {
 		t.Fatal("ValidateServe accepted missing core configuration")
@@ -25,7 +25,7 @@ func TestValidateServeRequiresCoreSecrets(t *testing.T) {
 }
 
 func TestValidateServeRejectsWeakPrimarySecrets(t *testing.T) {
-	base := Config{UPIID: "operator@bank", APIKey: "short", SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour}
+	base := Config{UPIID: "operator@bank", APIKey: "short", SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour, StatementTimezone: "Asia/Kolkata"}
 	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "PAYGATE_API_KEY") {
 		t.Fatalf("weak API key error = %v", err)
 	}
@@ -37,7 +37,7 @@ func TestValidateServeRejectsWeakPrimarySecrets(t *testing.T) {
 }
 
 func TestValidateServeWebhookSecretIsConditional(t *testing.T) {
-	base := Config{UPIID: "operator@bank", APIKey: testAPISecret, SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour}
+	base := Config{UPIID: "operator@bank", APIKey: testAPISecret, SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour, StatementTimezone: "Asia/Kolkata"}
 	if err := base.ValidateServe(); err != nil {
 		t.Fatalf("base config invalid: %v", err)
 	}
@@ -75,12 +75,16 @@ func TestLoadSupportsLegacyPrototypeVariablesWithoutPromotingLegacySecret(t *tes
 }
 
 func TestValidateServeLegacyWebhookIsExplicit(t *testing.T) {
-	base := Config{UPIID: "operator@bank", APIKey: testAPISecret, SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour}
+	base := Config{UPIID: "operator@bank", APIKey: testAPISecret, SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour, StatementTimezone: "Asia/Kolkata"}
 	base.LegacySMSWebhookEnabled = true
 	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "WEBHOOK_SECRET") {
 		t.Fatalf("legacy route without legacy secret error = %v", err)
 	}
-	base.LegacySMSWebhookSecret = "old-secret"
+	base.LegacySMSWebhookSecret = "short"
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "at least") {
+		t.Fatalf("weak legacy route secret accepted: %v", err)
+	}
+	base.LegacySMSWebhookSecret = "legacy-secret-that-is-long-enough"
 	if err := base.ValidateServe(); err != nil {
 		t.Fatalf("explicit legacy route config rejected: %v", err)
 	}
@@ -96,5 +100,28 @@ func TestLoadRejectsMalformedEnvironmentValues(t *testing.T) {
 	t.Setenv("PAYGATE_RATE_LIMITS_ENABLED", "sometimes")
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PAYGATE_RATE_LIMITS_ENABLED") {
 		t.Fatalf("invalid bool error = %v", err)
+	}
+}
+
+func TestValidateServeRejectsInvalidStatementTimezone(t *testing.T) {
+	cfg := Config{
+		UPIID: "operator@bank", APIKey: testAPISecret, SMSWebhookSecret: testSMSSecret,
+		PaymentTTL: time.Minute, AmountQuarantine: time.Hour, StatementTimezone: "Not/A-Timezone",
+	}
+	if err := cfg.ValidateServe(); err == nil || !strings.Contains(err.Error(), "STATEMENT_TIMEZONE") {
+		t.Fatalf("invalid timezone error=%v", err)
+	}
+}
+
+func TestTestModeStillValidatesStructuralConfiguration(t *testing.T) {
+	cfg := Config{TestMode: true, PaymentTTL: -time.Second, AmountQuarantine: time.Hour, StatementTimezone: "Asia/Kolkata"}
+	if err := cfg.ValidateServe(); err == nil || !strings.Contains(err.Error(), "PAYMENT_TTL") {
+		t.Fatalf("test mode accepted invalid TTL: %v", err)
+	}
+	cfg.PaymentTTL = time.Minute
+	cfg.OperatorAlertWebhookURL = "not-a-url"
+	cfg.OperatorAlertWebhookSecret = "operator-alert-secret-long-enough"
+	if err := cfg.ValidateServe(); err == nil || !strings.Contains(err.Error(), "OPERATOR_ALERT_WEBHOOK_URL") {
+		t.Fatalf("test mode accepted invalid webhook URL: %v", err)
 	}
 }

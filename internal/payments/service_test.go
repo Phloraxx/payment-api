@@ -404,3 +404,96 @@ func TestCapacitySnapshotReportsBlockedFingerprintPools(t *testing.T) {
 		t.Fatalf("warningPools=%d", snapshot.WarningPools)
 	}
 }
+
+func TestManualMatchUsesEvidenceTimeForHistoricalReconciliation(t *testing.T) {
+	service, _, now := paymentTestService(t)
+	payment, _, err := service.Create(CreateInput{AmountRupees: 850})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidenceAt := payment.ExpiresAt.Add(time.Hour)
+	*now = payment.ReuseAfter.Add(time.Hour)
+	if _, err := service.ExpireDue(); err != nil {
+		t.Fatal(err)
+	}
+	var matched *core.Record
+	err = service.App.RunInTransaction(func(tx core.App) error {
+		var action string
+		var matchErr error
+		matched, action, _, matchErr = service.ManualMatchInApp(tx, payment.ID, domain.ParsedSMS{
+			AmountPaise: payment.PayablePaise,
+			RRN:         "850850850850",
+			OccurredAt:  evidenceAt,
+		}, *now)
+		if matchErr == nil && action != "marked_late" {
+			t.Fatalf("action=%s", action)
+		}
+		return matchErr
+	})
+	if err != nil {
+		t.Fatalf("historical evidence inside original quarantine was rejected: %v", err)
+	}
+	if matched.GetString("status") != "late" {
+		t.Fatalf("status=%s", matched.GetString("status"))
+	}
+}
+
+func TestManualMatchRejectsTransactionAfterFingerprintReuseBoundary(t *testing.T) {
+	service, _, now := paymentTestService(t)
+	payment, _, err := service.Create(CreateInput{AmountRupees: 851})
+	if err != nil {
+		t.Fatal(err)
+	}
+	*now = payment.ReuseAfter.Add(2 * time.Hour)
+	err = service.App.RunInTransaction(func(tx core.App) error {
+		_, _, _, err := service.ManualMatchInApp(tx, payment.ID, domain.ParsedSMS{
+			AmountPaise: payment.PayablePaise,
+			RRN:         "851851851851",
+			OccurredAt:  payment.ReuseAfter.Add(time.Minute),
+		}, *now)
+		return err
+	})
+	var domainErr *domain.Error
+	if !errors.As(err, &domainErr) || domainErr.Code != "PAYMENT_QUARANTINE_ELAPSED" {
+		t.Fatalf("error=%v", err)
+	}
+}
+
+func TestMatchAllowsSecondPrecisionBankTimestampNearCreation(t *testing.T) {
+	service, _, now := paymentTestService(t)
+	*now = time.Date(2026, 8, 1, 13, 35, 29, 819_000_000, time.UTC)
+	payment, _, err := service.Create(CreateInput{AmountRupees: 860})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Match(domain.ParsedSMS{
+		AmountPaise: payment.PayablePaise,
+		RRN:         "860860860860",
+		OccurredAt:  now.Truncate(time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "marked_paid" {
+		t.Fatalf("action=%s", result.Action)
+	}
+}
+
+func TestMatchRejectsEvidenceBeyondCreationTolerance(t *testing.T) {
+	service, _, now := paymentTestService(t)
+	payment, _, err := service.Create(CreateInput{AmountRupees: 861})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Match(domain.ParsedSMS{
+		AmountPaise: payment.PayablePaise,
+		RRN:         "861861861861",
+		OccurredAt:  now.Add(-EvidenceTimestampTolerance - time.Millisecond),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Action != "unmatched" || result.Payment != nil {
+		t.Fatalf("result=%+v", result)
+	}
+}

@@ -292,6 +292,7 @@ OUTGOING_WEBHOOK_URL=
 OUTGOING_WEBHOOK_SECRET=
 OPERATOR_ALERT_WEBHOOK_URL=
 OPERATOR_ALERT_WEBHOOK_SECRET=
+STATEMENT_TIMEZONE=Asia/Kolkata
 PAYGATE_RETENTION_ENABLED=true
 SMS_RAW_RETENTION=2160h
 RECONCILIATION_RAW_RETENTION=8760h
@@ -303,7 +304,7 @@ PB_DATA_DIR=./pb_data
 
 Legacy prototype variables `UPI_NAME`, `TICKET_TTL_MINUTES`, `AMOUNT_QUARANTINE_HOURS` and `PAYMENT_WEBHOOK_*` remain understood where documented in `.env.example`. Invalid booleans/durations fail startup instead of silently falling back.
 
-`PAYGATE_TEST_MODE=true` is for controlled tests only and bypasses normal required-config validation.
+`PAYGATE_TEST_MODE=true` is for controlled tests only. It skips required production credentials, but duration, URL, timezone and feature-specific secret validation still applies.
 
 ## Docker
 

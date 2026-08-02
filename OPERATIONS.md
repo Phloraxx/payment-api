@@ -51,6 +51,9 @@ Supported inputs:
 
 The importer recognizes common date, credit/deposit, narration, type and RRN/UPI-reference headings. Debit rows are ignored. XLSX archives are checked for unsafe paths, excessive entries and decompression expansion before parsing.
 
+Bank exports that omit a timezone are interpreted using `STATEMENT_TIMEZONE`, which defaults to `Asia/Kolkata`. Set this explicitly if the receiving account's statement timestamps use a different timezone. Evidence eligibility is determined from the bank transaction time, not the later import/review time.
+PayGate allows a two-second tolerance only when comparing evidence against payment creation time, because SMS and statement timestamps may be rounded to whole seconds while payment records retain sub-second precision. Expiry, cancellation and fingerprint-reuse boundaries are not relaxed.
+
 Classification:
 
 - `matched` — bank RRN and exact amount already match a PayGate payment;

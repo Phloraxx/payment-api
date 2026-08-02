@@ -82,14 +82,15 @@ func (a *API) Register(app core.App) {
 		e.Router.POST("/api/connector/gmessages/reconnect", a.gmessagesReconnect)
 		e.Router.DELETE("/api/connector/gmessages/pair", a.gmessagesUnpair)
 
-		// Keep API/admin namespaces out of the SPA fallback. Unknown API routes
-		// must remain real 404s rather than HTML 200 responses.
+		// The operator app uses hash routing, so only the root document and its
+		// fingerprinted assets are valid browser paths. Everything else is a real 404.
 		static := apis.Static(appweb.Assets(), true)
 		e.Router.GET("/{path...}", func(event *core.RequestEvent) error {
 			path := strings.TrimPrefix(event.Request.URL.Path, "/")
-			if path == "api" || strings.HasPrefix(path, "api/") || path == "_" || strings.HasPrefix(path, "_/") {
+			if path != "" && path != "index.html" && !strings.HasPrefix(path, "assets/") {
 				return event.NotFoundError("route not found", nil)
 			}
+			setOperatorSecurityHeaders(event)
 			return static(event)
 		})
 		return e.Next()
@@ -273,6 +274,8 @@ func (a *API) getConfig(e *core.RequestEvent) error {
 		"backupCron":                        a.Config.BackupCron,
 		"backupMaxKeep":                     a.Config.BackupMaxKeep,
 		"backupOffsite":                     a.Config.BackupS3Enabled,
+		"operatorAlertWebhookConfigured":    a.Config.OperatorAlertWebhookURL != "",
+		"statementTimezone":                 a.Config.StatementTimezone,
 		"connector":                         a.connectorStatus(),
 	})
 }
@@ -513,6 +516,16 @@ func (a *API) restoreDrill(e *core.RequestEvent) error {
 		return e.InternalServerError("backup restore drill failed", err)
 	}
 	return e.JSON(http.StatusOK, result)
+}
+
+func setOperatorSecurityHeaders(e *core.RequestEvent) {
+	headers := e.Response.Header()
+	headers.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: blob:; object-src 'none'; script-src 'self'; style-src 'self'")
+	headers.Set("Permissions-Policy", "camera=(), geolocation=(), microphone=(), payment=()")
+	headers.Set("Referrer-Policy", "no-referrer")
+	headers.Set("Strict-Transport-Security", "max-age=31536000")
+	headers.Set("X-Content-Type-Options", "nosniff")
+	headers.Set("X-Frame-Options", "DENY")
 }
 
 func refundResponse(record *core.Record) map[string]any {

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/pocketbase/pocketbase/core"
 )
@@ -28,5 +30,27 @@ func TestMergeManagedRateLimitRulesIsIdempotentAndPreservesCustomRules(t *testin
 	}
 	if second[0].MaxRequests != 60 || second[2].MaxRequests != 120 {
 		t.Fatalf("managed rules not restored: %+v", second)
+	}
+}
+
+type testBackgroundRunner struct{ started chan struct{} }
+
+func (r *testBackgroundRunner) Run(ctx context.Context) {
+	close(r.started)
+	<-ctx.Done()
+}
+
+func TestStartBackgroundRunnersStartsEveryRunner(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	first := &testBackgroundRunner{started: make(chan struct{})}
+	second := &testBackgroundRunner{started: make(chan struct{})}
+	startBackgroundRunners(ctx, first, second)
+	for index, started := range []<-chan struct{}{first.started, second.started} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatalf("runner %d did not start", index)
+		}
 	}
 }
