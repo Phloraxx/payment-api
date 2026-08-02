@@ -14,7 +14,7 @@ func TestDomainCollectionsOnlyExposeReadsToOperatorUsers(t *testing.T) {
 	}
 	defer app.Cleanup()
 
-	for _, name := range []string{"payments", "sms_events", "webhook_deliveries", "audit_events", "review_cases", "reconciliation_runs", "reconciliation_entries", "alerts", "refunds"} {
+	for _, name := range []string{"payments", "sms_events", "webhook_deliveries", "audit_events", "review_cases", "reconciliation_runs", "reconciliation_entries", "alerts", "refunds", "razorpay_test_orders", "razorpay_test_events"} {
 		collection, err := app.FindCollectionByNameOrId(name)
 		if err != nil {
 			t.Fatalf("find %s: %v", name, err)

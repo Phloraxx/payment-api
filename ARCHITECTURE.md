@@ -380,3 +380,26 @@ Bank evidence time is authoritative for on-time/late classification. Ingestion t
 Statement imports are intentionally report-first. Exact RRN+amount rows reconcile; contradictions create review cases. XLSX files are ZIP-validated before parsing to limit path traversal and decompression expansion.
 
 Backup configuration uses PocketBase's backup filesystem and cron. Archive verification reads every ZIP member. Restore drills extract to a temporary directory and run SQLite integrity checks without replacing production data.
+
+## 21. Isolated Razorpay Test rail
+
+The optional Razorpay module is deliberately not a generic payment-provider
+abstraction. It is enabled only by `RAZORPAY_TEST_ENABLED=true` with an
+`rzp_test_...` key and stores data in `razorpay_test_orders` and
+`razorpay_test_events` rather than the SMS/DDM `payments` collection.
+
+The server creates every Razorpay order and returns only the public Test Key ID
+to the authenticated operator UI. Checkout callbacks are HMAC-verified using
+the server-stored order ID. A valid callback proves authenticity but does not
+mean paid; only a provider state of `captured` does.
+
+Webhook processing verifies the raw request body, deduplicates
+`X-Razorpay-Event-Id`, rejects reuse of an event ID with another payload hash,
+and applies monotonic transitions so stale failures cannot downgrade captured
+or refunded states. Full webhook payloads and customer payment details are not
+retained.
+
+The provider client is restricted to the official Razorpay API base URL in
+production, refuses redirects, uses bounded responses and timeouts, and has no
+Live Mode path. The separate Compose profile and volume are the intended test
+deployment boundary.

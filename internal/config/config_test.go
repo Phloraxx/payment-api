@@ -125,3 +125,47 @@ func TestTestModeStillValidatesStructuralConfiguration(t *testing.T) {
 		t.Fatalf("test mode accepted invalid webhook URL: %v", err)
 	}
 }
+
+func TestValidateServeRazorpayTestRequiresTestModeCredentials(t *testing.T) {
+	base := Config{
+		TestMode: true, PaymentTTL: time.Minute, AmountQuarantine: time.Hour,
+		StatementTimezone: "Asia/Kolkata", BackupMaxKeep: 1,
+		RazorpayTestEnabled: true, RazorpayTestDisplayName: "PayGate Test",
+	}
+	cases := []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"live key rejected", func(c *Config) {
+			c.RazorpayTestKeyID = "rzp_live_example"
+			c.RazorpayTestKeySecret = "1234567890123456"
+			c.RazorpayTestWebhookSecret = "123456789012345678901234"
+		}},
+		{"short key secret", func(c *Config) {
+			c.RazorpayTestKeyID = "rzp_test_example"
+			c.RazorpayTestKeySecret = "short"
+			c.RazorpayTestWebhookSecret = "123456789012345678901234"
+		}},
+		{"short webhook secret", func(c *Config) {
+			c.RazorpayTestKeyID = "rzp_test_example"
+			c.RazorpayTestKeySecret = "1234567890123456"
+			c.RazorpayTestWebhookSecret = "short"
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			tc.edit(&cfg)
+			if err := cfg.ValidateServe(); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+	valid := base
+	valid.RazorpayTestKeyID = "rzp_test_example"
+	valid.RazorpayTestKeySecret = "1234567890123456"
+	valid.RazorpayTestWebhookSecret = "123456789012345678901234"
+	if err := valid.ValidateServe(); err != nil {
+		t.Fatalf("valid Razorpay test config: %v", err)
+	}
+}

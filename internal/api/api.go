@@ -18,6 +18,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/money"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/razorpaytest"
 	"github.com/Phloraxx/payment-api/internal/reconciliation"
 	"github.com/Phloraxx/payment-api/internal/refunds"
 	"github.com/Phloraxx/payment-api/internal/reviews"
@@ -28,12 +29,13 @@ import (
 )
 
 const (
-	maxPaymentRequestBytes   int64 = (1 << 20) + (64 << 10)
-	maxSMSRequestBytes       int64 = 128 << 10
-	maxGMessagesPairBytes    int64 = 128 << 10
-	maxReviewRequestBytes    int64 = 16 << 10
-	maxRefundRequestBytes    int64 = (1 << 20) + (64 << 10)
-	maxStatementRequestBytes int64 = reconciliation.MaxFileBytes + (1 << 20)
+	maxPaymentRequestBytes      int64 = (1 << 20) + (64 << 10)
+	maxSMSRequestBytes          int64 = 128 << 10
+	maxGMessagesPairBytes       int64 = 128 << 10
+	maxReviewRequestBytes       int64 = 16 << 10
+	maxRefundRequestBytes       int64 = (1 << 20) + (64 << 10)
+	maxStatementRequestBytes    int64 = reconciliation.MaxFileBytes + (1 << 20)
+	maxRazorpayTestRequestBytes int64 = 1 << 20
 )
 
 type API struct {
@@ -46,6 +48,7 @@ type API struct {
 	Alerts         *alerts.Service
 	Refunds        *refunds.Service
 	Backups        *backups.Service
+	RazorpayTest   *razorpaytest.Service
 }
 
 func New(cfg config.Config, paymentService *payments.Service, smsService *sms.Service, manager *gmessages.Manager) *API {
@@ -71,6 +74,12 @@ func (a *API) Register(app core.App) {
 		e.Router.POST("/api/paygate/backups", a.createBackup)
 		e.Router.POST("/api/paygate/backups/verify", a.verifyBackup)
 		e.Router.POST("/api/paygate/backups/restore-drill", a.restoreDrill)
+		e.Router.GET("/api/razorpay/test/config", a.razorpayTestConfig)
+		e.Router.POST("/api/razorpay/test/orders", a.razorpayTestCreateOrder).Bind(apis.BodyLimit(maxRazorpayTestRequestBytes))
+		e.Router.GET("/api/razorpay/test/orders/{id}", a.razorpayTestGetOrder)
+		e.Router.POST("/api/razorpay/test/orders/{id}/verify", a.razorpayTestVerify).Bind(apis.BodyLimit(maxRazorpayTestRequestBytes))
+		e.Router.POST("/api/razorpay/test/orders/{id}/refresh", a.razorpayTestRefresh)
+		e.Router.POST("/api/razorpay/test/webhook", a.razorpayTestWebhook).Bind(apis.BodyLimit(maxRazorpayTestRequestBytes))
 		e.Router.GET("/api/connector/gmessages/status", a.gmessagesStatus)
 		e.Router.POST("/api/connector/gmessages/pair/google", a.gmessagesGooglePair).Bind(apis.BodyLimit(maxGMessagesPairBytes))
 		e.Router.POST("/api/connector/gmessages/reauth/google", a.gmessagesGoogleReauth).Bind(apis.BodyLimit(maxGMessagesPairBytes))
@@ -90,7 +99,7 @@ func (a *API) Register(app core.App) {
 			if path != "" && path != "index.html" && !strings.HasPrefix(path, "assets/") {
 				return event.NotFoundError("route not found", nil)
 			}
-			setOperatorSecurityHeaders(event)
+			a.setOperatorSecurityHeaders(event)
 			return static(event)
 		})
 		return e.Next()
@@ -276,6 +285,7 @@ func (a *API) getConfig(e *core.RequestEvent) error {
 		"backupOffsite":                     a.Config.BackupS3Enabled,
 		"operatorAlertWebhookConfigured":    a.Config.OperatorAlertWebhookURL != "",
 		"statementTimezone":                 a.Config.StatementTimezone,
+		"razorpayTestEnabled":               a.Config.RazorpayTestEnabled,
 		"connector":                         a.connectorStatus(),
 	})
 }
@@ -516,16 +526,6 @@ func (a *API) restoreDrill(e *core.RequestEvent) error {
 		return e.InternalServerError("backup restore drill failed", err)
 	}
 	return e.JSON(http.StatusOK, result)
-}
-
-func setOperatorSecurityHeaders(e *core.RequestEvent) {
-	headers := e.Response.Header()
-	headers.Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: blob:; object-src 'none'; script-src 'self'; style-src 'self'")
-	headers.Set("Permissions-Policy", "camera=(), geolocation=(), microphone=(), payment=()")
-	headers.Set("Referrer-Policy", "no-referrer")
-	headers.Set("Strict-Transport-Security", "max-age=31536000")
-	headers.Set("X-Content-Type-Options", "nosniff")
-	headers.Set("X-Frame-Options", "DENY")
 }
 
 func refundResponse(record *core.Record) map[string]any {

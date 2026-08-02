@@ -1,6 +1,6 @@
 import type { RecordModel } from "pocketbase";
 
-export type Page = "dashboard" | "payments" | "reviews" | "reconciliation" | "sms" | "alerts" | "refunds" | "webhooks" | "audit" | "settings";
+export type Page = "dashboard" | "payments" | "reviews" | "reconciliation" | "sms" | "alerts" | "refunds" | "webhooks" | "audit" | "razorpay_test" | "settings";
 
 export type Payment = RecordModel & {
   requested_amount: number;
@@ -141,4 +141,44 @@ export type RefundRecord = RecordModel & {
   requested_at: string;
   completed_at: string;
   expand?: Record<string, RecordModel>;
+};
+
+export type RazorpayTestConfig = {
+  enabled: boolean;
+  keyId: string;
+  displayName: string;
+  mode: "test";
+};
+
+export type RazorpayTestOrder = RecordModel & {
+  amount: number;
+  currency: string;
+  status: string;
+  external_id: string;
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  provider_status: string;
+  payment_method: string;
+  amount_refunded: number;
+  error: string;
+  created_at: string;
+  captured_at: string;
+};
+
+export type RazorpayTestOrderResponse = {
+  id: string;
+  amountPaise: number;
+  currency: string;
+  status: string;
+  externalId: string;
+  razorpayOrderId: string;
+  razorpayPaymentId: string;
+  providerStatus: string;
+  paymentMethod: string;
+  amountRefunded: number;
+  error: string;
+  createdAt: string;
+  capturedAt: string;
+  keyId: string;
+  displayName: string;
 };

@@ -367,5 +367,6 @@ A future proprietary/commercial distribution needs a separate licensing review r
 - `ARCHITECTURE.md` — implemented system design and invariants
 - `PLAN.md` — implementation/acceptance status
 - `OPERATIONS.md` — evidence review, reconciliation, refunds, alerts, backups and incident runbook
+- `RAZORPAY_TEST.md` — isolated Razorpay Test Mode setup and verification flow
 - `RESEARCH.md` — technical research and constraints behind the design
 - `IMPLEMENTATION_SPEC.md` — rebuild requirements used during implementation
