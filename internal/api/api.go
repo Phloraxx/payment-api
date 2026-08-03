@@ -18,6 +18,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/money"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/razorpaylive"
 	"github.com/Phloraxx/payment-api/internal/razorpaytest"
 	"github.com/Phloraxx/payment-api/internal/reconciliation"
 	"github.com/Phloraxx/payment-api/internal/refunds"
@@ -36,6 +37,7 @@ const (
 	maxRefundRequestBytes       int64 = (1 << 20) + (64 << 10)
 	maxStatementRequestBytes    int64 = reconciliation.MaxFileBytes + (1 << 20)
 	maxRazorpayTestRequestBytes int64 = 1 << 20
+	maxRazorpayLiveRequestBytes int64 = 1 << 20
 )
 
 type API struct {
@@ -49,6 +51,7 @@ type API struct {
 	Refunds        *refunds.Service
 	Backups        *backups.Service
 	RazorpayTest   *razorpaytest.Service
+	RazorpayLive   *razorpaylive.Service
 }
 
 func New(cfg config.Config, paymentService *payments.Service, smsService *sms.Service, manager *gmessages.Manager) *API {
@@ -80,6 +83,12 @@ func (a *API) Register(app core.App) {
 		e.Router.POST("/api/razorpay/test/orders/{id}/verify", a.razorpayTestVerify).Bind(apis.BodyLimit(maxRazorpayTestRequestBytes))
 		e.Router.POST("/api/razorpay/test/orders/{id}/refresh", a.razorpayTestRefresh)
 		e.Router.POST("/api/razorpay/test/webhook", a.razorpayTestWebhook).Bind(apis.BodyLimit(maxRazorpayTestRequestBytes))
+		e.Router.GET("/api/razorpay/live/config", a.razorpayLiveConfig)
+		e.Router.POST("/api/razorpay/live/orders", a.razorpayLiveCreateOrder).Bind(apis.BodyLimit(maxRazorpayLiveRequestBytes))
+		e.Router.GET("/api/razorpay/live/orders/{id}", a.razorpayLiveGetOrder)
+		e.Router.POST("/api/razorpay/live/orders/{id}/verify", a.razorpayLiveVerify).Bind(apis.BodyLimit(maxRazorpayLiveRequestBytes))
+		e.Router.POST("/api/razorpay/live/orders/{id}/refresh", a.razorpayLiveRefresh)
+		e.Router.POST("/api/razorpay/live/webhook", a.razorpayLiveWebhook).Bind(apis.BodyLimit(maxRazorpayLiveRequestBytes))
 		e.Router.GET("/api/connector/gmessages/status", a.gmessagesStatus)
 		e.Router.POST("/api/connector/gmessages/pair/google", a.gmessagesGooglePair).Bind(apis.BodyLimit(maxGMessagesPairBytes))
 		e.Router.POST("/api/connector/gmessages/reauth/google", a.gmessagesGoogleReauth).Bind(apis.BodyLimit(maxGMessagesPairBytes))

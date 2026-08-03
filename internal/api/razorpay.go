@@ -147,7 +147,7 @@ func (a *API) razorpayTestAvailable() bool {
 func (a *API) setOperatorSecurityHeaders(e *core.RequestEvent) {
 	headers := e.Response.Header()
 	csp := "default-src 'self'; base-uri 'none'; connect-src 'self'; font-src 'self'; form-action 'self'; frame-ancestors 'none'; img-src 'self' data: blob:; object-src 'none'; script-src 'self'; style-src 'self'"
-	if a.Config.RazorpayTestEnabled {
+	if a.Config.RazorpayTestEnabled || a.Config.RazorpayLiveEnabled {
 		csp = "default-src 'self'; base-uri 'none'; connect-src 'self' https://api.razorpay.com https://*.razorpay.com; font-src 'self' https://*.razorpay.com; form-action 'self' https://api.razorpay.com; frame-ancestors 'none'; frame-src https://api.razorpay.com https://*.razorpay.com; img-src 'self' data: blob: https://*.razorpay.com; object-src 'none'; script-src 'self' https://checkout.razorpay.com; style-src 'self'"
 	}
 	headers.Set("Content-Security-Policy", csp)

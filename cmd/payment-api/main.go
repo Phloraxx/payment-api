@@ -19,6 +19,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/razorpaylive"
 	"github.com/Phloraxx/payment-api/internal/razorpaytest"
 	"github.com/Phloraxx/payment-api/internal/reconciliation"
 	"github.com/Phloraxx/payment-api/internal/refunds"
@@ -70,6 +71,11 @@ func main() {
 		razorpayClient := razorpaytest.NewClient(cfg.RazorpayTestKeyID, cfg.RazorpayTestKeySecret)
 		razorpayTestService = razorpaytest.NewService(app, razorpayClient, cfg.RazorpayTestKeyID, cfg.RazorpayTestKeySecret, cfg.RazorpayTestWebhookSecret, cfg.RazorpayTestDisplayName)
 	}
+	var razorpayLiveService *razorpaylive.Service
+	if cfg.RazorpayLiveEnabled {
+		razorpayClient := razorpaylive.NewClient(cfg.RazorpayLiveKeyID, cfg.RazorpayLiveKeySecret)
+		razorpayLiveService = razorpaylive.NewService(app, razorpayClient, cfg.RazorpayLiveKeyID, cfg.RazorpayLiveKeySecret, cfg.RazorpayLiveWebhookSecret, cfg.RazorpayLiveDisplayName)
+	}
 	retentionService := retention.NewService(app, cfg)
 	backupService := backups.NewService(app, cfg, alertService)
 	backupService.RegisterHooks()
@@ -84,6 +90,7 @@ func main() {
 	apiService.Refunds = refundService
 	apiService.Backups = backupService
 	apiService.RazorpayTest = razorpayTestService
+	apiService.RazorpayLive = razorpayLiveService
 	apiService.Register(app)
 	registerPairCommand(app, cfg, gmessagesLogger)
 	registerHealthcheckCommand(app)
