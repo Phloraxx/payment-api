@@ -50,6 +50,11 @@ type Config struct {
 	RazorpayTestKeySecret      string
 	RazorpayTestWebhookSecret  string
 	RazorpayTestDisplayName    string
+	RazorpayLiveEnabled        bool
+	RazorpayLiveKeyID          string
+	RazorpayLiveKeySecret      string
+	RazorpayLiveWebhookSecret  string
+	RazorpayLiveDisplayName    string
 }
 
 func Load() (Config, error) {
@@ -117,6 +122,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	razorpayLiveEnabled, err := boolEnv("RAZORPAY_LIVE_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 
 	dataDir := strings.TrimSpace(env("PB_DATA_DIR", "./pb_data"))
 	cfg := Config{
@@ -155,6 +164,11 @@ func Load() (Config, error) {
 		RazorpayTestKeySecret:      strings.TrimSpace(os.Getenv("RAZORPAY_TEST_KEY_SECRET")),
 		RazorpayTestWebhookSecret:  strings.TrimSpace(os.Getenv("RAZORPAY_TEST_WEBHOOK_SECRET")),
 		RazorpayTestDisplayName:    strings.TrimSpace(env("RAZORPAY_TEST_DISPLAY_NAME", "PayGate Razorpay Test")),
+		RazorpayLiveEnabled:        razorpayLiveEnabled,
+		RazorpayLiveKeyID:          strings.TrimSpace(os.Getenv("RAZORPAY_LIVE_KEY_ID")),
+		RazorpayLiveKeySecret:      strings.TrimSpace(os.Getenv("RAZORPAY_LIVE_KEY_SECRET")),
+		RazorpayLiveWebhookSecret:  strings.TrimSpace(os.Getenv("RAZORPAY_LIVE_WEBHOOK_SECRET")),
+		RazorpayLiveDisplayName:    strings.TrimSpace(env("RAZORPAY_LIVE_DISPLAY_NAME", "IEEE Sahrdaya Razorpay Live")),
 	}
 	cfg.GMessagesSessionPath = strings.TrimSpace(os.Getenv("GMESSAGES_SESSION_PATH"))
 	if cfg.GMessagesSessionPath == "" {
@@ -242,6 +256,20 @@ func (c Config) ValidateServe() error {
 		}
 		if c.RazorpayTestDisplayName == "" || len(c.RazorpayTestDisplayName) > 128 {
 			return errors.New("RAZORPAY_TEST_DISPLAY_NAME must be between 1 and 128 characters")
+		}
+	}
+	if c.RazorpayLiveEnabled {
+		if !strings.HasPrefix(c.RazorpayLiveKeyID, "rzp_live_") {
+			return errors.New("RAZORPAY_LIVE_KEY_ID must be a Live Mode key beginning with rzp_live_")
+		}
+		if len(c.RazorpayLiveKeySecret) < 16 {
+			return errors.New("RAZORPAY_LIVE_KEY_SECRET must be at least 16 characters")
+		}
+		if len(c.RazorpayLiveWebhookSecret) < minPrimarySecretLength {
+			return fmt.Errorf("RAZORPAY_LIVE_WEBHOOK_SECRET must be at least %d characters", minPrimarySecretLength)
+		}
+		if c.RazorpayLiveDisplayName == "" || len(c.RazorpayLiveDisplayName) > 128 {
+			return errors.New("RAZORPAY_LIVE_DISPLAY_NAME must be between 1 and 128 characters")
 		}
 	}
 	if c.BackupS3Enabled {
