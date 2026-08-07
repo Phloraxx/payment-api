@@ -156,4 +156,5 @@ func (a *API) setOperatorSecurityHeaders(e *core.RequestEvent) {
 	headers.Set("Strict-Transport-Security", "max-age=31536000")
 	headers.Set("X-Content-Type-Options", "nosniff")
 	headers.Set("X-Frame-Options", "DENY")
+	headers.Set("X-Robots-Tag", robotsTagValue)
 }

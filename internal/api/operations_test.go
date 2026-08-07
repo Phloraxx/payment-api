@@ -274,15 +274,23 @@ func TestOperatorSPAUsesSecurityHeadersAndRejectsUnknownBrowserRoutes(t *testing
 	if res.StatusCode != http.StatusOK || !bytes.Contains(data, []byte("PayGate")) {
 		t.Fatalf("root status=%d body=%s", res.StatusCode, data)
 	}
-	for _, name := range []string{"Content-Security-Policy", "Permissions-Policy", "Referrer-Policy", "Strict-Transport-Security"} {
+	for _, name := range []string{"Content-Security-Policy", "Permissions-Policy", "Referrer-Policy", "Strict-Transport-Security", "X-Robots-Tag"} {
 		if res.Header.Get(name) == "" {
 			t.Fatalf("missing %s", name)
 		}
 	}
-	for _, path := range []string{"/contact/", "/robots.txt", "/sitemap.xml"} {
+	res, robots := fixture.request(t, http.MethodGet, "/robots.txt", nil, "", false)
+	if res.StatusCode != http.StatusOK || !bytes.Contains(robots, []byte("User-agent: *")) || res.Header.Get("X-Robots-Tag") == "" {
+		t.Fatalf("robots status=%d header=%q body=%s", res.StatusCode, res.Header.Get("X-Robots-Tag"), robots)
+	}
+	for _, path := range []string{"/contact/", "/sitemap.xml"} {
 		res, _ := fixture.request(t, http.MethodGet, path, nil, "", false)
 		if res.StatusCode != http.StatusNotFound {
 			t.Fatalf("%s status=%d", path, res.StatusCode)
 		}
+	}
+	res, _ = fixture.request(t, http.MethodGet, "/api/config", nil, "", true)
+	if res.Header.Get("X-Robots-Tag") == "" {
+		t.Fatal("missing X-Robots-Tag on API response")
 	}
 }
