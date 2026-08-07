@@ -67,7 +67,7 @@ func (a *API) Register(app core.App) {
 		})
 		e.Router.GET("/robots.txt", func(event *core.RequestEvent) error {
 			event.Response.Header().Set("Cache-Control", "no-store")
-			return event.String(http.StatusOK, "User-agent: *\nDisallow:\n")
+			return event.String(http.StatusOK, "User-agent: *\nContent-Signal: search=no, ai-input=no, ai-train=no, use=immediate\nDisallow:\n")
 		})
 		e.Router.POST("/api/payments", a.createPayment).Bind(apis.BodyLimit(maxPaymentRequestBytes))
 		e.Router.GET("/api/payments/{id}", a.getPayment)

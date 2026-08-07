@@ -280,7 +280,7 @@ func TestOperatorSPAUsesSecurityHeadersAndRejectsUnknownBrowserRoutes(t *testing
 		}
 	}
 	res, robots := fixture.request(t, http.MethodGet, "/robots.txt", nil, "", false)
-	if res.StatusCode != http.StatusOK || !bytes.Contains(robots, []byte("User-agent: *")) || res.Header.Get("X-Robots-Tag") == "" {
+	if res.StatusCode != http.StatusOK || !bytes.Contains(robots, []byte("User-agent: *")) || !bytes.Contains(robots, []byte("Content-Signal: search=no")) || res.Header.Get("X-Robots-Tag") == "" {
 		t.Fatalf("robots status=%d header=%q body=%s", res.StatusCode, res.Header.Get("X-Robots-Tag"), robots)
 	}
 	for _, path := range []string{"/contact/", "/sitemap.xml"} {
