@@ -38,6 +38,7 @@ const (
 	maxStatementRequestBytes    int64 = reconciliation.MaxFileBytes + (1 << 20)
 	maxRazorpayTestRequestBytes int64 = 1 << 20
 	maxRazorpayLiveRequestBytes int64 = 1 << 20
+	robotsTagValue                    = "noindex, nofollow, noarchive, nosnippet, noimageindex"
 )
 
 type API struct {
@@ -60,6 +61,14 @@ func New(cfg config.Config, paymentService *payments.Service, smsService *sms.Se
 
 func (a *API) Register(app core.App) {
 	app.OnServe().BindFunc(func(e *core.ServeEvent) error {
+		e.Router.BindFunc(func(event *core.RequestEvent) error {
+			event.Response.Header().Set("X-Robots-Tag", robotsTagValue)
+			return event.Next()
+		})
+		e.Router.GET("/robots.txt", func(event *core.RequestEvent) error {
+			event.Response.Header().Set("Cache-Control", "no-store")
+			return event.String(http.StatusOK, "User-agent: *\nDisallow:\n")
+		})
 		e.Router.POST("/api/payments", a.createPayment).Bind(apis.BodyLimit(maxPaymentRequestBytes))
 		e.Router.GET("/api/payments/{id}", a.getPayment)
 		e.Router.POST("/api/payments/{id}/cancel", a.cancelPayment)
