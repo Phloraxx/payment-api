@@ -1,8 +1,9 @@
-# Razorpay Live ₹1 Pilot
+# Razorpay Live Event Payments
 
 This is a separate Live Mode rail. It does not reuse Test Mode collections,
-credentials, webhook events, or Docker volume. During the pilot, the backend
-accepts only an exact ₹1 order.
+credentials, webhook events, or Docker volume. The backend accepts server-created
+orders from ₹1 through ₹1,00,000; Razorpay may apply a lower account-specific
+maximum.
 
 ## Required protected values
 
@@ -28,7 +29,7 @@ https://pay.ieeesahrdaya.com/api/razorpay/live/webhook
 Subscribe to `payment.authorized`, `payment.captured`, and `payment.failed`.
 Use a separate webhook secret, not the API Key Secret.
 
-## Pilot route
+## Live route
 
 The portal deliberately does not link this route from the home page:
 
@@ -36,5 +37,6 @@ The portal deliberately does not link this route from the home page:
 https://pay.ieeesahrdaya.com/razorpay-live
 ```
 
-The browser can create only ₹1. The portal and the isolated Live backend both
-enforce that cap. Only provider state `captured` is displayed as successful.
+The browser never supplies the trusted event amount. The calling application
+creates the order server-to-server and the isolated Live backend enforces the
+amount range. Only provider state `captured` is treated as successful.

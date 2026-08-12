@@ -16,7 +16,11 @@ import (
 	"github.com/pocketbase/pocketbase/core"
 )
 
-const maxWebhookBytes = 1 << 20
+const (
+	maxWebhookBytes = 1 << 20
+	minOrderPaise   = int64(100)
+	maxOrderPaise   = int64(100_000_00)
+)
 
 type ProviderClient interface {
 	CreateOrder(ctx context.Context, amountPaise int64, receipt string) (ProviderOrder, error)
@@ -76,8 +80,8 @@ func NewService(app core.App, client ProviderClient, keyID, keySecret, webhookSe
 func (s *Service) Create(ctx context.Context, input CreateInput) (*core.Record, bool, error) {
 	input.ExternalID = strings.TrimSpace(input.ExternalID)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
-	if input.AmountPaise != 100 {
-		return nil, false, domain.New("RAZORPAY_LIVE_INVALID_AMOUNT", "live pilot amount must be exactly ₹1", 400)
+	if input.AmountPaise < minOrderPaise || input.AmountPaise > maxOrderPaise {
+		return nil, false, domain.New("RAZORPAY_LIVE_INVALID_AMOUNT", "live amount must be between ₹1 and ₹1,00,000", 400)
 	}
 	if input.IdempotencyKey == "" || len(input.IdempotencyKey) > 255 {
 		return nil, false, domain.New("RAZORPAY_LIVE_IDEMPOTENCY_REQUIRED", "a valid Idempotency-Key is required", 400)

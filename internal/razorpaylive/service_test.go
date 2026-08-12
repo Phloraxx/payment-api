@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -60,16 +61,28 @@ func testService(t *testing.T) (*Service, *fakeProviderClient, *tests.TestApp, *
 	return service, client, app, &now
 }
 
-func TestCreateRejectsAnyAmountOtherThanOneRupee(t *testing.T) {
+func TestCreateEnforcesEventPaymentAmountRange(t *testing.T) {
 	service, client, _, _ := testService(t)
-	for _, amount := range []int64{1, 99, 101, 200} {
-		_, _, err := service.Create(context.Background(), CreateInput{AmountPaise: amount, IdempotencyKey: "invalid-amount"})
+	for index, amount := range []int64{-1, 0, 1, 99, 100_000_01} {
+		_, _, err := service.Create(context.Background(), CreateInput{AmountPaise: amount, IdempotencyKey: fmt.Sprintf("invalid-amount-%d", index)})
 		var domainErr *domain.Error
 		if !errors.As(err, &domainErr) || domainErr.Code != "RAZORPAY_LIVE_INVALID_AMOUNT" {
 			t.Fatalf("amount=%d error=%v", amount, err)
 		}
 	}
 	if client.createCalls != 0 {
+		t.Fatalf("provider create calls=%d", client.createCalls)
+	}
+
+	for index, amount := range []int64{100, 25_000, 100_000_00} {
+		order, replayed, err := service.Create(context.Background(), CreateInput{
+			AmountPaise: amount, IdempotencyKey: fmt.Sprintf("valid-event-amount-%d", index),
+		})
+		if err != nil || replayed || int64(order.GetInt("amount")) != amount {
+			t.Fatalf("amount=%d order=%v replayed=%v err=%v", amount, order, replayed, err)
+		}
+	}
+	if client.createCalls != 3 {
 		t.Fatalf("provider create calls=%d", client.createCalls)
 	}
 }

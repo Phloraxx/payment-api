@@ -163,6 +163,14 @@ func TestRazorpayLiveHTTPCreateVerifyAndAuth(t *testing.T) {
 	}
 }
 
+func TestRazorpayLiveHTTPAcceptsEventAmount(t *testing.T) {
+	fixture := newRazorpayLiveAPIFixture(t, true)
+	res, body := fixture.request(t, http.MethodPost, "/api/razorpay/live/orders", `{"amountPaise":25000,"externalId":"ieee-event-registration"}`, true, map[string]string{"Idempotency-Key": "ieee-event-registration"})
+	if res.StatusCode != http.StatusCreated || !strings.Contains(body, `"amountPaise":25000`) {
+		t.Fatalf("create status=%d body=%s", res.StatusCode, body)
+	}
+}
+
 func TestRazorpayLiveWebhookRequiresSignatureAndDeduplicates(t *testing.T) {
 	fixture := newRazorpayLiveAPIFixture(t, true)
 	res, createBody := fixture.request(t, http.MethodPost, "/api/razorpay/live/orders", `{"amountPaise":100}`, true, map[string]string{"Idempotency-Key": "webhook-api"})
