@@ -18,6 +18,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/backups"
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
+	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/razorpaylive"
 	"github.com/Phloraxx/payment-api/internal/razorpaytest"
@@ -59,6 +60,8 @@ func main() {
 	reviewService := reviews.NewService(app, paymentService, auditService)
 	smsService := sms.NewService(app, paymentService)
 	smsService.Reviews = reviewService
+	emailService := paymentemail.NewService(app, paymentService, cfg.EmailAllowedSender, cfg.EmailAuthServID)
+	emailService.Reviews = reviewService
 	reconciliationService := reconciliation.NewService(app, reviewService, alertService, auditService)
 	statementLocation, err := time.LoadLocation(cfg.StatementTimezone)
 	if err != nil {
@@ -84,6 +87,7 @@ func main() {
 		return err
 	})
 	apiService := api.New(cfg, paymentService, smsService, gmessagesManager)
+	apiService.Email = emailService
 	apiService.Reviews = reviewService
 	apiService.Reconciliation = reconciliationService
 	apiService.Alerts = alertService
@@ -154,8 +158,8 @@ func main() {
 			stdLogger.Error("retention job failed", "error", err)
 			return
 		}
-		if result.SMSEventsRedacted+result.ReconciliationEntriesRedacted+result.AuditEventsDeleted > 0 {
-			stdLogger.Info("retention job completed", "smsRedacted", result.SMSEventsRedacted, "reconciliationRedacted", result.ReconciliationEntriesRedacted, "auditDeleted", result.AuditEventsDeleted)
+		if result.SMSEventsRedacted+result.EmailEventsRedacted+result.ReconciliationEntriesRedacted+result.AuditEventsDeleted > 0 {
+			stdLogger.Info("retention job completed", "smsRedacted", result.SMSEventsRedacted, "emailRedacted", result.EmailEventsRedacted, "reconciliationRedacted", result.ReconciliationEntriesRedacted, "auditDeleted", result.AuditEventsDeleted)
 		}
 	})
 	app.Cron().MustAdd("paygate-backup-verify", "23 4 * * *", func() {
@@ -243,6 +247,7 @@ func startBackgroundRunners(ctx context.Context, runners ...backgroundRunner) {
 func mergeManagedRateLimitRules(existing []core.RateLimitRule) []core.RateLimitRule {
 	managed := []core.RateLimitRule{
 		{Label: "POST /api/events/sms", MaxRequests: 60, Duration: 60},
+		{Label: "POST /api/events/email", MaxRequests: 60, Duration: 60},
 		{Label: "POST /api/webhook", MaxRequests: 30, Duration: 60},
 		{Label: "POST /api/payments", MaxRequests: 120, Duration: 60},
 		{Label: "POST /api/razorpay/test/orders", MaxRequests: 30, Duration: 60},

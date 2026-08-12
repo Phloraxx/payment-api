@@ -75,6 +75,7 @@ func (s *Service) schedule(app core.App, event string, payment, refund *core.Rec
 	data := map[string]any{
 		"payment": map[string]any{
 			"id":                   payment.Id,
+			"paymentAccount":       payment.GetString("payment_account"),
 			"requestedAmountPaise": payment.GetInt("requested_amount"),
 			"payableAmountPaise":   payment.GetInt("payable_amount"),
 			"status":               payment.GetString("status"),

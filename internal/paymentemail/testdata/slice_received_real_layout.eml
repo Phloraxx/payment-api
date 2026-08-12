@@ -1,0 +1,17 @@
+From: slice <noreply@slice.bank.in>
+To: payments@example.org
+Message-ID: <slice-real-layout-test@example.org>
+Date: Wed, 12 Aug 2026 21:26:57 +0530
+Subject: =?UTF-8?Q?Received_=E2=82=B93=2E23_in_your_slice_account?=
+Authentication-Results: mx.cloudflare.net; dkim=pass header.d=slice.bank.in; dmarc=pass header.from=slice.bank.in
+MIME-Version: 1.0
+Content-Type: text/html; charset=UTF-8
+
+<html><body>
+<p>You have received &#8377;3.23 via UPI in your slice bank account xx0000</p>
+<table>
+<tr><td>Transaction date</td><td>12 Aug 2026</td></tr>
+<tr><td>From</td><td>TEST PAYER</td></tr>
+<tr><td>RRN</td><td>123456789012</td></tr>
+</table>
+</body></html>

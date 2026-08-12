@@ -1,16 +1,23 @@
 package api
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
+	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/sms"
 	_ "github.com/Phloraxx/payment-api/migrations"
@@ -19,6 +26,8 @@ import (
 	"github.com/pocketbase/pocketbase/tests"
 	"github.com/rs/zerolog"
 )
+
+const testEmailWebhookSecret = "email-webhook-secret-long-enough"
 
 func apiTestFactory(t testing.TB, before func(*tests.TestApp, *payments.Service)) *tests.TestApp {
 	return apiTestFactoryWithConfig(t, nil, before)
@@ -43,7 +52,9 @@ func apiTestFactoryWithConfig(t testing.TB, configure func(*config.Config), befo
 	if before != nil {
 		before(app, paymentService)
 	}
-	New(cfg, paymentService, smsService, nil).Register(app)
+	apiService := New(cfg, paymentService, smsService, nil)
+	apiService.Email = paymentemail.NewService(app, paymentService, cfg.EmailAllowedSender, cfg.EmailAuthServID)
+	apiService.Register(app)
 	return app
 }
 
@@ -63,6 +74,96 @@ func apiTestFactoryWithGMessages(t testing.TB) *tests.TestApp {
 	manager := gmessages.NewManager(cfg, zerolog.Nop(), nil)
 	New(cfg, paymentService, smsService, manager).Register(app)
 	return app
+}
+
+func TestPaymentEmailWebhookSignatureAndDeduplication(t *testing.T) {
+	var paymentID string
+	app := apiTestFactoryWithConfig(t, func(cfg *config.Config) {
+		cfg.EmailEvidenceEnabled = true
+		cfg.DefaultPaymentAccount = "kotak"
+		cfg.KotakUPIID = "operator@kotak"
+		cfg.SliceUPIID = "operator@slice"
+		cfg.EmailWebhookSecret = testEmailWebhookSecret
+		cfg.EmailAllowedSender = "noreply@slice.bank.in"
+		cfg.EmailAuthServID = "mx.cloudflare.net"
+		cfg.EmailSignatureTolerance = 5 * time.Minute
+	}, func(_ *tests.TestApp, service *payments.Service) {
+		payment, _, err := service.Create(payments.CreateInput{AmountRupees: 100, PaymentAccount: "slice"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		paymentID = payment.ID
+	})
+	defer app.Cleanup()
+
+	router, err := apis.NewRouter(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveEvent := &core.ServeEvent{App: app, Router: router}
+	if err := app.OnServe().Trigger(serveEvent, func(e *core.ServeEvent) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	mux, err := serveEvent.Router.BuildMux()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	now := time.Now().UTC()
+	raw := "From: slice <noreply@slice.bank.in>\r\n" +
+		"Message-ID: <api-email-1@example>\r\n" +
+		"Date: " + now.Format(time.RFC1123Z) + "\r\n" +
+		"Subject: Received INR 100.01 in your slice account\r\n" +
+		"Authentication-Results: mx.cloudflare.net; dkim=pass header.d=slice.bank.in\r\n" +
+		"Content-Type: text/plain; charset=UTF-8\r\n\r\n" +
+		"Received INR 100.01 via UPI from alice@oksbi. UPI Ref:606703736479"
+	payload, err := json.Marshal(emailBody{
+		SourceID: "api-email-1@example", EnvelopeFrom: "noreply@slice.bank.in", EnvelopeTo: "payments@example.org",
+		ReceivedAt: now.Format(time.RFC3339), RawEmailBase64: base64.StdEncoding.EncodeToString([]byte(raw)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	send := func(signatureSecret string, timestamp time.Time) (int, string) {
+		t.Helper()
+		timestampText := timestamp.Unix()
+		mac := hmac.New(sha256.New, []byte(signatureSecret))
+		_, _ = mac.Write([]byte(strconv.FormatInt(timestampText, 10) + "."))
+		_, _ = mac.Write(payload)
+		req, requestErr := http.NewRequest(http.MethodPost, server.URL+"/api/events/email", strings.NewReader(string(payload)))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-PayGate-Timestamp", strconv.FormatInt(timestampText, 10))
+		req.Header.Set("X-PayGate-Signature", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+		response, requestErr := server.Client().Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer response.Body.Close()
+		responseBody, _ := io.ReadAll(response.Body)
+		return response.StatusCode, string(responseBody)
+	}
+
+	if status, body := send("wrong-secret", now); status != http.StatusUnauthorized {
+		t.Fatalf("bad signature status=%d body=%s", status, body)
+	}
+	if count, _ := app.CountRecords("email_events"); count != 0 {
+		t.Fatalf("unauthenticated request persisted %d events", count)
+	}
+	if status, body := send(testEmailWebhookSecret, now.Add(-10*time.Minute)); status != http.StatusUnauthorized {
+		t.Fatalf("stale signature status=%d body=%s", status, body)
+	}
+	if status, body := send(testEmailWebhookSecret, now); status != http.StatusAccepted || !strings.Contains(body, paymentID) || !strings.Contains(body, "marked_paid") {
+		t.Fatalf("valid email status=%d body=%s", status, body)
+	}
+	if status, body := send(testEmailWebhookSecret, now); status != http.StatusOK || !strings.Contains(body, "duplicate_event") {
+		t.Fatalf("duplicate email status=%d body=%s", status, body)
+	}
 }
 
 func TestPaymentAPIAuthenticationAndAmountValidation(t *testing.T) {
@@ -175,6 +276,7 @@ func TestPublicPaymentStatusRedactsSensitiveEvidence(t *testing.T) {
 				record.Set("created_at", time.Now().Add(-time.Minute))
 				record.Set("requested_amount", 10000)
 				record.Set("payable_amount", 10001)
+				record.Set("payment_account", "kotak")
 				record.Set("status", "paid")
 				record.Set("expires_at", time.Now().Add(time.Minute))
 				record.Set("reuse_after", time.Now().Add(time.Hour))
@@ -234,6 +336,7 @@ func TestLegacySMSWebhookMatchesPayment(t *testing.T) {
 				record.Set("created_at", time.Now().Add(-time.Minute))
 				record.Set("requested_amount", 10000)
 				record.Set("payable_amount", 10001)
+				record.Set("payment_account", "kotak")
 				record.Set("status", "pending")
 				record.Set("expires_at", time.Now().Add(5*time.Minute))
 				record.Set("reuse_after", time.Now().Add(24*time.Hour))

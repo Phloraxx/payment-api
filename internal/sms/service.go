@@ -118,6 +118,7 @@ func (s *Service) Ingest(input Input) (Result, error) {
 		event.Set("source_event_id", input.SourceEventID)
 		event.Set("sender", input.Sender)
 		event.Set("body", input.Body)
+		event.Set("payment_account", string(domain.PaymentAccountKotak))
 		event.Set("processing_status", "received")
 		event.Set("message_time", messageTime)
 		if input.RawPayload != nil {
@@ -129,6 +130,7 @@ func (s *Service) Ingest(input Input) (Result, error) {
 		result.EventID = event.Id
 
 		parsed, parseErr := Parse(input.Body)
+		parsed.Account = domain.PaymentAccountKotak
 		parsed.OccurredAt = messageTime
 		if errors.Is(parseErr, ErrUnrecognized) {
 			event.Set("processing_status", "ignored")
@@ -170,7 +172,7 @@ func (s *Service) Ingest(input Input) (Result, error) {
 			if err := tx.Save(event); err != nil {
 				return err
 			}
-			candidates, err := candidatePaymentIDs(tx, parsed.AmountPaise, now)
+			candidates, err := candidatePaymentIDs(tx, parsed.Account, parsed.AmountPaise, now)
 			if err != nil {
 				return err
 			}
@@ -199,10 +201,10 @@ func (s *Service) Ingest(input Input) (Result, error) {
 				}
 				kind := "ambiguous"
 				severity := "critical"
-				if dErr.Code == "RRN_AMOUNT_MISMATCH" {
+				if dErr.Code == "RRN_AMOUNT_MISMATCH" || dErr.Code == "RRN_ACCOUNT_MISMATCH" {
 					kind = "rrn_conflict"
 				}
-				candidates, err := candidatePaymentIDs(tx, parsed.AmountPaise, now)
+				candidates, err := candidatePaymentIDs(tx, parsed.Account, parsed.AmountPaise, now)
 				if err != nil {
 					return err
 				}
@@ -236,7 +238,7 @@ func (s *Service) Ingest(input Input) (Result, error) {
 		case "unmatched":
 			event.Set("processing_status", "unmatched")
 			event.Set("error", "no eligible payment has this exact amount")
-			candidates, err := candidatePaymentIDs(tx, parsed.AmountPaise, now)
+			candidates, err := candidatePaymentIDs(tx, parsed.Account, parsed.AmountPaise, now)
 			if err != nil {
 				return err
 			}
@@ -294,17 +296,17 @@ func (s *Service) openReviewInApp(app core.App, input ReviewInput) (string, erro
 	return s.Reviews.OpenSMSReviewInApp(app, input)
 }
 
-func candidatePaymentIDs(app core.App, amountPaise int64, now time.Time) ([]string, error) {
+func candidatePaymentIDs(app core.App, account domain.PaymentAccount, amountPaise int64, now time.Time) ([]string, error) {
 	if amountPaise <= 0 {
 		return nil, nil
 	}
 	records, err := app.FindRecordsByFilter(
 		"payments",
-		"payable_amount = {:amount} && reuse_after > {:now}",
+		"payment_account = {:account} && payable_amount = {:amount} && reuse_after > {:now}",
 		"-created_at",
 		10,
 		0,
-		dbx.Params{"amount": amountPaise, "now": now.UTC().Format("2006-01-02 15:04:05.000Z")},
+		dbx.Params{"account": string(account), "amount": amountPaise, "now": now.UTC().Format("2006-01-02 15:04:05.000Z")},
 	)
 	if err != nil {
 		return nil, err

@@ -15,7 +15,7 @@ export function ReviewsPage({ notify }: { notify: (value: string) => void }) {
       const filter = showResolved ? "" : 'status = "open"';
       const result = await pb.collection("review_cases").getList<ReviewCase>(1, 100, {
         sort: "-opened_at", filter,
-        expand: "sms_event,reconciliation_entry,payment,resolved_by",
+        expand: "sms_event,email_event,reconciliation_entry,payment,resolved_by",
       });
       setRecords(result.items);
       if (selected) setSelected(result.items.find((item) => item.id === selected.id) ?? null);
@@ -38,7 +38,7 @@ export function ReviewsPage({ notify }: { notify: (value: string) => void }) {
     <div className="table-wrap"><table><thead><tr><th>Opened</th><th>Type</th><th>Severity</th><th>Evidence</th><th>Status</th></tr></thead>
       <tbody>{records.map((record) => <tr className="clickable" key={record.id} onClick={() => setSelected(record)}>
         <td>{formatDate(record.opened_at || record.created)}</td><td>{record.kind}</td><td><Badge status={record.severity} /></td>
-        <td><strong>{record.payment || record.sms_event || record.reconciliation_entry || "—"}</strong><small>{record.reason}</small></td>
+        <td><strong>{record.payment || record.sms_event || record.email_event || record.reconciliation_entry || "—"}</strong><small>{record.reason}</small></td>
         <td><Badge status={record.status} /></td>
       </tr>)}</tbody></table></div>
     {selected && <ReviewModal review={selected} notify={notify} onClose={() => setSelected(null)} onResolved={async (message) => { notify(message); setSelected(null); await load(); }} />}
@@ -52,7 +52,7 @@ function ReviewModal({ review, notify, onClose, onResolved }: { review: ReviewCa
   const [bankReference, setBankReference] = useState("");
   const [note, setNote] = useState("");
   const [saving, setSaving] = useState(false);
-  const evidence = review.expand?.sms_event ?? review.expand?.reconciliation_entry;
+  const evidence = review.expand?.sms_event ?? review.expand?.email_event ?? review.expand?.reconciliation_entry;
 
   async function resolve(event: FormEvent) {
     event.preventDefault();
@@ -93,7 +93,7 @@ function ReviewModal({ review, notify, onClose, onResolved }: { review: ReviewCa
 }
 
 function EvidenceCard({ record }: { record: RecordModel }) {
-  const fields = ["source", "message_time", "amount", "rrn", "upi_id", "payer_name", "description", "transaction_time", "status", "notes"];
+  const fields = ["source", "sender", "subject", "message_time", "amount", "rrn", "upi_id", "payer_name", "description", "transaction_time", "status", "notes"];
   return <div className="evidence-card"><p className="eyebrow">BANK EVIDENCE</p>{fields.map((field) => {
     const raw = record[field];
     if (raw === undefined || raw === null || raw === "") return null;

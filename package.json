@@ -7,7 +7,7 @@
     "dev": "vite --config web/vite.config.ts",
     "build": "vite build --config web/vite.config.ts",
     "typecheck": "tsc -p web/tsconfig.json --noEmit",
-    "test": "npm run typecheck && npm run build"
+    "test": "npm run typecheck && node --test connectors/cloudflare-email-worker/worker.test.mjs && npm run build"
   },
   "dependencies": {
     "pocketbase": "0.27.0",

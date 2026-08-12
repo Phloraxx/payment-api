@@ -41,7 +41,8 @@ PocketBase migrations create:
 1. `users` auth collection for the operator dashboard.
 2. `payments`: explicit business `created_at`, requested/payable amount, status (`pending|paid|expired|cancelled|late`), expiry/quarantine, RRN, payer evidence, `paid_at`, external ID, idempotency key, metadata.
 3. `sms_events`: source (`android_webhook|gmessages|manual`), provider ID, sender/body, message time, parsed evidence, processing status, matched payment, error/raw connector metadata.
-4. `webhook_deliveries`: durable outgoing webhook outbox/retries.
+4. `email_events`: source/Message-ID, envelope metadata, sender/subject/body, trusted authentication result, message/receipt time, parsed evidence, processing status, matched payment, and bounded connector metadata.
+5. `webhook_deliveries`: durable outgoing webhook outbox/retries.
 
 Use non-empty uniqueness for RRN, idempotency key and `(source, source_event_id)`. Authenticated records from the `users` collection may read domain records; direct record writes remain locked so business invariants cannot be bypassed.
 
@@ -56,12 +57,23 @@ Use non-empty uniqueness for RRN, idempotency key and `(source, source_event_id)
 - `POST /api/events/sms` is the primary strong-secret endpoint.
 - `POST /api/webhook` is an explicitly enabled migration-only compatibility route for the old Android relay.
 
+## Email/payment processing
+
+- Keep email ingestion disabled by default until a redacted real Slice message fixture passes acceptance.
+- Accept original RFC 822 messages only through the timestamped HMAC Cloudflare Email Worker boundary.
+- Require a stable Message-ID, exact configured header sender, and one trusted aligned DKIM or DMARC pass result.
+- Bound MIME size/depth, decode plain or HTML content, ignore attachments, and parse only the tested Slice UPI-credit form.
+- Persist email evidence and use the same transactional exact amount/RRN and evidence-time matching service as SMS.
+- Send authentication, parsing, missing-RRN, stale, unmatched, and contradictory evidence to review instead of auto-matching.
+- After bounded Worker webhook attempts fail, forward the original message to a verified monitored recovery inbox.
+
 ## HTTP API
 
 - `POST /api/payments`: create; API key or operator auth; `Idempotency-Key` supported.
 - `GET /api/payments/{id}`: public limited status; sensitive bank evidence omitted.
 - `POST /api/payments/{id}/cancel`: API key or operator auth.
 - `POST /api/events/sms`: primary SMS secret; legacy `{sms}` and richer metadata shapes supported.
+- `POST /api/events/email`: opt-in; timestamped HMAC body containing base64 RFC 822; hidden with 404 while disabled.
 - `POST /api/webhook`: old route only when `LEGACY_SMS_WEBHOOK_ENABLED=true`, authenticated with separate `WEBHOOK_SECRET`.
 - `GET /api/health`: PocketBase liveness used by the container healthcheck.
 - `GET /api/paygate/health`: PayGate DB/readiness and redacted connector summary.
@@ -77,6 +89,7 @@ Create response includes requested amount, payable amount, expiry, payment ID an
 
 - External API: `Authorization: Bearer $PAYGATE_API_KEY`.
 - Primary SMS: `X-Webhook-Secret: $SMS_WEBHOOK_SECRET`.
+- Payment email: `X-PayGate-Timestamp` and `X-PayGate-Signature: sha256=<HMAC>` with a bounded replay window.
 - Legacy route: separate `WEBHOOK_SECRET`, opt-in only.
 - Dashboard: PocketBase `users`; the SPA never receives PocketBase superuser credentials.
 - `UPI_ID`, API key and primary SMS secret are required in non-test mode.
@@ -94,7 +107,7 @@ When configured, persist/send `payment.paid`, `payment.late`, `payment.expired` 
 
 Use PocketBase realtime for authenticated operator views. No custom WebSocket server.
 
-UI pages: Login, Dashboard, Payments/create/details, SMS Events, Webhook Deliveries, Settings/connector. PocketBase `/_/` remains available for raw administration/debugging.
+UI pages: Login, Dashboard, Payments/create/details, SMS Events, Email Events, Reviews, Webhook Deliveries, Settings/connector. PocketBase `/_/` remains available for raw administration/debugging.
 
 ## libgm connector
 

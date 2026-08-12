@@ -3,12 +3,17 @@ import type { RecordModel } from "pocketbase";
 import { formatDate } from "../components/common";
 import { pb } from "../pb";
 
-const smsFields = ["source", "source_event_id", "message_time", "sender", "body", "amount", "rrn", "upi_id", "payer_name", "processing_status", "matched_payment", "error"];
+const smsFields = ["payment_account", "source", "source_event_id", "message_time", "sender", "body", "amount", "rrn", "upi_id", "payer_name", "processing_status", "matched_payment", "error"];
+const emailFields = ["payment_account", "source", "source_event_id", "message_time", "received_at", "sender", "recipient", "subject", "body", "amount", "rrn", "upi_id", "payer_name", "processing_status", "matched_payment", "error"];
 const auditFields = ["action", "actor_email", "entity_type", "entity_id", "summary", "details", "occurred_at"];
 const webhookFields = ["event_id", "event", "payment", "status", "attempts", "response_code", "next_attempt_at", "last_attempt_at", "delivered_at", "last_error"];
 
 export function SMSEvents() {
   return <Records collection="sms_events" title="SMS evidence" fields={smsFields} />;
+}
+
+export function EmailEvents() {
+  return <Records collection="email_events" title="Email payment evidence" fields={emailFields} />;
 }
 
 export function AuditEvents() {

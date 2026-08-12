@@ -2,9 +2,9 @@
 
 Self-hosted UPI payment verification for applications that receive money directly into a configured UPI/bank account.
 
-PayGate creates a unique payable amount using a paise fingerprint, observes bank-credit SMS evidence, matches the **exact** amount and UPI reference, persists the payment lifecycle in PocketBase/SQLite, and exposes status through an HTTP API, realtime operator UI and optional signed outgoing webhooks.
+PayGate creates a unique payable amount using a paise fingerprint, observes authenticated bank-credit SMS or email evidence, matches the **exact** amount and UPI reference, persists the payment lifecycle in PocketBase/SQLite, and exposes status through an HTTP API, realtime operator UI and optional signed outgoing webhooks.
 
-PayGate does **not** custody, route or settle funds. The payer pays the configured UPI account directly. SMS-based verification is an evidence mechanism, not a bank/acquirer API and not a settlement guarantee.
+PayGate does **not** custody, route or settle funds. The payer pays the configured UPI account directly. Message-based verification is an evidence mechanism, not a bank/acquirer API and not a settlement guarantee.
 
 ## Runtime
 
@@ -73,19 +73,22 @@ Content-Type: application/json
 
 {
   "amount": 100,
+  "paymentAccount": "slice",
   "externalId": "order-123",
   "metadata": {"cart": "abc"}
 }
 ```
 
-`amount` may also be an integer string such as `"100"`. Fractional requested amounts are rejected.
+`amount` may also be an integer string such as `"100"`. Fractional requested amounts are rejected. `paymentAccount` is `kotak` or `slice`; omitted requests retain the backward-compatible Kotak default. Use `GET /api/payment-accounts` to discover the enabled choices without exposing either UPI ID.
 
 Example response:
 
 ```json
 {
   "id": "...",
-  "paymentId": "...",
+  "paymentAccount": "slice",
+  "paymentAccountLabel": "Slice",
+  "verificationMethod": "email",
   "requestedAmount": 100,
   "requestedAmountPaise": 10000,
   "payableAmount": "100.37",
@@ -139,6 +142,21 @@ Content-Type: application/json
 
 This compatibility route exists for migration only. The production default is disabled. Rotate the old relay to `SMS_WEBHOOK_SECRET` and `/api/events/sms`, then disable the legacy route.
 
+### Payment email ingestion
+
+`POST /api/events/email` is disabled unless `PAYMENT_EMAIL_ENABLED=true`. The included [Cloudflare Email Routing connector](connectors/cloudflare-email-worker/README.md) sends the original RFC 822 message with an HMAC-SHA256 signature over `<unixTimestamp>.<raw JSON body>`.
+
+Slice payments are email-verified; Kotak payments are SMS-verified. Evidence is account-scoped, so a Slice email can never settle a Kotak payment and a Kotak SMS or statement can never settle a Slice payment. PayGate accepts an email as automatic payment evidence only when all of these checks pass:
+
+- request timestamp is within the configured anti-replay window and the HMAC is valid;
+- Message-ID is present and stable for deduplication;
+- the decoded `From` address exactly equals `PAYMENT_EMAIL_ALLOWED_SENDER`;
+- the trusted receiver's `Authentication-Results` reports aligned DKIM or DMARC pass;
+- subject/body match the narrow bank UPI-credit parser and contain an exact amount and RRN;
+- the normal evidence-time, amount, quarantine and global RRN constraints pass.
+
+Failures are persisted and routed to manual review; they do not silently confirm a payment. The real Slice layout is covered by a redacted `.eml` fixture. Production enablement still requires an end-to-end forwarded message proving that the receiving Cloudflare route preserves an aligned DKIM or DMARC pass.
+
 ### Operational APIs
 
 Dashboard-authenticated operations:
@@ -167,9 +185,9 @@ Unknown `/api/*` paths remain JSON 404 responses; the React SPA fallback never c
 
 ## Matching and idempotency
 
-Bank SMS processing follows these rules:
+Bank message processing follows these rules:
 
-1. persist the SMS evidence event;
+1. persist the SMS or email evidence event;
 2. parse exact amount, RRN and optional payer information;
 3. reject automatic matching if amount or RRN is missing;
 4. treat an already-seen RRN with the same amount as an idempotent duplicate;
@@ -223,7 +241,7 @@ The React UI at `/` provides:
 - payment creation;
 - realtime payment list/details;
 - cancellation;
-- SMS evidence records;
+- SMS and email evidence records;
 - persistent evidence review and audited manual matching;
 - CSV/TSV/XLSX bank-statement reconciliation;
 - fingerprint-pool capacity monitoring;
@@ -274,7 +292,9 @@ Copy `.env.example` and provide secrets through your deployment system rather th
 Required in normal serve mode:
 
 ```text
-UPI_ID=
+KOTAK_UPI_ID=
+SLICE_UPI_ID=             # required when PAYMENT_EMAIL_ENABLED=true
+PAYMENT_DEFAULT_ACCOUNT=kotak
 PAYGATE_API_KEY=           # minimum 24 characters
 SMS_WEBHOOK_SECRET=        # minimum 24 characters
 ```
@@ -282,12 +302,18 @@ SMS_WEBHOOK_SECRET=        # minimum 24 characters
 Common optional values:
 
 ```text
-UPI_PAYEE_NAME=PayGate
+KOTAK_UPI_PAYEE_NAME=PayGate
+SLICE_UPI_PAYEE_NAME=PayGate
 PAYMENT_TTL=5m
 PAYMENT_QUARANTINE=24h
 PAYGATE_RATE_LIMITS_ENABLED=true
 GMESSAGES_ENABLED=false
 GMESSAGES_SESSION_PATH=
+PAYMENT_EMAIL_ENABLED=false
+PAYMENT_EMAIL_WEBHOOK_SECRET= # minimum 24 characters when enabled
+PAYMENT_EMAIL_ALLOWED_SENDER=noreply@slice.bank.in
+PAYMENT_EMAIL_AUTH_SERV_ID=mx.cloudflare.net
+PAYMENT_EMAIL_SIGNATURE_TOLERANCE=5m
 OUTGOING_WEBHOOK_URL=
 OUTGOING_WEBHOOK_SECRET=
 OPERATOR_ALERT_WEBHOOK_URL=
@@ -295,6 +321,7 @@ OPERATOR_ALERT_WEBHOOK_SECRET=
 STATEMENT_TIMEZONE=Asia/Kolkata
 PAYGATE_RETENTION_ENABLED=true
 SMS_RAW_RETENTION=2160h
+EMAIL_RAW_RETENTION=2160h
 RECONCILIATION_RAW_RETENTION=8760h
 AUDIT_RETENTION=17520h
 PAYGATE_BACKUP_CRON="0 3 * * *"

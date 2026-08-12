@@ -1,8 +1,9 @@
 import type { RecordModel } from "pocketbase";
 
-export type Page = "dashboard" | "payments" | "reviews" | "reconciliation" | "sms" | "alerts" | "refunds" | "webhooks" | "audit" | "razorpay_test" | "settings";
+export type Page = "dashboard" | "payments" | "reviews" | "reconciliation" | "sms" | "email" | "alerts" | "refunds" | "webhooks" | "audit" | "razorpay_test" | "settings";
 
 export type Payment = RecordModel & {
+  payment_account: "kotak" | "slice";
   requested_amount: number;
   payable_amount: number;
   status: "pending" | "paid" | "expired" | "cancelled" | "late";
@@ -71,6 +72,9 @@ export type DashboardData = {
 
 export type PaymentCreateResponse = {
   id: string;
+  paymentAccount: "kotak" | "slice";
+  paymentAccountLabel: string;
+  verificationMethod: "sms" | "email";
   requestedAmount: number;
   requestedAmountPaise: number;
   payableAmount: string;
@@ -87,6 +91,7 @@ export type ReviewCase = RecordModel & {
   status: "open" | "resolved" | "dismissed";
   severity: string;
   sms_event: string;
+  email_event: string;
   reconciliation_entry: string;
   payment: string;
   candidate_payment_ids?: string[];

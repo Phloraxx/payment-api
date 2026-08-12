@@ -26,12 +26,52 @@ func paymentTestService(t *testing.T) (*Service, *tests.TestApp, *time.Time) {
 		PaymentTTL:       5 * time.Minute,
 		AmountQuarantine: 24 * time.Hour,
 		UPIID:            "operator@bank",
+		SliceUPIID:       "operator@slice",
 		UPIPayeeName:     "PayGate",
 	}
 	service := NewService(app, cfg, nil)
 	service.Now = func() time.Time { return now }
 	service.SuffixStart = func() (int64, error) { return 1, nil }
 	return service, app, &now
+}
+
+func TestPaymentAccountsAreIsolatedForCreationIdempotencyAndMatching(t *testing.T) {
+	service, _, _ := paymentTestService(t)
+	kotak, _, err := service.Create(CreateInput{AmountRupees: 100, PaymentAccount: "kotak", IdempotencyKey: "account-choice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kotak.Account != domain.PaymentAccountKotak {
+		t.Fatalf("Kotak payment account = %q", kotak.Account)
+	}
+	if _, _, err := service.Create(CreateInput{AmountRupees: 100, PaymentAccount: "slice", IdempotencyKey: "account-choice"}); err == nil {
+		t.Fatal("idempotency key reused across accounts without a conflict")
+	}
+	slice, _, err := service.Create(CreateInput{AmountRupees: 100, PaymentAccount: "slice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := CreateResponse(slice, service.Config)
+	if response["paymentAccount"] != domain.PaymentAccountSlice || response["verificationMethod"] != "email" ||
+		!strings.Contains(response["upiUri"].(string), "pa=operator%40slice") {
+		t.Fatalf("Slice create response = %+v", response)
+	}
+	wrongRail, err := service.Match(domain.ParsedSMS{
+		Account: domain.PaymentAccountKotak, AmountPaise: slice.PayablePaise, RRN: "222233334444",
+	})
+	if err != nil || wrongRail.Action != "unmatched" {
+		t.Fatalf("Kotak evidence for Slice amount = %+v, %v", wrongRail, err)
+	}
+	matched, err := service.Match(domain.ParsedSMS{
+		Account: domain.PaymentAccountSlice, AmountPaise: slice.PayablePaise, RRN: "222233334444",
+	})
+	if err != nil || matched.Action != "marked_paid" || matched.Payment.ID != slice.ID {
+		t.Fatalf("Slice evidence = %+v, %v", matched, err)
+	}
+	storedKotak, _ := service.Get(kotak.ID)
+	if storedKotak.Status != domain.StatusPending {
+		t.Fatalf("Slice evidence changed Kotak payment to %s", storedKotak.Status)
+	}
 }
 
 func TestCreateAllocatesAllNinetyNineSlotsAndExhausts(t *testing.T) {

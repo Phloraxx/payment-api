@@ -4,6 +4,8 @@ import "time"
 
 type PaymentStatus string
 
+type PaymentAccount string
+
 const (
 	StatusPending   PaymentStatus = "pending"
 	StatusPaid      PaymentStatus = "paid"
@@ -12,16 +14,23 @@ const (
 	StatusLate      PaymentStatus = "late"
 )
 
+const (
+	PaymentAccountKotak PaymentAccount = "kotak"
+	PaymentAccountSlice PaymentAccount = "slice"
+)
+
 type ParsedSMS struct {
 	AmountPaise int64
 	RRN         string
 	UPIId       string
 	PayerName   string
 	OccurredAt  time.Time
+	Account     PaymentAccount
 }
 
 type Payment struct {
 	ID             string
+	Account        PaymentAccount
 	RequestedPaise int64
 	PayablePaise   int64
 	Status         PaymentStatus

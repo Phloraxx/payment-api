@@ -2,11 +2,16 @@ package api
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -17,6 +22,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/money"
+	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/razorpaylive"
 	"github.com/Phloraxx/payment-api/internal/razorpaytest"
@@ -32,6 +38,7 @@ import (
 const (
 	maxPaymentRequestBytes      int64 = (1 << 20) + (64 << 10)
 	maxSMSRequestBytes          int64 = 128 << 10
+	maxEmailRequestBytes        int64 = ((paymentemail.MaxRawBytes + 2) / 3 * 4) + (128 << 10)
 	maxGMessagesPairBytes       int64 = 128 << 10
 	maxReviewRequestBytes       int64 = 16 << 10
 	maxRefundRequestBytes       int64 = (1 << 20) + (64 << 10)
@@ -45,6 +52,7 @@ type API struct {
 	Config         config.Config
 	Payments       *payments.Service
 	SMS            *sms.Service
+	Email          *paymentemail.Service
 	GMessages      *gmessages.Manager
 	Reviews        *reviews.Service
 	Reconciliation *reconciliation.Service
@@ -70,9 +78,11 @@ func (a *API) Register(app core.App) {
 			return event.String(http.StatusOK, "User-agent: *\nContent-Signal: search=no, ai-input=no, ai-train=no, use=immediate\nDisallow:\n")
 		})
 		e.Router.POST("/api/payments", a.createPayment).Bind(apis.BodyLimit(maxPaymentRequestBytes))
+		e.Router.GET("/api/payment-accounts", a.paymentAccounts)
 		e.Router.GET("/api/payments/{id}", a.getPayment)
 		e.Router.POST("/api/payments/{id}/cancel", a.cancelPayment)
 		e.Router.POST("/api/events/sms", a.ingestSMS).Bind(apis.BodyLimit(maxSMSRequestBytes))
+		e.Router.POST("/api/events/email", a.ingestEmail).Bind(apis.BodyLimit(maxEmailRequestBytes))
 		e.Router.POST("/api/webhook", a.ingestLegacySMS).Bind(apis.BodyLimit(maxSMSRequestBytes))
 		e.Router.GET("/api/paygate/health", a.health)
 		e.Router.GET("/api/config", a.getConfig)
@@ -124,10 +134,112 @@ func (a *API) Register(app core.App) {
 	})
 }
 
+type emailBody struct {
+	SourceID       string `json:"sourceId"`
+	EnvelopeFrom   string `json:"envelopeFrom"`
+	EnvelopeTo     string `json:"envelopeTo"`
+	ReceivedAt     string `json:"receivedAt"`
+	RawEmailBase64 string `json:"rawEmailBase64"`
+}
+
+func (a *API) ingestEmail(e *core.RequestEvent) error {
+	if !a.Config.EmailEvidenceEnabled || a.Email == nil {
+		return e.NotFoundError("route not found", nil)
+	}
+	body, err := io.ReadAll(e.Request.Body)
+	if err != nil {
+		return e.BadRequestError("could not read request body", err)
+	}
+	timestamp := strings.TrimSpace(e.Request.Header.Get("X-PayGate-Timestamp"))
+	signature := strings.TrimSpace(e.Request.Header.Get("X-PayGate-Signature"))
+	seconds, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return e.UnauthorizedError("invalid email webhook timestamp", nil)
+	}
+	signedAt := time.Unix(seconds, 0)
+	if delta := time.Since(signedAt); delta > a.Config.EmailSignatureTolerance || delta < -a.Config.EmailSignatureTolerance {
+		return e.UnauthorizedError("email webhook timestamp is outside the allowed window", nil)
+	}
+	if !validEmailSignature(a.Config.EmailWebhookSecret, timestamp, body, signature) {
+		return e.UnauthorizedError("invalid email webhook signature", nil)
+	}
+
+	var request emailBody
+	if err := decodeJSONBytes(body, &request); err != nil {
+		return e.BadRequestError("invalid JSON body", err)
+	}
+	raw, err := base64.StdEncoding.Strict().DecodeString(strings.TrimSpace(request.RawEmailBase64))
+	if err != nil {
+		return e.BadRequestError("rawEmailBase64 must be valid standard base64", err)
+	}
+	message, err := paymentemail.ParseRaw(raw)
+	if err != nil {
+		return e.BadRequestError("raw email could not be parsed", err)
+	}
+	sourceID := strings.TrimSpace(request.SourceID)
+	if sourceID == "" {
+		sourceID = message.MessageID
+	}
+	if sourceID == "" {
+		return e.BadRequestError("sourceId or Message-ID is required for deduplication", nil)
+	}
+	if message.MessageID != "" && sourceID != message.MessageID {
+		return e.BadRequestError("sourceId must match the email Message-ID", nil)
+	}
+	receivedAt := signedAt
+	if strings.TrimSpace(request.ReceivedAt) != "" {
+		receivedAt, err = time.Parse(time.RFC3339, request.ReceivedAt)
+		if err != nil {
+			return e.BadRequestError("receivedAt must be RFC3339", err)
+		}
+	}
+	result, err := a.Email.Ingest(paymentemail.Input{
+		Source: "cloudflare_email", SourceEventID: sourceID,
+		EnvelopeSender: request.EnvelopeFrom, Recipient: request.EnvelopeTo,
+		Message: message, ReceivedAt: receivedAt,
+		RawPayload: map[string]any{
+			"sourceId": sourceID, "messageId": message.MessageID,
+			"envelopeFrom": request.EnvelopeFrom, "envelopeTo": request.EnvelopeTo,
+			"receivedAt": receivedAt.UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		if _, ok := err.(*domain.Error); ok {
+			return writeDomainErrorWithData(e, err, map[string]any{"event": result})
+		}
+		return writeDomainError(e, err)
+	}
+	status := http.StatusAccepted
+	if result.Duplicate {
+		status = http.StatusOK
+	}
+	return e.JSON(status, result)
+}
+
+func validEmailSignature(secret, timestamp string, body []byte, signature string) bool {
+	if secret == "" || timestamp == "" {
+		return false
+	}
+	if !strings.HasPrefix(signature, "sha256=") {
+		return false
+	}
+	signature = strings.TrimSpace(strings.TrimPrefix(signature, "sha256="))
+	provided, err := hex.DecodeString(signature)
+	if err != nil || len(provided) != sha256.Size {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(timestamp))
+	_, _ = mac.Write([]byte("."))
+	_, _ = mac.Write(body)
+	return hmac.Equal(mac.Sum(nil), provided)
+}
+
 type createPaymentBody struct {
-	Amount     json.RawMessage `json:"amount"`
-	ExternalID string          `json:"externalId"`
-	Metadata   json.RawMessage `json:"metadata"`
+	Amount         json.RawMessage `json:"amount"`
+	PaymentAccount string          `json:"paymentAccount"`
+	ExternalID     string          `json:"externalId"`
+	Metadata       json.RawMessage `json:"metadata"`
 }
 
 func (a *API) createPayment(e *core.RequestEvent) error {
@@ -154,6 +266,7 @@ func (a *API) createPayment(e *core.RequestEvent) error {
 
 	payment, replayed, err := a.Payments.Create(payments.CreateInput{
 		AmountRupees:   amount,
+		PaymentAccount: strings.TrimSpace(body.PaymentAccount),
 		ExternalID:     strings.TrimSpace(body.ExternalID),
 		Metadata:       metadata,
 		IdempotencyKey: strings.TrimSpace(e.Request.Header.Get("Idempotency-Key")),
@@ -167,6 +280,20 @@ func (a *API) createPayment(e *core.RequestEvent) error {
 		e.Response.Header().Set("X-Idempotent-Replayed", "true")
 	}
 	return e.JSON(status, payments.CreateResponse(payment, a.Config))
+}
+
+func (a *API) paymentAccounts(e *core.RequestEvent) error {
+	if !a.authorizedWrite(e) {
+		return e.UnauthorizedError("API key or dashboard authentication is required", nil)
+	}
+	defaultAccount := strings.ToLower(strings.TrimSpace(a.Config.DefaultPaymentAccount))
+	if defaultAccount == "" {
+		defaultAccount = "kotak"
+	}
+	return e.JSON(http.StatusOK, map[string]any{
+		"default":  defaultAccount,
+		"accounts": a.Config.PaymentAccounts(),
+	})
 }
 
 func (a *API) getPayment(e *core.RequestEvent) error {
@@ -296,16 +423,25 @@ func (a *API) getConfig(e *core.RequestEvent) error {
 	if !a.dashboardAuth(e) {
 		return e.UnauthorizedError("dashboard authentication is required", nil)
 	}
+	defaultAccount := strings.ToLower(strings.TrimSpace(a.Config.DefaultPaymentAccount))
+	if defaultAccount == "" {
+		defaultAccount = "kotak"
+	}
 	return e.JSON(http.StatusOK, map[string]any{
 		"upiId":                             a.Config.UPIID,
 		"upiPayeeName":                      a.Config.UPIPayeeName,
+		"defaultPaymentAccount":             defaultAccount,
+		"paymentAccounts":                   a.Config.PaymentAccounts(),
 		"paymentTtlSeconds":                 int64(a.Config.PaymentTTL / time.Second),
 		"quarantineSeconds":                 int64(a.Config.AmountQuarantine / time.Second),
 		"webhookConfigured":                 a.Config.OutgoingWebhookURL != "",
 		"rateLimitsEnabled":                 a.Config.RateLimitsEnabled,
 		"legacySMSWebhookEnabled":           a.Config.LegacySMSWebhookEnabled,
+		"emailEvidenceEnabled":              a.Config.EmailEvidenceEnabled,
+		"emailAllowedSender":                a.Config.EmailAllowedSender,
 		"retentionEnabled":                  a.Config.RetentionEnabled,
 		"smsRawRetentionSeconds":            int64(a.Config.SMSRawRetention / time.Second),
+		"emailRawRetentionSeconds":          int64(a.Config.EmailRawRetention / time.Second),
 		"reconciliationRawRetentionSeconds": int64(a.Config.ReconciliationRawRetention / time.Second),
 		"auditRetentionSeconds":             int64(a.Config.AuditRetention / time.Second),
 		"backupEnabled":                     a.Config.BackupCron != "",
@@ -741,6 +877,10 @@ func decodeJSON(e *core.RequestEvent, dst any) error {
 		return err
 	}
 
+	return decodeJSONBytes(body, dst)
+}
+
+func decodeJSONBytes(body []byte, dst any) error {
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(dst); err != nil {

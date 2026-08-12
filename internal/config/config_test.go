@@ -103,6 +103,43 @@ func TestLoadRejectsMalformedEnvironmentValues(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsEmailEvidenceOff(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.EmailEvidenceEnabled {
+		t.Fatal("email evidence must be opt-in")
+	}
+	if cfg.EmailAllowedSender != "noreply@slice.bank.in" || cfg.EmailAuthServID != "mx.cloudflare.net" {
+		t.Fatalf("email defaults = sender %q authserv %q", cfg.EmailAllowedSender, cfg.EmailAuthServID)
+	}
+	if cfg.EmailSignatureTolerance != 5*time.Minute || cfg.EmailRawRetention != 90*24*time.Hour {
+		t.Fatalf("email durations = tolerance %s retention %s", cfg.EmailSignatureTolerance, cfg.EmailRawRetention)
+	}
+}
+
+func TestValidateServeEmailEvidenceRequiresStrongExactConfiguration(t *testing.T) {
+	base := Config{
+		TestMode: true, PaymentTTL: time.Minute, AmountQuarantine: time.Hour, StatementTimezone: "Asia/Kolkata",
+		SliceUPIID:           "operator@slice",
+		EmailEvidenceEnabled: true, EmailAllowedSender: "noreply@slice.bank.in", EmailAuthServID: "mx.cloudflare.net",
+		EmailSignatureTolerance: 5 * time.Minute,
+	}
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "PAYMENT_EMAIL_WEBHOOK_SECRET") {
+		t.Fatalf("missing email secret error = %v", err)
+	}
+	base.EmailWebhookSecret = "email-webhook-secret-long-enough"
+	base.EmailAllowedSender = "Slice <noreply@slice.bank.in>"
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "PAYMENT_EMAIL_ALLOWED_SENDER") {
+		t.Fatalf("display-name sender accepted: %v", err)
+	}
+	base.EmailAllowedSender = "noreply@slice.bank.in"
+	if err := base.ValidateServe(); err != nil {
+		t.Fatalf("valid email configuration rejected: %v", err)
+	}
+}
+
 func TestValidateServeRejectsInvalidStatementTimezone(t *testing.T) {
 	cfg := Config{
 		UPIID: "operator@bank", APIKey: testAPISecret, SMSWebhookSecret: testSMSSecret,

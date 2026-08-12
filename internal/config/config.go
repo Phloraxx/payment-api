@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/mail"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -15,10 +16,20 @@ const minPrimarySecretLength = 24
 
 type Config struct {
 	DataDir                    string
+	DefaultPaymentAccount      string
+	KotakUPIID                 string
+	KotakUPIPayeeName          string
+	SliceUPIID                 string
+	SliceUPIPayeeName          string
 	UPIID                      string
 	UPIPayeeName               string
 	APIKey                     string
 	SMSWebhookSecret           string
+	EmailEvidenceEnabled       bool
+	EmailWebhookSecret         string
+	EmailAllowedSender         string
+	EmailAuthServID            string
+	EmailSignatureTolerance    time.Duration
 	LegacySMSWebhookSecret     string
 	LegacySMSWebhookEnabled    bool
 	PaymentTTL                 time.Duration
@@ -31,6 +42,7 @@ type Config struct {
 	RateLimitsEnabled          bool
 	RetentionEnabled           bool
 	SMSRawRetention            time.Duration
+	EmailRawRetention          time.Duration
 	ReconciliationRawRetention time.Duration
 	AuditRetention             time.Duration
 	BackupCron                 string
@@ -55,6 +67,14 @@ type Config struct {
 	RazorpayLiveKeySecret      string
 	RazorpayLiveWebhookSecret  string
 	RazorpayLiveDisplayName    string
+}
+
+type PaymentAccount struct {
+	ID           string `json:"id"`
+	Label        string `json:"label"`
+	UPIID        string `json:"-"`
+	PayeeName    string `json:"-"`
+	Verification string `json:"verification"`
 }
 
 func Load() (Config, error) {
@@ -90,11 +110,23 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	emailEvidenceEnabled, err := boolEnv("PAYMENT_EMAIL_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 	retentionEnabled, err := boolEnv("PAYGATE_RETENTION_ENABLED", true)
 	if err != nil {
 		return Config{}, err
 	}
 	smsRawRetention, err := durationEnv("SMS_RAW_RETENTION", 90*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	emailRawRetention, err := durationEnv("EMAIL_RAW_RETENTION", 90*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	emailSignatureTolerance, err := durationEnv("PAYMENT_EMAIL_SIGNATURE_TOLERANCE", 5*time.Minute)
 	if err != nil {
 		return Config{}, err
 	}
@@ -128,12 +160,24 @@ func Load() (Config, error) {
 	}
 
 	dataDir := strings.TrimSpace(env("PB_DATA_DIR", "./pb_data"))
+	kotakUPIID := strings.TrimSpace(firstNonEmpty(os.Getenv("KOTAK_UPI_ID"), os.Getenv("UPI_ID")))
+	kotakPayeeName := strings.TrimSpace(firstNonEmpty(os.Getenv("KOTAK_UPI_PAYEE_NAME"), os.Getenv("UPI_PAYEE_NAME"), os.Getenv("UPI_NAME"), "PayGate"))
 	cfg := Config{
 		DataDir:                    dataDir,
-		UPIID:                      strings.TrimSpace(os.Getenv("UPI_ID")),
-		UPIPayeeName:               strings.TrimSpace(firstNonEmpty(os.Getenv("UPI_PAYEE_NAME"), os.Getenv("UPI_NAME"), "PayGate")),
+		DefaultPaymentAccount:      strings.ToLower(strings.TrimSpace(env("PAYMENT_DEFAULT_ACCOUNT", "kotak"))),
+		KotakUPIID:                 kotakUPIID,
+		KotakUPIPayeeName:          kotakPayeeName,
+		SliceUPIID:                 strings.TrimSpace(os.Getenv("SLICE_UPI_ID")),
+		SliceUPIPayeeName:          strings.TrimSpace(firstNonEmpty(os.Getenv("SLICE_UPI_PAYEE_NAME"), os.Getenv("UPI_PAYEE_NAME"), os.Getenv("UPI_NAME"), "PayGate")),
+		UPIID:                      kotakUPIID,
+		UPIPayeeName:               kotakPayeeName,
 		APIKey:                     strings.TrimSpace(os.Getenv("PAYGATE_API_KEY")),
 		SMSWebhookSecret:           strings.TrimSpace(os.Getenv("SMS_WEBHOOK_SECRET")),
+		EmailEvidenceEnabled:       emailEvidenceEnabled,
+		EmailWebhookSecret:         strings.TrimSpace(os.Getenv("PAYMENT_EMAIL_WEBHOOK_SECRET")),
+		EmailAllowedSender:         strings.ToLower(strings.TrimSpace(env("PAYMENT_EMAIL_ALLOWED_SENDER", "noreply@slice.bank.in"))),
+		EmailAuthServID:            strings.ToLower(strings.TrimSpace(env("PAYMENT_EMAIL_AUTH_SERV_ID", "mx.cloudflare.net"))),
+		EmailSignatureTolerance:    emailSignatureTolerance,
 		LegacySMSWebhookSecret:     strings.TrimSpace(os.Getenv("WEBHOOK_SECRET")),
 		LegacySMSWebhookEnabled:    legacyEnabled,
 		PaymentTTL:                 paymentTTL,
@@ -145,6 +189,7 @@ func Load() (Config, error) {
 		RateLimitsEnabled:          rateLimitsEnabled,
 		RetentionEnabled:           retentionEnabled,
 		SMSRawRetention:            smsRawRetention,
+		EmailRawRetention:          emailRawRetention,
 		ReconciliationRawRetention: reconciliationRetention,
 		AuditRetention:             auditRetention,
 		BackupCron:                 strings.TrimSpace(env("PAYGATE_BACKUP_CRON", "0 3 * * *")),
@@ -178,10 +223,14 @@ func Load() (Config, error) {
 }
 
 func (c Config) ValidateServe() error {
+	defaultPaymentAccount := strings.ToLower(strings.TrimSpace(c.DefaultPaymentAccount))
+	if defaultPaymentAccount == "" {
+		defaultPaymentAccount = "kotak"
+	}
 	if !c.TestMode {
 		var missing []string
-		if c.UPIID == "" {
-			missing = append(missing, "UPI_ID")
+		if c.KotakUPIID == "" && c.UPIID == "" {
+			missing = append(missing, "KOTAK_UPI_ID (or legacy UPI_ID)")
 		}
 		if c.APIKey == "" {
 			missing = append(missing, "PAYGATE_API_KEY")
@@ -199,6 +248,15 @@ func (c Config) ValidateServe() error {
 			return fmt.Errorf("SMS_WEBHOOK_SECRET must be at least %d characters", minPrimarySecretLength)
 		}
 	}
+	if defaultPaymentAccount != "kotak" && defaultPaymentAccount != "slice" {
+		return errors.New("PAYMENT_DEFAULT_ACCOUNT must be kotak or slice")
+	}
+	if _, ok := c.PaymentAccount(defaultPaymentAccount); !ok && !c.TestMode {
+		return fmt.Errorf("%s UPI ID is required for PAYMENT_DEFAULT_ACCOUNT", strings.ToUpper(defaultPaymentAccount))
+	}
+	if c.EmailEvidenceEnabled && strings.TrimSpace(c.SliceUPIID) == "" {
+		return errors.New("SLICE_UPI_ID is required when PAYMENT_EMAIL_ENABLED=true")
+	}
 	if c.PaymentTTL <= 0 {
 		return errors.New("PAYMENT_TTL must be positive")
 	}
@@ -211,6 +269,21 @@ func (c Config) ValidateServe() error {
 		}
 		if len(c.LegacySMSWebhookSecret) < minPrimarySecretLength {
 			return fmt.Errorf("WEBHOOK_SECRET must be at least %d characters when LEGACY_SMS_WEBHOOK_ENABLED=true", minPrimarySecretLength)
+		}
+	}
+	if c.EmailEvidenceEnabled {
+		if len(c.EmailWebhookSecret) < minPrimarySecretLength {
+			return fmt.Errorf("PAYMENT_EMAIL_WEBHOOK_SECRET must be at least %d characters when PAYMENT_EMAIL_ENABLED=true", minPrimarySecretLength)
+		}
+		address, err := mail.ParseAddress(c.EmailAllowedSender)
+		if err != nil || !strings.EqualFold(address.Address, c.EmailAllowedSender) || !strings.Contains(address.Address, "@") {
+			return errors.New("PAYMENT_EMAIL_ALLOWED_SENDER must be one exact email address")
+		}
+		if c.EmailAuthServID == "" {
+			return errors.New("PAYMENT_EMAIL_AUTH_SERV_ID is required when PAYMENT_EMAIL_ENABLED=true")
+		}
+		if c.EmailSignatureTolerance <= 0 {
+			return errors.New("PAYMENT_EMAIL_SIGNATURE_TOLERANCE must be positive")
 		}
 	}
 	if c.OutgoingWebhookURL != "" {
@@ -227,7 +300,7 @@ func (c Config) ValidateServe() error {
 	if _, err := time.LoadLocation(c.StatementTimezone); err != nil {
 		return fmt.Errorf("STATEMENT_TIMEZONE is invalid: %w", err)
 	}
-	if c.RetentionEnabled && (c.SMSRawRetention <= 0 || c.ReconciliationRawRetention <= 0 || c.AuditRetention <= 0) {
+	if c.RetentionEnabled && (c.SMSRawRetention <= 0 || c.EmailRawRetention <= 0 || c.ReconciliationRawRetention <= 0 || c.AuditRetention <= 0) {
 		return errors.New("retention durations must be positive when PAYGATE_RETENTION_ENABLED=true")
 	}
 	if c.BackupCron != "" && c.BackupMaxKeep < 1 {
@@ -281,6 +354,35 @@ func (c Config) ValidateServe() error {
 		}
 	}
 	return nil
+}
+
+func (c Config) PaymentAccount(id string) (PaymentAccount, bool) {
+	id = strings.ToLower(strings.TrimSpace(id))
+	switch id {
+	case "kotak":
+		upiID := strings.TrimSpace(firstNonEmpty(c.KotakUPIID, c.UPIID))
+		if upiID == "" && !c.TestMode {
+			return PaymentAccount{}, false
+		}
+		return PaymentAccount{ID: "kotak", Label: "Kotak", UPIID: upiID, PayeeName: firstNonEmpty(c.KotakUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "sms"}, true
+	case "slice":
+		if strings.TrimSpace(c.SliceUPIID) == "" && !c.TestMode {
+			return PaymentAccount{}, false
+		}
+		return PaymentAccount{ID: "slice", Label: "Slice", UPIID: strings.TrimSpace(c.SliceUPIID), PayeeName: firstNonEmpty(c.SliceUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "email"}, true
+	default:
+		return PaymentAccount{}, false
+	}
+}
+
+func (c Config) PaymentAccounts() []PaymentAccount {
+	accounts := make([]PaymentAccount, 0, 2)
+	for _, id := range []string{"kotak", "slice"} {
+		if account, ok := c.PaymentAccount(id); ok {
+			accounts = append(accounts, account)
+		}
+	}
+	return accounts
 }
 
 func validateHTTPURL(name, value string) error {

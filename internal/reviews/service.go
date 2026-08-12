@@ -8,6 +8,7 @@ import (
 
 	"github.com/Phloraxx/payment-api/internal/audit"
 	"github.com/Phloraxx/payment-api/internal/domain"
+	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/sms"
 	"github.com/pocketbase/dbx"
@@ -25,6 +26,7 @@ type OpenInput struct {
 	Kind                  string
 	Severity              string
 	SMSEventID            string
+	EmailEventID          string
 	ReconciliationEntryID string
 	PaymentID             string
 	CandidatePaymentIDs   []string
@@ -60,9 +62,26 @@ func (s *Service) OpenSMSReviewInApp(app core.App, input sms.ReviewInput) (strin
 	})
 }
 
+func (s *Service) OpenEmailReviewInApp(app core.App, input paymentemail.ReviewInput) (string, error) {
+	return s.OpenInApp(app, OpenInput{
+		Kind: input.Kind, Severity: input.Severity, EmailEventID: input.EmailEventID,
+		PaymentID: input.PaymentID, CandidatePaymentIDs: input.CandidatePaymentIDs,
+		Reason: input.Reason, OpenedAt: input.OpenedAt,
+	})
+}
+
 func (s *Service) OpenInApp(app core.App, input OpenInput) (string, error) {
-	if input.SMSEventID == "" && input.ReconciliationEntryID == "" {
+	if input.SMSEventID == "" && input.EmailEventID == "" && input.ReconciliationEntryID == "" {
 		return "", errors.New("evidence record is required for review")
+	}
+	if input.EmailEventID != "" {
+		existing, err := app.FindFirstRecordByData("review_cases", "email_event", input.EmailEventID)
+		if err == nil {
+			return existing.Id, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", err
+		}
 	}
 	if input.SMSEventID != "" {
 		existing, err := app.FindFirstRecordByData("review_cases", "sms_event", input.SMSEventID)
@@ -95,6 +114,7 @@ func (s *Service) OpenInApp(app core.App, input OpenInput) (string, error) {
 	record.Set("status", "open")
 	record.Set("severity", input.Severity)
 	record.Set("sms_event", input.SMSEventID)
+	record.Set("email_event", input.EmailEventID)
 	record.Set("reconciliation_entry", input.ReconciliationEntryID)
 	record.Set("payment", input.PaymentID)
 	record.Set("candidate_payment_ids", input.CandidatePaymentIDs)
@@ -140,19 +160,33 @@ func (s *Service) Resolve(input ResolveInput) (ResolveResult, error) {
 				return domain.New("INVALID_REVIEW_RESOLUTION", "paymentId is required for a manual match", 400)
 			}
 			eventID := caseRecord.GetString("sms_event")
+			emailEventID := caseRecord.GetString("email_event")
 			entryID := caseRecord.GetString("reconciliation_entry")
 			var parsed domain.ParsedSMS
 			var event *core.Record
 			var entry *core.Record
+			var emailEvent *core.Record
 			if eventID != "" {
 				event, err = tx.FindRecordById("sms_events", eventID)
 				if err != nil {
 					return err
 				}
 				parsed = domain.ParsedSMS{
+					Account:     domain.PaymentAccount(event.GetString("payment_account")),
 					AmountPaise: int64(event.GetInt("amount")), RRN: event.GetString("rrn"),
 					UPIId: event.GetString("upi_id"), PayerName: event.GetString("payer_name"),
 					OccurredAt: event.GetDateTime("message_time").Time(),
+				}
+			} else if emailEventID != "" {
+				emailEvent, err = tx.FindRecordById("email_events", emailEventID)
+				if err != nil {
+					return err
+				}
+				parsed = domain.ParsedSMS{
+					Account:     domain.PaymentAccount(emailEvent.GetString("payment_account")),
+					AmountPaise: int64(emailEvent.GetInt("amount")), RRN: emailEvent.GetString("rrn"),
+					UPIId: emailEvent.GetString("upi_id"), PayerName: emailEvent.GetString("payer_name"),
+					OccurredAt: emailEvent.GetDateTime("message_time").Time(),
 				}
 			} else if entryID != "" {
 				entry, err = tx.FindRecordById("reconciliation_entries", entryID)
@@ -160,6 +194,7 @@ func (s *Service) Resolve(input ResolveInput) (ResolveResult, error) {
 					return err
 				}
 				parsed = domain.ParsedSMS{
+					Account:     domain.PaymentAccountKotak,
 					AmountPaise: int64(entry.GetInt("amount")), RRN: entry.GetString("rrn"),
 					OccurredAt: entry.GetDateTime("transaction_time").Time(),
 				}
@@ -185,6 +220,15 @@ func (s *Service) Resolve(input ResolveInput) (ResolveResult, error) {
 				event.Set("matched_payment", payment.Id)
 				event.Set("error", "")
 				if err := tx.Save(event); err != nil {
+					return err
+				}
+			}
+			if emailEvent != nil {
+				emailEvent.Set("rrn", reference)
+				emailEvent.Set("processing_status", "matched")
+				emailEvent.Set("matched_payment", payment.Id)
+				emailEvent.Set("error", "")
+				if err := tx.Save(emailEvent); err != nil {
 					return err
 				}
 			}
@@ -227,6 +271,7 @@ func (s *Service) Resolve(input ResolveInput) (ResolveResult, error) {
 				Details: map[string]any{
 					"paymentId":             result.PaymentID,
 					"smsEventId":            caseRecord.GetString("sms_event"),
+					"emailEventId":          caseRecord.GetString("email_event"),
 					"reconciliationEntryId": caseRecord.GetString("reconciliation_entry"),
 					"resolution":            resolution,
 					"note":                  input.Note,

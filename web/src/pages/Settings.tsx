@@ -7,13 +7,18 @@ import type { BackupStatus, Connector } from "../types";
 type SafeConfig = {
   upiId: string;
   upiPayeeName: string;
+  defaultPaymentAccount: "kotak" | "slice";
+  paymentAccounts: Array<{ id: "kotak" | "slice"; label: string; verification: "sms" | "email" }>;
   paymentTtlSeconds: number;
   quarantineSeconds: number;
   webhookConfigured: boolean;
   rateLimitsEnabled: boolean;
   legacySMSWebhookEnabled: boolean;
+  emailEvidenceEnabled: boolean;
+  emailAllowedSender: string;
   retentionEnabled: boolean;
   smsRawRetentionSeconds: number;
+  emailRawRetentionSeconds: number;
   reconciliationRawRetentionSeconds: number;
   auditRetentionSeconds: number;
   backupEnabled: boolean;
@@ -282,14 +287,17 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
     <section className="card">
       <p className="eyebrow">SAFE CONFIGURATION</p>
       {config ? <dl className="settings">
-        <div><dt>UPI ID</dt><dd>{config.upiId}</dd></div>
+        <div><dt>Default account</dt><dd>{config.defaultPaymentAccount}</dd></div>
+        <div><dt>Enabled UPI accounts</dt><dd>{config.paymentAccounts.map((account) => `${account.label} (${account.verification})`).join(" · ")}</dd></div>
+        <div><dt>Legacy Kotak UPI ID</dt><dd>{config.upiId}</dd></div>
         <div><dt>Payee name</dt><dd>{config.upiPayeeName}</dd></div>
         <div><dt>Payment TTL</dt><dd>{config.paymentTtlSeconds}s</dd></div>
         <div><dt>Amount quarantine</dt><dd>{Math.round(config.quarantineSeconds / 3600)}h</dd></div>
         <div><dt>Outgoing webhook</dt><dd>{config.webhookConfigured ? "Configured" : "Disabled"}</dd></div>
         <div><dt>API rate limits</dt><dd>{config.rateLimitsEnabled ? "Enabled" : "Disabled"}</dd></div>
         <div><dt>Legacy /api/webhook</dt><dd>{config.legacySMSWebhookEnabled ? "Enabled (migration only)" : "Disabled"}</dd></div>
-        <div><dt>Evidence retention</dt><dd>{config.retentionEnabled ? `SMS ${Math.round(config.smsRawRetentionSeconds / 86400)}d · statements ${Math.round(config.reconciliationRawRetentionSeconds / 86400)}d · audit ${Math.round(config.auditRetentionSeconds / 86400)}d` : "Disabled"}</dd></div>
+        <div><dt>Payment email evidence</dt><dd>{config.emailEvidenceEnabled ? `Enabled · ${config.emailAllowedSender}` : "Disabled"}</dd></div>
+        <div><dt>Evidence retention</dt><dd>{config.retentionEnabled ? `SMS ${Math.round(config.smsRawRetentionSeconds / 86400)}d · email ${Math.round(config.emailRawRetentionSeconds / 86400)}d · statements ${Math.round(config.reconciliationRawRetentionSeconds / 86400)}d · audit ${Math.round(config.auditRetentionSeconds / 86400)}d` : "Disabled"}</dd></div>
         <div><dt>Backup schedule</dt><dd>{config.backupEnabled ? `${config.backupCron} · keep ${config.backupMaxKeep}` : "Disabled"}</dd></div>
         <div><dt>Backup storage</dt><dd>{config.backupOffsite ? "S3-compatible offsite" : "Local persistent volume"}</dd></div>
         <div><dt>Operator alert webhook</dt><dd>{config.operatorAlertWebhookConfigured ? "Configured with signed retries" : "Dashboard only"}</dd></div>

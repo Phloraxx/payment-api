@@ -252,6 +252,9 @@ func (s *Service) classify(app core.App, row statementRow, seenRRN map[string]in
 		seenRRN[row.RRN] = row.RowNumber
 		existing, findErr := app.FindFirstRecordByData("payments", "rrn", row.RRN)
 		if findErr == nil {
+			if existing.GetString("payment_account") != "kotak" {
+				return "conflict", existing.Id, "Bank reference belongs to a non-Kotak payment", []string{existing.Id}, nil
+			}
 			if int64(existing.GetInt("payable_amount")) == row.AmountPaise {
 				return "matched", existing.Id, "Exact amount and bank reference match", []string{existing.Id}, nil
 			}
@@ -285,7 +288,7 @@ func reconciliationCandidates(app core.App, amount int64, transactionTime, now t
 	if !transactionTime.IsZero() {
 		return app.FindRecordsByFilter(
 			"payments",
-			"payable_amount = {:amount} && created_at <= {:createdBefore} && reuse_after >= {:at}",
+			"payment_account = 'kotak' && payable_amount = {:amount} && created_at <= {:createdBefore} && reuse_after >= {:at}",
 			"-created_at", 10, 0,
 			dbx.Params{
 				"amount": amount, "at": formatDate(transactionTime),
@@ -294,7 +297,7 @@ func reconciliationCandidates(app core.App, amount int64, transactionTime, now t
 		)
 	}
 	return app.FindRecordsByFilter(
-		"payments", "payable_amount = {:amount} && reuse_after > {:now}",
+		"payments", "payment_account = 'kotak' && payable_amount = {:amount} && reuse_after > {:now}",
 		"-created_at", 10, 0, dbx.Params{"amount": amount, "now": formatDate(now)},
 	)
 }

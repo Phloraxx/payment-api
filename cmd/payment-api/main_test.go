@@ -16,19 +16,19 @@ func TestMergeManagedRateLimitRulesIsIdempotentAndPreservesCustomRules(t *testin
 	}
 	first := mergeManagedRateLimitRules(initial)
 	second := mergeManagedRateLimitRules(first)
-	if len(first) != 6 || len(second) != 6 {
+	if len(first) != 7 || len(second) != 7 {
 		t.Fatalf("lengths first=%d second=%d", len(first), len(second))
 	}
 	counts := map[string]int{}
 	for _, rule := range second {
 		counts[rule.Label]++
 	}
-	for _, label := range []string{"POST /api/events/sms", "POST /api/webhook", "POST /api/payments", "POST /api/razorpay/test/orders", "POST /api/razorpay/test/webhook", "custom"} {
+	for _, label := range []string{"POST /api/events/sms", "POST /api/events/email", "POST /api/webhook", "POST /api/payments", "POST /api/razorpay/test/orders", "POST /api/razorpay/test/webhook", "custom"} {
 		if counts[label] != 1 {
 			t.Fatalf("label %s count=%d", label, counts[label])
 		}
 	}
-	if second[0].MaxRequests != 60 || second[2].MaxRequests != 120 {
+	if second[0].MaxRequests != 60 || second[3].MaxRequests != 120 {
 		t.Fatalf("managed rules not restored: %+v", second)
 	}
 }

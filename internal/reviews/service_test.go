@@ -8,6 +8,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/audit"
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/domain"
+	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/sms"
 	_ "github.com/Phloraxx/payment-api/migrations"
@@ -34,7 +35,10 @@ func reviewTestService(t *testing.T) (*Service, *payments.Service, *tests.TestAp
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
-	cfg := config.Config{PaymentTTL: 5 * time.Minute, AmountQuarantine: 24 * time.Hour}
+	cfg := config.Config{
+		DefaultPaymentAccount: "kotak", KotakUPIID: "operator@kotak", SliceUPIID: "operator@slice",
+		PaymentTTL: 5 * time.Minute, AmountQuarantine: 24 * time.Hour,
+	}
 	paymentService := payments.NewService(app, cfg, nil)
 	paymentService.Now = func() time.Time { return now }
 	paymentService.SuffixStart = func() (int64, error) { return 1, nil }
@@ -54,6 +58,28 @@ func createSMSEvent(t *testing.T, app core.App, amount int64, rrn string, at tim
 	record := core.NewRecord(collection)
 	record.Set("source", "gmessages")
 	record.Set("body", "sanitized bank credit evidence")
+	record.Set("payment_account", "kotak")
+	record.Set("message_time", at)
+	record.Set("amount", amount)
+	record.Set("rrn", rrn)
+	record.Set("processing_status", "unmatched")
+	if err := app.Save(record); err != nil {
+		t.Fatal(err)
+	}
+	return record.Id
+}
+
+func createEmailEvent(t *testing.T, app core.App, amount int64, rrn string, at time.Time) string {
+	t.Helper()
+	collection, err := app.FindCollectionByNameOrId("email_events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := core.NewRecord(collection)
+	record.Set("source", "cloudflare_email")
+	record.Set("body", "sanitized bank credit email evidence")
+	record.Set("payment_account", "slice")
+	record.Set("received_at", at)
 	record.Set("message_time", at)
 	record.Set("amount", amount)
 	record.Set("rrn", rrn)
@@ -125,6 +151,37 @@ func TestManualMatchRejectsDifferentAmount(t *testing.T) {
 	caseRecord, _ := app.FindRecordById("review_cases", caseID)
 	if caseRecord.GetString("status") != "open" {
 		t.Fatalf("case status=%s", caseRecord.GetString("status"))
+	}
+}
+
+func TestResolveManualEmailMatchUpdatesEmailEvidence(t *testing.T) {
+	service, paymentService, app, now := reviewTestService(t)
+	payment, _, err := paymentService.Create(payments.CreateInput{AmountRupees: 300, PaymentAccount: "slice"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventID := createEmailEvent(t, app, payment.PayablePaise, "", now.Add(time.Minute))
+	caseID, err := service.OpenEmailReviewInApp(app, paymentemail.ReviewInput{
+		Kind: "missing_rrn", Severity: "warning", EmailEventID: eventID,
+		CandidatePaymentIDs: []string{payment.ID}, Reason: "missing reference", OpenedAt: *now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Resolve(ResolveInput{
+		CaseID: caseID, Action: "manual_match", PaymentID: payment.ID,
+		BankReference: "777766665555", Note: "Verified against the bank statement.",
+		Actor: audit.Actor{ID: "operator0000001", Email: "operator@example.com"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "resolved" || result.PaymentID != payment.ID {
+		t.Fatalf("result=%+v", result)
+	}
+	event, _ := app.FindRecordById("email_events", eventID)
+	if event.GetString("processing_status") != "matched" || event.GetString("matched_payment") != payment.ID || event.GetString("rrn") != "777766665555" {
+		t.Fatalf("email status=%s payment=%s rrn=%s", event.GetString("processing_status"), event.GetString("matched_payment"), event.GetString("rrn"))
 	}
 }
 

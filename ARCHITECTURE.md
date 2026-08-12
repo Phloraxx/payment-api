@@ -100,6 +100,10 @@ Durable evidence/audit records:
 
 `(source, source_event_id)` is unique when the provider ID is non-empty.
 
+### `email_events`
+
+Durable email evidence records hold the connector/Message-ID, envelope metadata, decoded sender/subject/body, message and receipt timestamps, trusted authentication result, parsed amount/RRN/payer fields, processing status, match relation, and bounded connector metadata. Raw RFC 822 bytes are parsed in memory and are not stored. `(source, source_event_id)` is unique when non-empty.
+
 ### `webhook_deliveries`
 
 Durable outbox/delivery state:
@@ -167,7 +171,7 @@ Expiry is persisted and evaluated both by scheduled work and before operations t
 
 Amount quarantine alone is insufficient once a suffix is eventually reused: a provider may reconnect and deliver an old historical message.
 
-Every normalized SMS has `OccurredAt`. For Google Messages this comes from the provider message timestamp. The SMS service clamps missing/future timestamps to ingestion time.
+Every normalized message has `OccurredAt`. For Google Messages this comes from the provider message timestamp; for email it comes from the RFC 822 `Date` header. Ingestion services clamp missing/future timestamps to receipt time.
 
 Automatic matching requires:
 
@@ -199,6 +203,8 @@ SMS ingestion is one database transaction for the evidence record and payment st
 12. wake the delivery worker only after commit.
 
 Network calls never occur inside the SQLite transaction.
+
+Email ingestion follows the same transactional matching path after the HTTP boundary verifies a timestamped HMAC and the parser verifies the exact configured sender plus trusted aligned DKIM/DMARC. Raw MIME is capped at 2 MiB, multipart nesting is bounded, Message-ID provides event deduplication, and authentication/parser failures create reviews rather than payments.
 
 ## 9. Bank parser
 
@@ -242,6 +248,7 @@ POST   /api/payments
 GET    /api/payments/{id}
 POST   /api/payments/{id}/cancel
 POST   /api/events/sms
+POST   /api/events/email                 # opt-in signed email connector
 POST   /api/webhook                       # opt-in legacy compatibility
 GET    /api/paygate/health
 GET    /api/config                        # authenticated operator
@@ -269,7 +276,7 @@ State-changing payment API calls accept either:
 - `Authorization: Bearer <PAYGATE_API_KEY>`; or
 - a valid authenticated `users` PocketBase token used by the operator UI.
 
-SMS ingestion uses a separate `X-Webhook-Secret`.
+SMS ingestion uses a separate `X-Webhook-Secret`. Email ingestion uses `X-PayGate-Timestamp` plus `X-PayGate-Signature: sha256=<hex HMAC>` and is hidden with a 404 while disabled.
 
 The migration compatibility route `/api/webhook` is separately gated by `LEGACY_SMS_WEBHOOK_ENABLED` and the old `WEBHOOK_SECRET`; it never substitutes for the primary `SMS_WEBHOOK_SECRET`.
 
@@ -291,7 +298,7 @@ The stable event ID lets consumers handle network-level duplicate delivery safel
 
 ## 14. UI/realtime
 
-The UI reads `payments`, `sms_events` and `webhook_deliveries` through authenticated PocketBase record APIs and subscribes to PocketBase realtime events. It uses custom PayGate routes for state changes.
+The UI reads `payments`, `sms_events`, `email_events` and `webhook_deliveries` through authenticated PocketBase record APIs and subscribes to PocketBase realtime events. It uses custom PayGate routes for state changes.
 
 Authentication is refreshed periodically; a failed authenticated API response clears the local auth store instead of leaving the UI in a misleading signed-in state.
 
@@ -358,7 +365,7 @@ web/                      React/Vite source
 6. RRN cannot silently move between different amounts.
 7. A message cannot confirm a payment created after that message occurred when an occurrence timestamp is known.
 8. Reused fingerprints pass through quarantine.
-9. External HTTP calls never run inside a payment/SMS transaction.
+9. External HTTP calls never run inside a payment/evidence transaction.
 10. Domain writes are backend-owned.
 11. Google Messages is a replaceable evidence connector, not the payment model.
 12. `/app/pb_data` must be persistent in production.
@@ -367,7 +374,7 @@ web/                      React/Vite source
 
 The hardening migration adds six operator-domain collections:
 
-- `review_cases` links unresolved SMS or reconciliation evidence to candidate payments and records audited resolution;
+- `review_cases` links unresolved SMS, email or reconciliation evidence to candidate payments and records audited resolution;
 - `audit_events` stores attributable operator actions separately from application logs;
 - `reconciliation_runs` and `reconciliation_entries` preserve statement import results without auto-mutating payments;
 - `alerts` deduplicates connector/capacity/webhook/reconciliation/backup failures and maintains a durable signed notification delivery state;

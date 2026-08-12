@@ -41,6 +41,7 @@ type Service struct {
 
 type CreateInput struct {
 	AmountRupees   int64
+	PaymentAccount string
 	ExternalID     string
 	Metadata       any
 	IdempotencyKey string
@@ -67,6 +68,10 @@ func (s *Service) Create(input CreateInput) (*domain.Payment, bool, error) {
 		return nil, false, domain.InvalidAmount()
 	}
 	input.ExternalID = strings.TrimSpace(input.ExternalID)
+	account, _, err := s.paymentAccount(input.PaymentAccount)
+	if err != nil {
+		return nil, false, err
+	}
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
 	if len(input.ExternalID) > 255 {
 		return nil, false, domain.InvalidExternalID()
@@ -94,6 +99,7 @@ func (s *Service) Create(input CreateInput) (*domain.Payment, bool, error) {
 			existing, findErr := tx.FindFirstRecordByData("payments", "idempotency_key", input.IdempotencyKey)
 			if findErr == nil {
 				if int64(existing.GetInt("requested_amount")) != requested ||
+					existing.GetString("payment_account") != account ||
 					existing.GetString("external_id") != input.ExternalID ||
 					!metadataEqual(existing.Get("metadata"), metadata) {
 					return domain.IdempotencyConflict()
@@ -138,6 +144,7 @@ func (s *Service) Create(input CreateInput) (*domain.Payment, bool, error) {
 
 			record := core.NewRecord(collection)
 			record.Set("created_at", now)
+			record.Set("payment_account", account)
 			record.Set("requested_amount", requested)
 			record.Set("payable_amount", candidate)
 			record.Set("status", string(domain.StatusPending))
@@ -268,6 +275,10 @@ func (s *Service) Match(parsed domain.ParsedSMS) (*MatchResult, error) {
 // delivery loop only after the transaction commits.
 func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time) (*core.Record, string, bool, error) {
 	now = now.UTC()
+	account, _, err := s.paymentAccount(string(parsed.Account))
+	if err != nil {
+		return nil, "not_matchable", false, err
+	}
 	rrn := strings.TrimSpace(parsed.RRN)
 	evidenceAt := parsed.OccurredAt.UTC()
 	if evidenceAt.IsZero() || evidenceAt.After(now) {
@@ -279,6 +290,9 @@ func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time
 
 	existing, err := tx.FindFirstRecordByData("payments", "rrn", rrn)
 	if err == nil {
+		if existing.GetString("payment_account") != account {
+			return nil, "rrn_account_mismatch", false, domain.New("RRN_ACCOUNT_MISMATCH", "the UPI reference was already recorded for a different payment account", http.StatusConflict)
+		}
 		if int64(existing.GetInt("payable_amount")) != parsed.AmountPaise {
 			return nil, "rrn_amount_mismatch", false, domain.New("RRN_AMOUNT_MISMATCH", "the UPI reference was already recorded with a different amount", http.StatusConflict)
 		}
@@ -295,11 +309,11 @@ func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time
 	// "late" solely because the bank/phone delivered the SMS after expiry.
 	onTime, err := tx.FindRecordsByFilter(
 		"payments",
-		"payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
+		"payment_account = {:account} && payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
 		"created",
 		2,
 		0,
-		dbx.Params{"amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
+		dbx.Params{"account": account, "amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
 	)
 	if err != nil {
 		return nil, "error", false, err
@@ -327,11 +341,11 @@ func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time
 
 	late, err := tx.FindRecordsByFilter(
 		"payments",
-		"payable_amount = {:amount} && (status = 'expired' || status = 'cancelled') && reuse_after > {:now} && created_at <= {:createdBefore}",
+		"payment_account = {:account} && payable_amount = {:amount} && (status = 'expired' || status = 'cancelled') && reuse_after > {:now} && created_at <= {:createdBefore}",
 		"-created",
 		2,
 		0,
-		dbx.Params{"amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
+		dbx.Params{"account": account, "amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
 	)
 	if err != nil {
 		return nil, "error", queued, err
@@ -370,6 +384,13 @@ func (s *Service) ManualMatchInApp(tx core.App, paymentID string, parsed domain.
 			return nil, "not_found", false, domain.PaymentNotFound()
 		}
 		return nil, "error", false, err
+	}
+	account, _, accountErr := s.paymentAccount(string(parsed.Account))
+	if accountErr != nil {
+		return nil, "not_matchable", false, accountErr
+	}
+	if record.GetString("payment_account") != account {
+		return nil, "account_mismatch", false, domain.New("PAYMENT_ACCOUNT_MISMATCH", "bank evidence belongs to a different payment account", http.StatusConflict)
 	}
 	if int64(record.GetInt("payable_amount")) != parsed.AmountPaise {
 		return nil, "amount_mismatch", false, domain.New("MANUAL_AMOUNT_MISMATCH", "bank evidence amount does not equal the payment payable amount", http.StatusConflict)
@@ -524,6 +545,7 @@ func FromRecord(record *core.Record) *domain.Payment {
 	}
 	return &domain.Payment{
 		ID:             record.Id,
+		Account:        domain.PaymentAccount(record.GetString("payment_account")),
 		RequestedPaise: int64(record.GetInt("requested_amount")),
 		PayablePaise:   int64(record.GetInt("payable_amount")),
 		Status:         domain.PaymentStatus(record.GetString("status")),
@@ -545,6 +567,7 @@ func PublicPayment(payment *domain.Payment) map[string]any {
 	}
 	return map[string]any{
 		"id":                   payment.ID,
+		"paymentAccount":       payment.Account,
 		"requestedAmount":      payment.RequestedPaise / 100,
 		"requestedAmountPaise": payment.RequestedPaise,
 		"payableAmount":        money.FormatPaise(payment.PayablePaise),
@@ -558,15 +581,43 @@ func PublicPayment(payment *domain.Payment) map[string]any {
 func CreateResponse(payment *domain.Payment, cfg config.Config) map[string]any {
 	response := PublicPayment(payment)
 	response["externalId"] = payment.ExternalID
+	account, ok := cfg.PaymentAccount(string(payment.Account))
+	if !ok {
+		account, _ = cfg.PaymentAccount(cfg.DefaultPaymentAccount)
+	}
+	response["paymentAccountLabel"] = account.Label
+	response["verificationMethod"] = account.Verification
 	query := url.Values{}
-	query.Set("pa", cfg.UPIID)
-	query.Set("pn", cfg.UPIPayeeName)
+	query.Set("pa", account.UPIID)
+	query.Set("pn", account.PayeeName)
 	query.Set("am", money.FormatPaise(payment.PayablePaise))
 	query.Set("cu", "INR")
 	query.Set("tr", payment.ID)
 	query.Set("tn", payment.ID)
 	response["upiUri"] = "upi://pay?" + query.Encode()
 	return response
+}
+
+func (s *Service) paymentAccount(value string) (string, config.PaymentAccount, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = strings.ToLower(strings.TrimSpace(s.Config.DefaultPaymentAccount))
+	}
+	if value == "" {
+		value = "kotak"
+	}
+	account, ok := s.Config.PaymentAccount(value)
+	// Serving validates that Kotak has a real UPI ID. Keeping the domain service
+	// usable without delivery configuration makes migrations and isolated tests
+	// independent from production secrets.
+	if !ok && value == string(domain.PaymentAccountKotak) {
+		account = config.PaymentAccount{ID: "kotak", Label: "Kotak", Verification: "sms"}
+		ok = true
+	}
+	if !ok {
+		return "", config.PaymentAccount{}, domain.New("INVALID_PAYMENT_ACCOUNT", "paymentAccount must be an enabled account", http.StatusBadRequest)
+	}
+	return account.ID, account, nil
 }
 
 func (s *Service) WakeWebhooks() {

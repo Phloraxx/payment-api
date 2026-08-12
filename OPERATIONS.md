@@ -17,6 +17,7 @@ An optional signed operator-alert webhook can push open/resolved operational ale
 Review cases are created for:
 
 - bank-credit-like SMS text that cannot be parsed;
+- bank-credit-like email that fails trusted DKIM/DMARC authentication or parsing;
 - a credit amount with no usable RRN/UTR;
 - exact credits that match no eligible payment;
 - ambiguous amount reuse;
@@ -25,7 +26,7 @@ Review cases are created for:
 
 ### Manual match procedure
 
-1. Inspect the original SMS or statement row and its provider/bank timestamp.
+1. Inspect the original SMS, email or statement row and its provider/bank timestamp.
 2. Confirm the exact payable amount shown by PayGate.
 3. Confirm or enter the bank RRN/UTR/reference.
 4. Select the intended payment ID.
@@ -98,16 +99,18 @@ Do not shorten quarantine merely to increase throughput. First measure real SMS 
 Defaults:
 
 - raw SMS identity/body fields: 90 days;
+- raw email sender/recipient/subject/body/authentication fields: 90 days;
 - raw statement narration/row content: 365 days;
 - operator audit events: 730 days.
 
-After the SMS window, PayGate removes raw body/payload, sender, payer VPA and payer name while preserving source, provider ID, bank timestamp, amount, RRN and processing result. Statement rows retain amount, RRN, timestamp and reconciliation status after raw narration is removed.
+After the message window, PayGate removes raw body/payload, sender and payer identity fields while preserving source, provider ID, bank timestamp, amount, RRN and processing result. Email subject, recipient and authentication headers are also redacted. Statement rows retain amount, RRN, timestamp and reconciliation status after raw narration is removed.
 
 Configure with:
 
 ```text
 PAYGATE_RETENTION_ENABLED=true
 SMS_RAW_RETENTION=2160h
+EMAIL_RAW_RETENTION=2160h
 RECONCILIATION_RAW_RETENTION=8760h
 AUDIT_RETENTION=17520h
 ```
@@ -141,6 +144,10 @@ The same actions are available from Operator UI → Settings. A drill does not r
 
 ## 8. Google Messages incident response
 
+### Payment email delivery failure
+
+The Cloudflare Email Worker retries the PayGate webhook three times. A remaining failure is forwarded to the configured verified recovery inbox with `X-PayGate-Ingestion-Failed: true`. Download the original `.eml` and use `connectors/cloudflare-email-worker/replay-email.mjs`; this preserves Message-ID deduplication and the original bank timestamp. After the replay is verified in Email Events, delete the recovery copy according to the same 90-day-or-shorter evidence policy. Never copy the raw message or webhook secret into a ticket or chat.
+
 ### `reauth_required`
 
 The phone pairing/encryption keys may still be valid. Use the operator UI's Google login refresh with a fresh same-account Google Messages Web `config` Copy-as-cURL request. Do not unpair unless same-account reauthentication fails.
@@ -172,6 +179,7 @@ Before relying on PayGate for real orders, run controlled payments over several 
 - two concurrent sessions for the same whole-rupee price;
 - outgoing webhook failure/retry;
 - statement reconciliation and manual review;
+- real Slice email delivery, DKIM/DMARC pass, replay rejection, duplicate Message-ID, and rejection of any attempt to match Slice email evidence to Kotak or Kotak SMS evidence to Slice;
 - partial refund and completed refund reference.
 
 Record payer action time, bank transaction time, SMS arrival time, ingestion time and final verification time. Do not reduce quarantine until the worst observed delay is understood.

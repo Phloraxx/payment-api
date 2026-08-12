@@ -22,6 +22,7 @@ func TestRunRedactsSensitiveEvidenceAndDeletesExpiredAudit(t *testing.T) {
 	smsCollection, _ := app.FindCollectionByNameOrId("sms_events")
 	smsRecord := core.NewRecord(smsCollection)
 	smsRecord.Set("source", "gmessages")
+	smsRecord.Set("payment_account", "kotak")
 	smsRecord.Set("body", "Received Rs.100.01 from private@upi UPI Ref 123456789012")
 	smsRecord.Set("sender", "BANK")
 	smsRecord.Set("upi_id", "private@upi")
@@ -32,6 +33,29 @@ func TestRunRedactsSensitiveEvidenceAndDeletesExpiredAudit(t *testing.T) {
 	smsRecord.Set("raw_payload", map[string]any{"private": true})
 	smsRecord.Set("message_time", now.Add(-91*24*time.Hour))
 	if err := app.SaveNoValidate(smsRecord); err != nil {
+		t.Fatal(err)
+	}
+
+	emailCollection, _ := app.FindCollectionByNameOrId("email_events")
+	emailRecord := core.NewRecord(emailCollection)
+	emailRecord.Set("source", "cloudflare_email")
+	emailRecord.Set("payment_account", "slice")
+	emailRecord.Set("source_event_id", "private-message-id")
+	emailRecord.Set("envelope_sender", "noreply@slice.bank.in")
+	emailRecord.Set("recipient", "payments@example.org")
+	emailRecord.Set("sender", "noreply@slice.bank.in")
+	emailRecord.Set("subject", "Received ₹100.01 via UPI")
+	emailRecord.Set("body", "Received ₹100.01 from private@upi UPI Ref 123456789012")
+	emailRecord.Set("auth_result", "mx.cloudflare.net; dkim=pass header.d=slice.bank.in")
+	emailRecord.Set("upi_id", "private@upi")
+	emailRecord.Set("payer_name", "Private Payer")
+	emailRecord.Set("rrn", "123456789012")
+	emailRecord.Set("amount", 10001)
+	emailRecord.Set("processing_status", "matched")
+	emailRecord.Set("raw_payload", map[string]any{"private": true})
+	emailRecord.Set("message_time", now.Add(-91*24*time.Hour))
+	emailRecord.Set("received_at", now.Add(-91*24*time.Hour))
+	if err := app.SaveNoValidate(emailRecord); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,6 +95,7 @@ func TestRunRedactsSensitiveEvidenceAndDeletesExpiredAudit(t *testing.T) {
 	service := NewService(app, config.Config{
 		RetentionEnabled:           true,
 		SMSRawRetention:            90 * 24 * time.Hour,
+		EmailRawRetention:          90 * 24 * time.Hour,
 		ReconciliationRawRetention: 365 * 24 * time.Hour,
 		AuditRetention:             730 * 24 * time.Hour,
 	})
@@ -79,8 +104,12 @@ func TestRunRedactsSensitiveEvidenceAndDeletesExpiredAudit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SMSEventsRedacted != 1 || result.ReconciliationEntriesRedacted != 1 || result.AuditEventsDeleted != 1 {
+	if result.SMSEventsRedacted != 1 || result.EmailEventsRedacted != 1 || result.ReconciliationEntriesRedacted != 1 || result.AuditEventsDeleted != 1 {
 		t.Fatalf("result=%+v", result)
+	}
+	storedEmail, _ := app.FindRecordById("email_events", emailRecord.Id)
+	if storedEmail.GetString("body") != redactedMarker || storedEmail.GetString("subject") != redactedMarker || storedEmail.GetString("sender") != "" || storedEmail.GetString("rrn") != "123456789012" {
+		t.Fatalf("stored email body=%q subject=%q sender=%q rrn=%q", storedEmail.GetString("body"), storedEmail.GetString("subject"), storedEmail.GetString("sender"), storedEmail.GetString("rrn"))
 	}
 	storedSMS, _ := app.FindRecordById("sms_events", smsRecord.Id)
 	if storedSMS.GetString("body") != redactedMarker || storedSMS.GetString("sender") != "" || storedSMS.GetString("rrn") != "123456789012" {
@@ -109,6 +138,7 @@ func TestRunProcessesMoreThanOneRetentionBatch(t *testing.T) {
 	for index := 0; index < retentionBatchSize+1; index++ {
 		record := core.NewRecord(collection)
 		record.Set("source", "manual")
+		record.Set("payment_account", "kotak")
 		record.Set("body", "Received Rs.1.01 UPI Ref 12345678")
 		record.Set("processing_status", "matched")
 		record.Set("message_time", now.Add(-91*24*time.Hour))
@@ -118,6 +148,7 @@ func TestRunProcessesMoreThanOneRetentionBatch(t *testing.T) {
 	}
 	service := NewService(app, config.Config{
 		RetentionEnabled: true, SMSRawRetention: 90 * 24 * time.Hour,
+		EmailRawRetention:          90 * 24 * time.Hour,
 		ReconciliationRawRetention: 365 * 24 * time.Hour, AuditRetention: 730 * 24 * time.Hour,
 	})
 	service.Now = func() time.Time { return now }
