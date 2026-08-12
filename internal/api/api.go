@@ -270,12 +270,23 @@ func (a *API) ingestSMSBody(e *core.RequestEvent, legacy bool) error {
 }
 
 func (a *API) health(e *core.RequestEvent) error {
-	var one int
-	if err := e.App.DB().NewQuery("SELECT 1").Row(&one); err != nil || one != 1 {
+	// Read real application tables from both SQLite databases instead of using
+	// SELECT 1. A constant expression can succeed even when the database/WAL
+	// backing the PayGate tables is returning I/O errors.
+	var primaryRows int
+	if err := e.App.DB().NewQuery("SELECT COUNT(*) FROM payments").Row(&primaryRows); err != nil {
 		return e.JSON(http.StatusServiceUnavailable, map[string]any{
 			"status": "unhealthy", "ready": false, "db": "error", "connector": a.publicConnectorStatus(),
 		})
 	}
+
+	var auxiliaryRows int
+	if err := e.App.AuxDB().NewQuery("SELECT COUNT(*) FROM _logs").Row(&auxiliaryRows); err != nil {
+		return e.JSON(http.StatusServiceUnavailable, map[string]any{
+			"status": "unhealthy", "ready": false, "db": "error", "connector": a.publicConnectorStatus(),
+		})
+	}
+
 	return e.JSON(http.StatusOK, map[string]any{
 		"status": "healthy", "ready": true, "db": "ok", "connector": a.publicConnectorStatus(),
 	})
