@@ -31,7 +31,7 @@ func (f *fakeProviderClient) CreateOrder(_ context.Context, amount int64, receip
 	}
 	order := f.order
 	if order.ID == "" {
-		order = ProviderOrder{ID: "order_test_123", Amount: amount, Currency: "INR", Receipt: receipt, Status: "created"}
+		order = ProviderOrder{ID: "order_" + receipt, Amount: amount, Currency: "INR", Receipt: receipt, Status: "created"}
 	}
 	return order, nil
 }
