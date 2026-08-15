@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -36,6 +35,13 @@ import (
 )
 
 func main() {
+	if handled, err := runStandaloneHealthcheck(os.Args[1:]); handled {
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
@@ -93,7 +99,6 @@ func main() {
 	apiService.RazorpayLive = razorpayLiveService
 	apiService.Register(app)
 	registerPairCommand(app, cfg, gmessagesLogger)
-	registerHealthcheckCommand(app)
 	registerBackupCommands(app, backupService)
 
 	rootCtx, rootCancel := context.WithCancel(context.Background())
@@ -202,29 +207,6 @@ func registerPairCommand(app *pocketbase.PocketBase, cfg config.Config, logger z
 		},
 	}
 	cmd.Flags().StringVar(&qrPNG, "qr-png", "", "also write/refresh the pairing QR as a PNG file")
-	app.RootCmd.AddCommand(cmd)
-}
-
-func registerHealthcheckCommand(app *pocketbase.PocketBase) {
-	var endpoint string
-	cmd := &cobra.Command{
-		Use:    "healthcheck",
-		Short:  "Check a running PayGate/PocketBase HTTP server",
-		Hidden: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			client := &http.Client{Timeout: 3 * time.Second}
-			response, err := client.Get(endpoint)
-			if err != nil {
-				return err
-			}
-			defer response.Body.Close()
-			if response.StatusCode < 200 || response.StatusCode >= 300 {
-				return fmt.Errorf("health endpoint returned HTTP %d", response.StatusCode)
-			}
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&endpoint, "url", "http://127.0.0.1:3000/api/health", "health endpoint URL")
 	app.RootCmd.AddCommand(cmd)
 }
 
