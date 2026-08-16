@@ -592,8 +592,6 @@ func CreateResponse(payment *domain.Payment, cfg config.Config) map[string]any {
 	query.Set("pn", account.PayeeName)
 	query.Set("am", money.FormatPaise(payment.PayablePaise))
 	query.Set("cu", "INR")
-	query.Set("tr", payment.ID)
-	query.Set("tn", payment.ID)
 	response["upiUri"] = "upi://pay?" + query.Encode()
 	return response
 }

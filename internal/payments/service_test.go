@@ -2,6 +2,7 @@ package payments
 
 import (
 	"errors"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -206,6 +207,26 @@ func TestPublicPaymentRedactsEvidence(t *testing.T) {
 	}
 	if public["payableAmount"] != "100.01" {
 		t.Errorf("public payableAmount = %v; want 100.01", public["payableAmount"])
+	}
+}
+
+func TestCreateResponseUsesMinimalUPIURI(t *testing.T) {
+	payment := &domain.Payment{ID: "pay123", Account: domain.PaymentAccountKotak, RequestedPaise: 10000, PayablePaise: 10094, Status: domain.StatusPending}
+	response := CreateResponse(payment, config.Config{DefaultPaymentAccount: "kotak", KotakUPIID: "operator@bank", KotakUPIPayeeName: "PayGate"})
+	raw, ok := response["upiUri"].(string)
+	if !ok {
+		t.Fatalf("upiUri = %#v; want string", response["upiUri"])
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	if query.Get("pa") != "operator@bank" || query.Get("pn") != "PayGate" || query.Get("am") != "100.94" || query.Get("cu") != "INR" {
+		t.Fatalf("unexpected UPI query: %v", query)
+	}
+	if query.Has("tn") || query.Has("tr") {
+		t.Fatalf("UPI URI must not include tn/tr: %s", raw)
 	}
 }
 
