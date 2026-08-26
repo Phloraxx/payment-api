@@ -9,7 +9,7 @@ import (
 )
 
 var (
-	currencyAmount = `(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)`
+	currencyAmount  = `(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)`
 	paymentPatterns = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\b(?:payment\s+)?received\b.{0,80}?` + currencyAmount),
 		regexp.MustCompile(`(?i)` + currencyAmount + `.{0,40}?\b(?:received|paid)\b`),

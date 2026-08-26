@@ -418,7 +418,9 @@ func TestPaytmNotificationWebhookAuthenticatesAndMatches(t *testing.T) {
 		cfg.PaytmNotificationWebhookSecret = "paytm-notification-secret-long-enough"
 	}, func(_ *tests.TestApp, service *payments.Service) {
 		payment, _, err := service.Create(payments.CreateInput{AmountRupees: 1, PaymentAccount: "paytm"})
-		if err != nil { t.Fatal(err) }
+		if err != nil {
+			t.Fatal(err)
+		}
 		paymentID = payment.ID
 	})
 	defer app.Cleanup()
@@ -426,19 +428,30 @@ func TestPaytmNotificationWebhookAuthenticatesAndMatches(t *testing.T) {
 	bad := tests.ApiScenario{
 		Name: "bad Paytm webhook secret", Method: http.MethodPost, URL: "/api/events/paytm-notification",
 		Headers: map[string]string{"X-Webhook-Secret": "wrong", "Content-Type": "application/json"},
-		Body: strings.NewReader(`{"sourceId":"evt-bad","appPackage":"com.paytm.business","body":"₹1.01 paid by Test","notificationTimestampMs":"1787763600000"}`),
-		TestAppFactory: func(t testing.TB) *tests.TestApp { return apiTestFactoryWithConfig(t, func(cfg *config.Config) { cfg.PaytmQRPayload = "qr"; cfg.PaytmNotificationWebhookSecret = "paytm-notification-secret-long-enough" }, nil) },
-		ExpectedStatus: http.StatusUnauthorized,
+		Body:    strings.NewReader(`{"sourceId":"evt-bad","appPackage":"com.paytm.business","body":"₹1.01 paid by Test","notificationTimestampMs":"1787763600000"}`),
+		TestAppFactory: func(t testing.TB) *tests.TestApp {
+			return apiTestFactoryWithConfig(t, func(cfg *config.Config) {
+				cfg.PaytmQRPayload = "qr"
+				cfg.PaytmNotificationWebhookSecret = "paytm-notification-secret-long-enough"
+			}, nil)
+		},
+		ExpectedStatus:  http.StatusUnauthorized,
 		ExpectedContent: []string{"Invalid webhook secret."},
 	}
 	bad.Test(t)
 
 	router, err := apis.NewRouter(app)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	serveEvent := &core.ServeEvent{App: app, Router: router}
-	if err := app.OnServe().Trigger(serveEvent, func(e *core.ServeEvent) error { return nil }); err != nil { t.Fatal(err) }
+	if err := app.OnServe().Trigger(serveEvent, func(e *core.ServeEvent) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
 	mux, err := serveEvent.Router.BuildMux()
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(mux)
 	defer server.Close()
 	payload := `{"sourceId":"evt-1","appPackage":"com.paytm.business","appName":"Paytm for Business","title":"Payment received","body":"₹1.01 paid by Test User","notificationTimestampMs":"` + strconv.FormatInt(time.Now().UnixMilli(), 10) + `"}`
@@ -446,10 +459,16 @@ func TestPaytmNotificationWebhookAuthenticatesAndMatches(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Webhook-Secret", "paytm-notification-secret-long-enough")
 	resp, err := http.DefaultClient.Do(req)
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusAccepted || !strings.Contains(string(body), `"status":"matched"`) { t.Fatalf("status=%d body=%s", resp.StatusCode, body) }
+	if resp.StatusCode != http.StatusAccepted || !strings.Contains(string(body), `"status":"matched"`) {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
 	record, err := app.FindRecordById("payments", paymentID)
-	if err != nil || record.GetString("status") != "paid" || record.GetString("evidence_source") != "paytm_notification" { t.Fatalf("payment status=%v err=%v", record, err) }
+	if err != nil || record.GetString("status") != "paid" || record.GetString("evidence_source") != "paytm_notification" {
+		t.Fatalf("payment status=%v err=%v", record, err)
+	}
 }

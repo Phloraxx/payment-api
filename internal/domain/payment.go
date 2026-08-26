@@ -30,20 +30,20 @@ type ParsedSMS struct {
 }
 
 type Payment struct {
-	ID             string
-	Account        PaymentAccount
-	RequestedPaise int64
-	PayablePaise   int64
-	Status         PaymentStatus
-	ExpiresAt      time.Time
-	ReuseAfter     time.Time
+	ID                string
+	Account           PaymentAccount
+	RequestedPaise    int64
+	PayablePaise      int64
+	Status            PaymentStatus
+	ExpiresAt         time.Time
+	ReuseAfter        time.Time
 	RRN               string
 	UPIId             string
 	PayerName         string
 	EvidenceSource    string
 	EvidenceReference string
-	PaidAt         time.Time
-	ResolvedAt     time.Time
-	ExternalID     string
-	IdempotencyKey string
+	PaidAt            time.Time
+	ResolvedAt        time.Time
+	ExternalID        string
+	IdempotencyKey    string
 }

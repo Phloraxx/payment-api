@@ -37,33 +37,33 @@ import (
 )
 
 const (
-	maxPaymentRequestBytes      int64 = (1 << 20) + (64 << 10)
-	maxSMSRequestBytes          int64 = 128 << 10
+	maxPaymentRequestBytes           int64 = (1 << 20) + (64 << 10)
+	maxSMSRequestBytes               int64 = 128 << 10
 	maxPaytmNotificationRequestBytes int64 = 160 << 10
-	maxEmailRequestBytes        int64 = ((paymentemail.MaxRawBytes + 2) / 3 * 4) + (128 << 10)
-	maxGMessagesPairBytes       int64 = 128 << 10
-	maxReviewRequestBytes       int64 = 16 << 10
-	maxRefundRequestBytes       int64 = (1 << 20) + (64 << 10)
-	maxStatementRequestBytes    int64 = reconciliation.MaxFileBytes + (1 << 20)
-	maxRazorpayTestRequestBytes int64 = 1 << 20
-	maxRazorpayLiveRequestBytes int64 = 1 << 20
-	robotsTagValue                    = "noindex, nofollow, noarchive, nosnippet, noimageindex"
+	maxEmailRequestBytes             int64 = ((paymentemail.MaxRawBytes + 2) / 3 * 4) + (128 << 10)
+	maxGMessagesPairBytes            int64 = 128 << 10
+	maxReviewRequestBytes            int64 = 16 << 10
+	maxRefundRequestBytes            int64 = (1 << 20) + (64 << 10)
+	maxStatementRequestBytes         int64 = reconciliation.MaxFileBytes + (1 << 20)
+	maxRazorpayTestRequestBytes      int64 = 1 << 20
+	maxRazorpayLiveRequestBytes      int64 = 1 << 20
+	robotsTagValue                         = "noindex, nofollow, noarchive, nosnippet, noimageindex"
 )
 
 type API struct {
-	Config         config.Config
-	Payments       *payments.Service
-	SMS            *sms.Service
+	Config             config.Config
+	Payments           *payments.Service
+	SMS                *sms.Service
 	PaytmNotifications *paytmnotification.Service
-	Email          *paymentemail.Service
-	GMessages      *gmessages.Manager
-	Reviews        *reviews.Service
-	Reconciliation *reconciliation.Service
-	Alerts         *alerts.Service
-	Refunds        *refunds.Service
-	Backups        *backups.Service
-	RazorpayTest   *razorpaytest.Service
-	RazorpayLive   *razorpaylive.Service
+	Email              *paymentemail.Service
+	GMessages          *gmessages.Manager
+	Reviews            *reviews.Service
+	Reconciliation     *reconciliation.Service
+	Alerts             *alerts.Service
+	Refunds            *refunds.Service
+	Backups            *backups.Service
+	RazorpayTest       *razorpaytest.Service
+	RazorpayLive       *razorpaylive.Service
 }
 
 func New(cfg config.Config, paymentService *payments.Service, smsService *sms.Service, manager *gmessages.Manager) *API {

@@ -7,7 +7,7 @@ import (
 
 func TestParsePaytmCustomerPaymentNotifications(t *testing.T) {
 	cases := []struct {
-		text string
+		text  string
 		paise int64
 		payer string
 	}{
@@ -17,7 +17,9 @@ func TestParsePaytmCustomerPaymentNotifications(t *testing.T) {
 	}
 	for _, tc := range cases {
 		parsed, err := Parse(tc.text)
-		if err != nil { t.Fatalf("Parse(%q): %v", tc.text, err) }
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tc.text, err)
+		}
 		if parsed.AmountPaise != tc.paise || parsed.PayerName != tc.payer {
 			t.Fatalf("Parse(%q) = %+v; want %d %q", tc.text, parsed, tc.paise, tc.payer)
 		}

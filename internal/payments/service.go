@@ -368,7 +368,6 @@ func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time
 	return nil, "unmatched", queued, nil
 }
 
-
 type NotificationEvidence struct {
 	Account     domain.PaymentAccount
 	AmountPaise int64
@@ -659,22 +658,22 @@ func FromRecord(record *core.Record) *domain.Payment {
 		return nil
 	}
 	return &domain.Payment{
-		ID:             record.Id,
-		Account:        domain.PaymentAccount(record.GetString("payment_account")),
-		RequestedPaise: int64(record.GetInt("requested_amount")),
-		PayablePaise:   int64(record.GetInt("payable_amount")),
-		Status:         domain.PaymentStatus(record.GetString("status")),
-		ExpiresAt:      record.GetDateTime("expires_at").Time(),
-		ReuseAfter:     record.GetDateTime("reuse_after").Time(),
-		RRN:            record.GetString("rrn"),
-		UPIId:          record.GetString("upi_id"),
+		ID:                record.Id,
+		Account:           domain.PaymentAccount(record.GetString("payment_account")),
+		RequestedPaise:    int64(record.GetInt("requested_amount")),
+		PayablePaise:      int64(record.GetInt("payable_amount")),
+		Status:            domain.PaymentStatus(record.GetString("status")),
+		ExpiresAt:         record.GetDateTime("expires_at").Time(),
+		ReuseAfter:        record.GetDateTime("reuse_after").Time(),
+		RRN:               record.GetString("rrn"),
+		UPIId:             record.GetString("upi_id"),
 		PayerName:         record.GetString("payer_name"),
 		EvidenceSource:    record.GetString("evidence_source"),
 		EvidenceReference: record.GetString("evidence_reference"),
-		PaidAt:         record.GetDateTime("paid_at").Time(),
-		ResolvedAt:     record.GetDateTime("resolved_at").Time(),
-		ExternalID:     record.GetString("external_id"),
-		IdempotencyKey: record.GetString("idempotency_key"),
+		PaidAt:            record.GetDateTime("paid_at").Time(),
+		ResolvedAt:        record.GetDateTime("resolved_at").Time(),
+		ExternalID:        record.GetString("external_id"),
+		IdempotencyKey:    record.GetString("idempotency_key"),
 	}
 }
 
