@@ -24,6 +24,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/money"
 	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/paytmnotification"
 	"github.com/Phloraxx/payment-api/internal/razorpaylive"
 	"github.com/Phloraxx/payment-api/internal/razorpaytest"
 	"github.com/Phloraxx/payment-api/internal/reconciliation"
@@ -38,6 +39,7 @@ import (
 const (
 	maxPaymentRequestBytes      int64 = (1 << 20) + (64 << 10)
 	maxSMSRequestBytes          int64 = 128 << 10
+	maxPaytmNotificationRequestBytes int64 = 160 << 10
 	maxEmailRequestBytes        int64 = ((paymentemail.MaxRawBytes + 2) / 3 * 4) + (128 << 10)
 	maxGMessagesPairBytes       int64 = 128 << 10
 	maxReviewRequestBytes       int64 = 16 << 10
@@ -52,6 +54,7 @@ type API struct {
 	Config         config.Config
 	Payments       *payments.Service
 	SMS            *sms.Service
+	PaytmNotifications *paytmnotification.Service
 	Email          *paymentemail.Service
 	GMessages      *gmessages.Manager
 	Reviews        *reviews.Service
@@ -82,6 +85,7 @@ func (a *API) Register(app core.App) {
 		e.Router.GET("/api/payments/{id}", a.getPayment)
 		e.Router.POST("/api/payments/{id}/cancel", a.cancelPayment)
 		e.Router.POST("/api/events/sms", a.ingestSMS).Bind(apis.BodyLimit(maxSMSRequestBytes))
+		e.Router.POST("/api/events/paytm-notification", a.ingestPaytmNotification).Bind(apis.BodyLimit(maxPaytmNotificationRequestBytes))
 		e.Router.POST("/api/events/email", a.ingestEmail).Bind(apis.BodyLimit(maxEmailRequestBytes))
 		e.Router.POST("/api/webhook", a.ingestLegacySMS).Bind(apis.BodyLimit(maxSMSRequestBytes))
 		e.Router.GET("/api/paygate/health", a.health)
@@ -323,6 +327,56 @@ type smsBody struct {
 	Source    string `json:"source"`
 	SourceID  string `json:"sourceId"`
 	Timestamp string `json:"timestamp"`
+}
+
+type paytmNotificationBody struct {
+	SourceID                string `json:"sourceId"`
+	AppPackage              string `json:"appPackage"`
+	AppName                 string `json:"appName"`
+	Title                   string `json:"title"`
+	Body                    string `json:"body"`
+	BigText                 string `json:"bigText"`
+	Channel                 string `json:"channel"`
+	NotificationTimestampMs string `json:"notificationTimestampMs"`
+}
+
+func (a *API) ingestPaytmNotification(e *core.RequestEvent) error {
+	if a.PaytmNotifications == nil || strings.TrimSpace(a.Config.PaytmNotificationWebhookSecret) == "" {
+		return e.NotFoundError("route not found", nil)
+	}
+	if !constantTimeEqual(a.Config.PaytmNotificationWebhookSecret, e.Request.Header.Get("X-Webhook-Secret")) {
+		return e.UnauthorizedError("invalid webhook secret", nil)
+	}
+	var body paytmNotificationBody
+	if err := decodeJSON(e, &body); err != nil {
+		return e.BadRequestError("invalid JSON body", err)
+	}
+	ms, err := strconv.ParseInt(strings.TrimSpace(body.NotificationTimestampMs), 10, 64)
+	if err != nil || ms <= 0 {
+		return e.BadRequestError("notificationTimestampMs must be a positive Unix timestamp in milliseconds", nil)
+	}
+	notificationTime := time.UnixMilli(ms).UTC()
+	result, err := a.PaytmNotifications.Ingest(paytmnotification.Input{
+		SourceEventID: body.SourceID, AppPackage: body.AppPackage, AppName: body.AppName,
+		Title: body.Title, Body: body.Body, BigText: body.BigText, Channel: body.Channel,
+		NotificationTime: notificationTime,
+		RawPayload: map[string]any{
+			"sourceId": body.SourceID, "appPackage": body.AppPackage, "appName": body.AppName,
+			"title": body.Title, "body": body.Body, "bigText": body.BigText, "channel": body.Channel,
+			"notificationTimestampMs": body.NotificationTimestampMs,
+		},
+	})
+	if err != nil {
+		if _, ok := err.(*domain.Error); ok {
+			return writeDomainErrorWithData(e, err, map[string]any{"event": result})
+		}
+		return writeDomainError(e, err)
+	}
+	status := http.StatusAccepted
+	if result.Duplicate {
+		status = http.StatusOK
+	}
+	return e.JSON(status, result)
 }
 
 func (a *API) ingestSMS(e *core.RequestEvent) error {

@@ -368,6 +368,121 @@ func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time
 	return nil, "unmatched", queued, nil
 }
 
+
+type NotificationEvidence struct {
+	Account     domain.PaymentAccount
+	AmountPaise int64
+	PayerName   string
+	OccurredAt  time.Time
+	Reference   string
+}
+
+// MatchNotificationInApp matches a trusted Paytm for Business notification by
+// account, exact DDM amount, and notification occurrence time. Unlike bank SMS
+// evidence, Paytm push notifications do not necessarily expose a UPI RRN, so a
+// unique relay evidence reference is used for idempotency instead.
+func (s *Service) MatchNotificationInApp(tx core.App, evidence NotificationEvidence, now time.Time) (*core.Record, string, bool, error) {
+	now = now.UTC()
+	account, _, err := s.paymentAccount(string(evidence.Account))
+	if err != nil {
+		return nil, "not_matchable", false, err
+	}
+	if account != string(domain.PaymentAccountPaytm) {
+		return nil, "not_matchable", false, domain.New("NOTIFICATION_ACCOUNT_INVALID", "notification evidence is only valid for the Paytm account", http.StatusBadRequest)
+	}
+	reference := strings.TrimSpace(evidence.Reference)
+	if evidence.AmountPaise <= 0 || reference == "" {
+		return nil, "not_matchable", false, domain.New("NOTIFICATION_NOT_MATCHABLE", "Paytm notification requires an exact amount and evidence reference", http.StatusUnprocessableEntity)
+	}
+	evidenceAt := evidence.OccurredAt.UTC()
+	if evidenceAt.IsZero() || evidenceAt.After(now) {
+		evidenceAt = now
+	}
+
+	existing, err := tx.FindFirstRecordByData("payments", "evidence_reference", reference)
+	if err == nil {
+		if existing.GetString("payment_account") != account {
+			return nil, "evidence_account_mismatch", false, domain.New("EVIDENCE_ACCOUNT_MISMATCH", "the notification evidence was already recorded for a different payment account", http.StatusConflict)
+		}
+		if int64(existing.GetInt("payable_amount")) != evidence.AmountPaise {
+			return nil, "evidence_amount_mismatch", false, domain.New("EVIDENCE_AMOUNT_MISMATCH", "the notification evidence was already recorded with a different amount", http.StatusConflict)
+		}
+		return existing, "duplicate_evidence", false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, "error", false, err
+	}
+
+	createdBefore := evidenceAt.Add(EvidenceTimestampTolerance)
+	onTime, err := tx.FindRecordsByFilter(
+		"payments",
+		"payment_account = {:account} && payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
+		"created", 2, 0,
+		dbx.Params{"account": account, "amount": evidence.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
+	)
+	if err != nil {
+		return nil, "error", false, err
+	}
+	if len(onTime) > 1 {
+		return nil, "ambiguous", false, domain.AmbiguousMatch()
+	}
+	if len(onTime) == 1 {
+		record := onTime[0]
+		applyNotificationEvidence(record, evidence, domain.StatusPaid, now, s.Config.AmountQuarantine)
+		if err := tx.Save(record); err != nil {
+			return nil, "error", false, err
+		}
+		if err := s.schedule(tx, "payment.paid", record, now); err != nil {
+			return nil, "error", false, err
+		}
+		return record, "marked_paid", true, nil
+	}
+
+	expired, err := s.ExpireDueInApp(tx, now)
+	if err != nil {
+		return nil, "error", false, err
+	}
+	queued := expired > 0
+	late, err := tx.FindRecordsByFilter(
+		"payments",
+		"payment_account = {:account} && payable_amount = {:amount} && (status = 'expired' || status = 'cancelled') && reuse_after > {:now} && created_at <= {:createdBefore}",
+		"-created", 2, 0,
+		dbx.Params{"account": account, "amount": evidence.AmountPaise, "now": filterDate(now), "createdBefore": filterDate(createdBefore)},
+	)
+	if err != nil {
+		return nil, "error", queued, err
+	}
+	if len(late) > 1 {
+		return nil, "ambiguous", queued, domain.AmbiguousMatch()
+	}
+	if len(late) == 1 {
+		record := late[0]
+		applyNotificationEvidence(record, evidence, domain.StatusLate, now, s.Config.AmountQuarantine)
+		if err := tx.Save(record); err != nil {
+			return nil, "error", queued, err
+		}
+		if err := s.schedule(tx, "payment.late", record, now); err != nil {
+			return nil, "error", queued, err
+		}
+		return record, "marked_late", true, nil
+	}
+	return nil, "unmatched", queued, nil
+}
+
+func applyNotificationEvidence(record *core.Record, evidence NotificationEvidence, status domain.PaymentStatus, now time.Time, quarantine time.Duration) {
+	paidAt := evidence.OccurredAt.UTC()
+	if paidAt.IsZero() || paidAt.After(now) {
+		paidAt = now.UTC()
+	}
+	record.Set("status", string(status))
+	record.Set("payer_name", strings.TrimSpace(evidence.PayerName))
+	record.Set("evidence_source", "paytm_notification")
+	record.Set("evidence_reference", strings.TrimSpace(evidence.Reference))
+	record.Set("paid_at", paidAt)
+	record.Set("resolved_at", now.UTC())
+	extendReuseAfter(record, now.UTC().Add(quarantine))
+}
+
 // ManualMatchInApp explicitly links reviewed bank evidence to one payment. It
 // still enforces exact amount equality and global RRN uniqueness; the operator
 // chooses the payment, but cannot override those monetary invariants.
@@ -553,7 +668,9 @@ func FromRecord(record *core.Record) *domain.Payment {
 		ReuseAfter:     record.GetDateTime("reuse_after").Time(),
 		RRN:            record.GetString("rrn"),
 		UPIId:          record.GetString("upi_id"),
-		PayerName:      record.GetString("payer_name"),
+		PayerName:         record.GetString("payer_name"),
+		EvidenceSource:    record.GetString("evidence_source"),
+		EvidenceReference: record.GetString("evidence_reference"),
 		PaidAt:         record.GetDateTime("paid_at").Time(),
 		ResolvedAt:     record.GetDateTime("resolved_at").Time(),
 		ExternalID:     record.GetString("external_id"),
@@ -587,12 +704,17 @@ func CreateResponse(payment *domain.Payment, cfg config.Config) map[string]any {
 	}
 	response["paymentAccountLabel"] = account.Label
 	response["verificationMethod"] = account.Verification
-	query := url.Values{}
-	query.Set("pa", account.UPIID)
-	query.Set("pn", account.PayeeName)
-	query.Set("am", money.FormatPaise(payment.PayablePaise))
-	query.Set("cu", "INR")
-	response["upiUri"] = "upi://pay?" + query.Encode()
+	response["paymentFlow"] = account.Flow
+	if account.Flow == "merchant_qr" {
+		response["qrPayload"] = account.QRPayload
+	} else {
+		query := url.Values{}
+		query.Set("pa", account.UPIID)
+		query.Set("pn", account.PayeeName)
+		query.Set("am", money.FormatPaise(payment.PayablePaise))
+		query.Set("cu", "INR")
+		response["upiUri"] = "upi://pay?" + query.Encode()
+	}
 	return response
 }
 

@@ -19,6 +19,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/paytmnotification"
 	"github.com/Phloraxx/payment-api/internal/razorpaylive"
 	"github.com/Phloraxx/payment-api/internal/razorpaytest"
 	"github.com/Phloraxx/payment-api/internal/reconciliation"
@@ -66,6 +67,7 @@ func main() {
 	reviewService := reviews.NewService(app, paymentService, auditService)
 	smsService := sms.NewService(app, paymentService)
 	smsService.Reviews = reviewService
+	paytmNotificationService := paytmnotification.NewService(app, paymentService)
 	emailService := paymentemail.NewService(app, paymentService, cfg.EmailAllowedSender, cfg.EmailAuthServID)
 	emailService.Reviews = reviewService
 	reconciliationService := reconciliation.NewService(app, reviewService, alertService, auditService)
@@ -93,6 +95,7 @@ func main() {
 		return err
 	})
 	apiService := api.New(cfg, paymentService, smsService, gmessagesManager)
+	apiService.PaytmNotifications = paytmNotificationService
 	apiService.Email = emailService
 	apiService.Reviews = reviewService
 	apiService.Reconciliation = reconciliationService
@@ -229,6 +232,7 @@ func startBackgroundRunners(ctx context.Context, runners ...backgroundRunner) {
 func mergeManagedRateLimitRules(existing []core.RateLimitRule) []core.RateLimitRule {
 	managed := []core.RateLimitRule{
 		{Label: "POST /api/events/sms", MaxRequests: 60, Duration: 60},
+		{Label: "POST /api/events/paytm-notification", MaxRequests: 60, Duration: 60},
 		{Label: "POST /api/events/email", MaxRequests: 60, Duration: 60},
 		{Label: "POST /api/webhook", MaxRequests: 30, Duration: 60},
 		{Label: "POST /api/payments", MaxRequests: 120, Duration: 60},

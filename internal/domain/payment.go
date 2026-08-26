@@ -17,6 +17,7 @@ const (
 const (
 	PaymentAccountKotak PaymentAccount = "kotak"
 	PaymentAccountSlice PaymentAccount = "slice"
+	PaymentAccountPaytm PaymentAccount = "paytm"
 )
 
 type ParsedSMS struct {
@@ -36,9 +37,11 @@ type Payment struct {
 	Status         PaymentStatus
 	ExpiresAt      time.Time
 	ReuseAfter     time.Time
-	RRN            string
-	UPIId          string
-	PayerName      string
+	RRN               string
+	UPIId             string
+	PayerName         string
+	EvidenceSource    string
+	EvidenceReference string
 	PaidAt         time.Time
 	ResolvedAt     time.Time
 	ExternalID     string

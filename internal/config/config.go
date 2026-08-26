@@ -21,6 +21,9 @@ type Config struct {
 	KotakUPIPayeeName          string
 	SliceUPIID                 string
 	SliceUPIPayeeName          string
+	PaytmQRPayload             string
+	PaytmPayeeName             string
+	PaytmNotificationWebhookSecret string
 	UPIID                      string
 	UPIPayeeName               string
 	APIKey                     string
@@ -75,6 +78,8 @@ type PaymentAccount struct {
 	UPIID        string `json:"-"`
 	PayeeName    string `json:"-"`
 	Verification string `json:"verification"`
+	Flow         string `json:"flow"`
+	QRPayload    string `json:"-"`
 }
 
 func Load() (Config, error) {
@@ -169,6 +174,9 @@ func Load() (Config, error) {
 		KotakUPIPayeeName:          kotakPayeeName,
 		SliceUPIID:                 strings.TrimSpace(os.Getenv("SLICE_UPI_ID")),
 		SliceUPIPayeeName:          strings.TrimSpace(firstNonEmpty(os.Getenv("SLICE_UPI_PAYEE_NAME"), os.Getenv("UPI_PAYEE_NAME"), os.Getenv("UPI_NAME"), "PayGate")),
+		PaytmQRPayload:             strings.TrimSpace(os.Getenv("PAYTM_QR_PAYLOAD")),
+		PaytmPayeeName:             strings.TrimSpace(firstNonEmpty(os.Getenv("PAYTM_PAYEE_NAME"), "Paytm for Business")),
+		PaytmNotificationWebhookSecret: strings.TrimSpace(os.Getenv("PAYTM_NOTIFICATION_WEBHOOK_SECRET")),
 		UPIID:                      kotakUPIID,
 		UPIPayeeName:               kotakPayeeName,
 		APIKey:                     strings.TrimSpace(os.Getenv("PAYGATE_API_KEY")),
@@ -248,11 +256,17 @@ func (c Config) ValidateServe() error {
 			return fmt.Errorf("SMS_WEBHOOK_SECRET must be at least %d characters", minPrimarySecretLength)
 		}
 	}
-	if defaultPaymentAccount != "kotak" && defaultPaymentAccount != "slice" {
-		return errors.New("PAYMENT_DEFAULT_ACCOUNT must be kotak or slice")
+	if defaultPaymentAccount != "kotak" && defaultPaymentAccount != "slice" && defaultPaymentAccount != "paytm" {
+		return errors.New("PAYMENT_DEFAULT_ACCOUNT must be kotak, slice, or paytm")
+	}
+	if strings.TrimSpace(c.PaytmNotificationWebhookSecret) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
+		return fmt.Errorf("PAYTM_NOTIFICATION_WEBHOOK_SECRET must be at least %d characters when configured", minPrimarySecretLength)
+	}
+	if strings.TrimSpace(c.PaytmQRPayload) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
+		return errors.New("PAYTM_NOTIFICATION_WEBHOOK_SECRET is required when PAYTM_QR_PAYLOAD is configured")
 	}
 	if _, ok := c.PaymentAccount(defaultPaymentAccount); !ok && !c.TestMode {
-		return fmt.Errorf("%s UPI ID is required for PAYMENT_DEFAULT_ACCOUNT", strings.ToUpper(defaultPaymentAccount))
+		return fmt.Errorf("%s payment account configuration is required for PAYMENT_DEFAULT_ACCOUNT", strings.ToUpper(defaultPaymentAccount))
 	}
 	if c.EmailEvidenceEnabled && strings.TrimSpace(c.SliceUPIID) == "" {
 		return errors.New("SLICE_UPI_ID is required when PAYMENT_EMAIL_ENABLED=true")
@@ -364,20 +378,25 @@ func (c Config) PaymentAccount(id string) (PaymentAccount, bool) {
 		if upiID == "" && !c.TestMode {
 			return PaymentAccount{}, false
 		}
-		return PaymentAccount{ID: "kotak", Label: "Kotak", UPIID: upiID, PayeeName: firstNonEmpty(c.KotakUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "sms"}, true
+		return PaymentAccount{ID: "kotak", Label: "Kotak", UPIID: upiID, PayeeName: firstNonEmpty(c.KotakUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "sms", Flow: "upi_intent"}, true
 	case "slice":
 		if strings.TrimSpace(c.SliceUPIID) == "" && !c.TestMode {
 			return PaymentAccount{}, false
 		}
-		return PaymentAccount{ID: "slice", Label: "Slice", UPIID: strings.TrimSpace(c.SliceUPIID), PayeeName: firstNonEmpty(c.SliceUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "email"}, true
+		return PaymentAccount{ID: "slice", Label: "Slice", UPIID: strings.TrimSpace(c.SliceUPIID), PayeeName: firstNonEmpty(c.SliceUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "email", Flow: "upi_intent"}, true
+	case "paytm":
+		if (strings.TrimSpace(c.PaytmQRPayload) == "" || strings.TrimSpace(c.PaytmNotificationWebhookSecret) == "") && !c.TestMode {
+			return PaymentAccount{}, false
+		}
+		return PaymentAccount{ID: "paytm", Label: "Paytm", PayeeName: firstNonEmpty(c.PaytmPayeeName, "Paytm for Business"), Verification: "notification", Flow: "merchant_qr", QRPayload: strings.TrimSpace(c.PaytmQRPayload)}, true
 	default:
 		return PaymentAccount{}, false
 	}
 }
 
 func (c Config) PaymentAccounts() []PaymentAccount {
-	accounts := make([]PaymentAccount, 0, 2)
-	for _, id := range []string{"kotak", "slice"} {
+	accounts := make([]PaymentAccount, 0, 3)
+	for _, id := range []string{"kotak", "slice", "paytm"} {
 		if account, ok := c.PaymentAccount(id); ok {
 			accounts = append(accounts, account)
 		}
