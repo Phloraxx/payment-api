@@ -74,7 +74,7 @@ func (s *Service) Ingest(input Input) (Result, error) {
 	var result Result
 	var queued bool
 	err := s.App.RunInTransaction(func(tx core.App) error {
-		existing, err := tx.FindFirstRecordByFilter("notification_events", "source = macrodroid && source_event_id = {:id}", dbx.Params{"id": input.SourceEventID})
+		existing, err := tx.FindFirstRecordByFilter("notification_events", "source = {:source} && source_event_id = {:id}", dbx.Params{"source": "macrodroid", "id": input.SourceEventID})
 		if err == nil {
 			result = resultFromEvent(existing)
 			result.Action = "duplicate_event"

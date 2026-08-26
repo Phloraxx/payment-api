@@ -429,6 +429,7 @@ func TestPaytmNotificationWebhookAuthenticatesAndMatches(t *testing.T) {
 		Body: strings.NewReader(`{"sourceId":"evt-bad","appPackage":"com.paytm.business","body":"₹1.01 paid by Test","notificationTimestampMs":"1787763600000"}`),
 		TestAppFactory: func(t testing.TB) *tests.TestApp { return apiTestFactoryWithConfig(t, func(cfg *config.Config) { cfg.PaytmQRPayload = "qr"; cfg.PaytmNotificationWebhookSecret = "paytm-notification-secret-long-enough" }, nil) },
 		ExpectedStatus: http.StatusUnauthorized,
+		ExpectedContent: []string{"Invalid webhook secret."},
 	}
 	bad.Test(t)
 
