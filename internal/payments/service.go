@@ -369,11 +369,12 @@ func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time
 }
 
 type NotificationEvidence struct {
-	Account     domain.PaymentAccount
-	AmountPaise int64
-	PayerName   string
-	OccurredAt  time.Time
-	Reference   string
+	Account       domain.PaymentAccount
+	AmountPaise   int64
+	PayerName     string
+	OccurredAt    time.Time
+	OccurredUntil time.Time
+	Reference     string
 }
 
 // MatchNotificationInApp matches a trusted Paytm for Business notification by
@@ -394,8 +395,16 @@ func (s *Service) MatchNotificationInApp(tx core.App, evidence NotificationEvide
 		return nil, "not_matchable", false, domain.New("NOTIFICATION_NOT_MATCHABLE", "Paytm notification requires an exact amount and evidence reference", http.StatusUnprocessableEntity)
 	}
 	evidenceAt := evidence.OccurredAt.UTC()
+	evidenceUntil := evidence.OccurredUntil.UTC()
 	if evidenceAt.IsZero() || evidenceAt.After(now) {
 		evidenceAt = now
+		evidenceUntil = now
+	}
+	if evidenceUntil.IsZero() || evidenceUntil.Before(evidenceAt) {
+		evidenceUntil = evidenceAt
+	}
+	if evidenceUntil.After(now) {
+		evidenceUntil = now
 	}
 
 	existing, err := tx.FindFirstRecordByData("payments", "evidence_reference", reference)
@@ -412,7 +421,7 @@ func (s *Service) MatchNotificationInApp(tx core.App, evidence NotificationEvide
 		return nil, "error", false, err
 	}
 
-	createdBefore := evidenceAt.Add(EvidenceTimestampTolerance)
+	createdBefore := evidenceUntil.Add(EvidenceTimestampTolerance)
 	onTime, err := tx.FindRecordsByFilter(
 		"payments",
 		"payment_account = {:account} && payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
