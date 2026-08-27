@@ -4,6 +4,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/Phloraxx/payment-api/internal/money"
 )
@@ -20,6 +21,7 @@ var (
 		regexp.MustCompile(`(?i)\b(?:received|payment\s+received)\b.{0,100}?\bfrom\s+(.+?)(?:[.!|\n]|$)`),
 		regexp.MustCompile(`(?i)` + currencyAmount + `.{0,80}?\bfrom\s+(.+?)(?:[.!|\n]|$)`),
 	}
+	occurredAtPattern = regexp.MustCompile(`(?i)\breceived\s+on\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{1,2}:\d{2}\s+(?:AM|PM))\b`)
 	nonPaymentPattern = regexp.MustCompile(`(?i)\b(?:refund(?:ed)?|reversal|reversed|cashback|reward|settlement|settled|loan|emi|interest|chargeback)\b`)
 )
 
@@ -28,6 +30,7 @@ var ErrUnrecognized = errors.New("notification is not a recognized Paytm custome
 type Parsed struct {
 	AmountPaise int64
 	PayerName   string
+	OccurredAt  time.Time
 }
 
 func Parse(text string) (Parsed, error) {
@@ -61,7 +64,24 @@ func Parse(text string) (Parsed, error) {
 			}
 		}
 	}
-	return Parsed{AmountPaise: amount, PayerName: payer}, nil
+	occurredAt := parseOccurredAt(text)
+	return Parsed{AmountPaise: amount, PayerName: payer, OccurredAt: occurredAt}, nil
+}
+
+func parseOccurredAt(text string) time.Time {
+	match := occurredAtPattern.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return time.Time{}
+	}
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		return time.Time{}
+	}
+	parsed, err := time.ParseInLocation("2 Jan 2006 03:04 PM", strings.TrimSpace(match[1]), loc)
+	if err != nil {
+		return time.Time{}
+	}
+	return parsed
 }
 
 func cleanPayer(value string) string {

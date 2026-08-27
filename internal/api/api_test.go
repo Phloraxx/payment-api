@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Phloraxx/payment-api/internal/androidrelay"
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/paymentemail"
@@ -55,6 +56,7 @@ func apiTestFactoryWithConfig(t testing.TB, configure func(*config.Config), befo
 	}
 	apiService := New(cfg, paymentService, smsService, nil)
 	apiService.PaytmNotifications = paytmnotification.NewService(app, paymentService)
+	apiService.AndroidRelay = androidrelay.NewService(app, apiService.PaytmNotifications)
 	apiService.Email = paymentemail.NewService(app, paymentService, cfg.EmailAllowedSender, cfg.EmailAuthServID)
 	apiService.Register(app)
 	return app

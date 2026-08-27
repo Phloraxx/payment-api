@@ -24,6 +24,7 @@ type Config struct {
 	PaytmQRPayload                 string
 	PaytmPayeeName                 string
 	PaytmNotificationWebhookSecret string
+	AndroidRelayPairingSecret      string
 	UPIID                          string
 	UPIPayeeName                   string
 	APIKey                         string
@@ -177,6 +178,7 @@ func Load() (Config, error) {
 		PaytmQRPayload:                 strings.TrimSpace(os.Getenv("PAYTM_QR_PAYLOAD")),
 		PaytmPayeeName:                 strings.TrimSpace(firstNonEmpty(os.Getenv("PAYTM_PAYEE_NAME"), "Paytm for Business")),
 		PaytmNotificationWebhookSecret: strings.TrimSpace(os.Getenv("PAYTM_NOTIFICATION_WEBHOOK_SECRET")),
+		AndroidRelayPairingSecret:      strings.TrimSpace(os.Getenv("ANDROID_RELAY_PAIRING_SECRET")),
 		UPIID:                          kotakUPIID,
 		UPIPayeeName:                   kotakPayeeName,
 		APIKey:                         strings.TrimSpace(os.Getenv("PAYGATE_API_KEY")),
@@ -261,6 +263,9 @@ func (c Config) ValidateServe() error {
 	}
 	if strings.TrimSpace(c.PaytmNotificationWebhookSecret) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
 		return fmt.Errorf("PAYTM_NOTIFICATION_WEBHOOK_SECRET must be at least %d characters when configured", minPrimarySecretLength)
+	}
+	if strings.TrimSpace(c.AndroidRelayPairingSecret) != "" && len(c.AndroidRelayPairingSecret) < minPrimarySecretLength {
+		return fmt.Errorf("ANDROID_RELAY_PAIRING_SECRET must be at least %d characters when configured", minPrimarySecretLength)
 	}
 	if strings.TrimSpace(c.PaytmQRPayload) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
 		return errors.New("PAYTM_NOTIFICATION_WEBHOOK_SECRET is required when PAYTM_QR_PAYLOAD is configured")

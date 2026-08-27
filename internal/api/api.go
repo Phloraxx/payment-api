@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/alerts"
+	"github.com/Phloraxx/payment-api/internal/androidrelay"
 	"github.com/Phloraxx/payment-api/internal/audit"
 	"github.com/Phloraxx/payment-api/internal/backups"
 	"github.com/Phloraxx/payment-api/internal/config"
@@ -55,6 +56,7 @@ type API struct {
 	Payments           *payments.Service
 	SMS                *sms.Service
 	PaytmNotifications *paytmnotification.Service
+	AndroidRelay       *androidrelay.Service
 	Email              *paymentemail.Service
 	GMessages          *gmessages.Manager
 	Reviews            *reviews.Service
@@ -86,6 +88,8 @@ func (a *API) Register(app core.App) {
 		e.Router.POST("/api/payments/{id}/cancel", a.cancelPayment)
 		e.Router.POST("/api/events/sms", a.ingestSMS).Bind(apis.BodyLimit(maxSMSRequestBytes))
 		e.Router.POST("/api/events/paytm-notification", a.ingestPaytmNotification).Bind(apis.BodyLimit(maxPaytmNotificationRequestBytes))
+		e.Router.POST("/api/relay/v1/enroll", a.androidRelayEnroll).Bind(apis.BodyLimit(maxAndroidRelayRequestBytes))
+		e.Router.POST("/api/relay/v1/events", a.androidRelayEvent).Bind(apis.BodyLimit(maxAndroidRelayRequestBytes))
 		e.Router.POST("/api/events/email", a.ingestEmail).Bind(apis.BodyLimit(maxEmailRequestBytes))
 		e.Router.POST("/api/webhook", a.ingestLegacySMS).Bind(apis.BodyLimit(maxSMSRequestBytes))
 		e.Router.GET("/api/paygate/health", a.health)
