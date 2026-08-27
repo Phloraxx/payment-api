@@ -207,22 +207,27 @@ func TestValidateServeRazorpayTestRequiresTestModeCredentials(t *testing.T) {
 	}
 }
 
-func TestPaytmAccountRequiresStaticQRAndStrongNotificationSecret(t *testing.T) {
+func TestPaytmAccountSupportsDynamicQROnlyFlowAndLegacyStaticQR(t *testing.T) {
 	base := Config{UPIID: "operator@bank", APIKey: testAPISecret, SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour, StatementTimezone: "Asia/Kolkata"}
-	base.PaytmNotificationWebhookSecret = "short"
-	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "PAYTM_NOTIFICATION_WEBHOOK_SECRET") {
-		t.Fatalf("weak Paytm secret accepted: %v", err)
-	}
-	base.PaytmNotificationWebhookSecret = "paytm-notification-secret-long-enough"
-	if _, ok := base.PaymentAccount("paytm"); ok {
-		t.Fatal("Paytm account exposed without a static merchant QR payload")
-	}
-	base.PaytmQRPayload = "paytm-issued-static-merchant-qr-payload"
+	base.PaytmUPIID = "merchant@paytm"
 	account, ok := base.PaymentAccount("paytm")
-	if !ok || account.Verification != "notification" || account.Flow != "merchant_qr" || account.QRPayload != base.PaytmQRPayload {
-		t.Fatalf("Paytm account = %+v ok=%v", account, ok)
+	if !ok || account.Verification != "notification" || account.Flow != "qr_only" || account.UPIID != base.PaytmUPIID {
+		t.Fatalf("dynamic Paytm account = %+v ok=%v", account, ok)
 	}
 	if err := base.ValidateServe(); err != nil {
-		t.Fatalf("valid Paytm configuration rejected: %v", err)
+		t.Fatalf("valid Paytm UPI configuration rejected: %v", err)
+	}
+
+	legacy := base
+	legacy.PaytmUPIID = ""
+	legacy.PaytmNotificationWebhookSecret = "short"
+	legacy.PaytmQRPayload = "paytm-issued-static-merchant-qr-payload"
+	if err := legacy.ValidateServe(); err == nil || !strings.Contains(err.Error(), "PAYTM_NOTIFICATION_WEBHOOK_SECRET") {
+		t.Fatalf("weak legacy Paytm secret accepted: %v", err)
+	}
+	legacy.PaytmNotificationWebhookSecret = "paytm-notification-secret-long-enough"
+	account, ok = legacy.PaymentAccount("paytm")
+	if !ok || account.Flow != "merchant_qr" || account.QRPayload != legacy.PaytmQRPayload {
+		t.Fatalf("legacy Paytm account = %+v ok=%v", account, ok)
 	}
 }

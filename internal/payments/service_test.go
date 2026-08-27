@@ -10,6 +10,7 @@ import (
 
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/domain"
+	"github.com/Phloraxx/payment-api/internal/money"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
@@ -72,6 +73,34 @@ func TestPaymentAccountsAreIsolatedForCreationIdempotencyAndMatching(t *testing.
 	storedKotak, _ := service.Get(kotak.ID)
 	if storedKotak.Status != domain.StatusPending {
 		t.Fatalf("Slice evidence changed Kotak payment to %s", storedKotak.Status)
+	}
+}
+
+func TestPaytmQROnlyCreateResponseEncodesExactAmountWithoutTransactionNote(t *testing.T) {
+	service, _, _ := paymentTestService(t)
+	service.Config.PaytmUPIID = "merchant@paytm"
+	payment, _, err := service.Create(CreateInput{AmountRupees: 1, PaymentAccount: "paytm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := CreateResponse(payment, service.Config)
+	if response["paymentFlow"] != "qr_only" || response["verificationMethod"] != "notification" {
+		t.Fatalf("Paytm response metadata = %+v", response)
+	}
+	uri, ok := response["upiUri"].(string)
+	if !ok {
+		t.Fatalf("Paytm response missing upiUri: %+v", response)
+	}
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := parsed.Query()
+	if parsed.Scheme != "upi" || parsed.Host != "pay" || q.Get("pa") != "merchant@paytm" || q.Get("am") != money.FormatPaise(payment.PayablePaise) || q.Get("cu") != "INR" {
+		t.Fatalf("Paytm URI = %q", uri)
+	}
+	if q.Get("tn") != "" || q.Get("pn") != "" {
+		t.Fatalf("Paytm QR-only URI contains unwanted metadata: %q", uri)
 	}
 }
 

@@ -21,6 +21,7 @@ type Config struct {
 	KotakUPIPayeeName              string
 	SliceUPIID                     string
 	SliceUPIPayeeName              string
+	PaytmUPIID                     string
 	PaytmQRPayload                 string
 	PaytmPayeeName                 string
 	PaytmNotificationWebhookSecret string
@@ -175,6 +176,7 @@ func Load() (Config, error) {
 		KotakUPIPayeeName:              kotakPayeeName,
 		SliceUPIID:                     strings.TrimSpace(os.Getenv("SLICE_UPI_ID")),
 		SliceUPIPayeeName:              strings.TrimSpace(firstNonEmpty(os.Getenv("SLICE_UPI_PAYEE_NAME"), os.Getenv("UPI_PAYEE_NAME"), os.Getenv("UPI_NAME"), "PayGate")),
+		PaytmUPIID:                     strings.TrimSpace(os.Getenv("PAYTM_UPI_ID")),
 		PaytmQRPayload:                 strings.TrimSpace(os.Getenv("PAYTM_QR_PAYLOAD")),
 		PaytmPayeeName:                 strings.TrimSpace(firstNonEmpty(os.Getenv("PAYTM_PAYEE_NAME"), "Paytm for Business")),
 		PaytmNotificationWebhookSecret: strings.TrimSpace(os.Getenv("PAYTM_NOTIFICATION_WEBHOOK_SECRET")),
@@ -390,10 +392,16 @@ func (c Config) PaymentAccount(id string) (PaymentAccount, bool) {
 		}
 		return PaymentAccount{ID: "slice", Label: "Slice", UPIID: strings.TrimSpace(c.SliceUPIID), PayeeName: firstNonEmpty(c.SliceUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "email", Flow: "upi_intent"}, true
 	case "paytm":
-		if (strings.TrimSpace(c.PaytmQRPayload) == "" || strings.TrimSpace(c.PaytmNotificationWebhookSecret) == "") && !c.TestMode {
+		if upiID := strings.TrimSpace(c.PaytmUPIID); upiID != "" {
+			return PaymentAccount{ID: "paytm", Label: "Paytm", UPIID: upiID, PayeeName: firstNonEmpty(c.PaytmPayeeName, "Paytm for Business"), Verification: "notification", Flow: "qr_only"}, true
+		}
+		if strings.TrimSpace(c.PaytmQRPayload) != "" && strings.TrimSpace(c.PaytmNotificationWebhookSecret) != "" {
+			return PaymentAccount{ID: "paytm", Label: "Paytm", PayeeName: firstNonEmpty(c.PaytmPayeeName, "Paytm for Business"), Verification: "notification", Flow: "merchant_qr", QRPayload: strings.TrimSpace(c.PaytmQRPayload)}, true
+		}
+		if !c.TestMode {
 			return PaymentAccount{}, false
 		}
-		return PaymentAccount{ID: "paytm", Label: "Paytm", PayeeName: firstNonEmpty(c.PaytmPayeeName, "Paytm for Business"), Verification: "notification", Flow: "merchant_qr", QRPayload: strings.TrimSpace(c.PaytmQRPayload)}, true
+		return PaymentAccount{ID: "paytm", Label: "Paytm", PayeeName: firstNonEmpty(c.PaytmPayeeName, "Paytm for Business"), Verification: "notification", Flow: "qr_only"}, true
 	default:
 		return PaymentAccount{}, false
 	}
