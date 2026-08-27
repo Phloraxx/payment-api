@@ -709,7 +709,9 @@ func CreateResponse(payment *domain.Payment, cfg config.Config) map[string]any {
 	} else {
 		query := url.Values{}
 		query.Set("pa", account.UPIID)
-		query.Set("pn", account.PayeeName)
+		if account.Flow != "qr_only" {
+			query.Set("pn", account.PayeeName)
+		}
 		query.Set("am", money.FormatPaise(payment.PayablePaise))
 		query.Set("cu", "INR")
 		response["upiUri"] = "upi://pay?" + query.Encode()
