@@ -100,34 +100,40 @@ func (s *Service) IngestInApp(app core.App, input Input) (Result, bool, error) {
 	}
 
 	existing, err := app.FindFirstRecordByFilter("notification_events", "source = {:source} && source_event_id = {:id}", dbx.Params{"source": input.Source, "id": input.SourceEventID})
+	var event *core.Record
 	if err == nil {
-		result := resultFromEvent(existing)
-		result.Action = "duplicate_event"
-		result.Duplicate = true
-		return result, false, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return Result{}, false, err
-	}
-
-	collection, err := app.FindCollectionByNameOrId("notification_events")
-	if err != nil {
-		return Result{}, false, err
-	}
-	event := core.NewRecord(collection)
-	event.Set("source", input.Source)
-	event.Set("source_event_id", input.SourceEventID)
-	event.Set("app_package", input.AppPackage)
-	event.Set("app_name", input.AppName)
-	event.Set("title", input.Title)
-	event.Set("body", input.Body)
-	event.Set("big_text", input.BigText)
-	event.Set("channel", input.Channel)
-	event.Set("notification_time", notificationTime)
-	event.Set("payment_account", string(domain.PaymentAccountPaytm))
-	event.Set("processing_status", "received")
-	if input.RawPayload != nil {
-		event.Set("raw_payload", input.RawPayload)
+		if existing.GetString("processing_status") != "unmatched" {
+			result := resultFromEvent(existing)
+			result.Action = "duplicate_event"
+			result.Duplicate = true
+			return result, false, nil
+		}
+		event = existing
+		event.Set("processing_status", "received")
+		event.Set("error", "")
+	} else {
+		if !errors.Is(err, sql.ErrNoRows) {
+			return Result{}, false, err
+		}
+		collection, err := app.FindCollectionByNameOrId("notification_events")
+		if err != nil {
+			return Result{}, false, err
+		}
+		event = core.NewRecord(collection)
+		event.Set("source", input.Source)
+		event.Set("source_event_id", input.SourceEventID)
+		event.Set("app_package", input.AppPackage)
+		event.Set("app_name", input.AppName)
+		event.Set("title", input.Title)
+		event.Set("body", input.Body)
+		event.Set("big_text", input.BigText)
+		event.Set("channel", input.Channel)
+		event.Set("notification_time", notificationTime)
+		event.Set("payment_account", string(domain.PaymentAccountPaytm))
+		event.Set("processing_status", "received")
+		if input.RawPayload != nil {
+			event.Set("raw_payload", input.RawPayload)
+		}
 	}
 	if err := app.Save(event); err != nil {
 		return Result{}, false, err
@@ -160,13 +166,26 @@ func (s *Service) IngestInApp(app core.App, input Input) (Result, bool, error) {
 	event.Set("payer_name", parsed.PayerName)
 	event.Set("processing_status", "parsed")
 	occurredAt := notificationTime
+	occurredUntil := notificationTime
 	if !parsed.OccurredAt.IsZero() && !parsed.OccurredAt.After(now.Add(5*time.Minute)) {
-		occurredAt = parsed.OccurredAt.UTC()
+		minuteStart := parsed.OccurredAt.UTC()
+		minuteEnd := minuteStart.Add(time.Minute).Add(-time.Nanosecond)
+		if !notificationTime.Before(minuteStart) && !notificationTime.After(minuteEnd) {
+			// Paytm only prints minutes. Android's notification timestamp supplies
+			// precise seconds when it agrees with that displayed minute.
+			occurredAt = notificationTime
+			occurredUntil = notificationTime
+		} else {
+			// For delayed/offline delivery, preserve the full minute interval so a
+			// checkout created later in the same displayed minute remains eligible.
+			occurredAt = minuteStart
+			occurredUntil = minuteEnd
+		}
 	}
 
 	payment, action, queued, matchErr := s.Payments.MatchNotificationInApp(app, payments.NotificationEvidence{
 		Account: domain.PaymentAccountPaytm, AmountPaise: parsed.AmountPaise, PayerName: parsed.PayerName,
-		OccurredAt: occurredAt, Reference: "paytm-notification:" + input.SourceEventID,
+		OccurredAt: occurredAt, OccurredUntil: occurredUntil, Reference: "paytm-notification:" + input.SourceEventID,
 	}, now)
 	if matchErr != nil {
 		event.Set("processing_status", "error")
@@ -204,6 +223,30 @@ func (s *Service) IngestInApp(app core.App, input Input) (Result, bool, error) {
 		return Result{}, false, err
 	}
 	return result, queued, nil
+}
+
+func (s *Service) RetryEvent(eventID string) (Result, error) {
+	eventID = strings.TrimSpace(eventID)
+	if eventID == "" {
+		return Result{}, domain.New("INVALID_NOTIFICATION_EVENT_ID", "notification event id is required", 400)
+	}
+	event, err := s.App.FindRecordById("notification_events", eventID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Result{}, domain.New("NOTIFICATION_EVENT_NOT_FOUND", "notification event was not found", 404)
+		}
+		return Result{}, err
+	}
+	if event.GetString("processing_status") != "unmatched" {
+		return Result{}, domain.New("NOTIFICATION_EVENT_NOT_RETRYABLE", "only unmatched notification events can be retried", 409)
+	}
+	return s.Ingest(Input{
+		Source: event.GetString("source"), SourceEventID: event.GetString("source_event_id"),
+		AppPackage: event.GetString("app_package"), AppName: event.GetString("app_name"),
+		Title: event.GetString("title"), Body: event.GetString("body"), BigText: event.GetString("big_text"),
+		Channel: event.GetString("channel"), NotificationTime: event.GetDateTime("notification_time").Time(),
+		RawPayload: event.Get("raw_payload"),
+	})
 }
 
 func resultFromEvent(event *core.Record) Result {

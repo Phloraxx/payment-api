@@ -101,3 +101,83 @@ func TestDelayedOldNotificationCannotConfirmReusedDDMAmount(t *testing.T) {
 		t.Fatalf("new payment incorrectly became %s", stored.Status)
 	}
 }
+
+func TestMinutePrecisionUsesAndroidNotificationSeconds(t *testing.T) {
+	service, paymentService, _, now := paytmTestService(t)
+	*now = time.Date(2026, 8, 27, 17, 26, 31, 0, time.UTC)
+	payment, _, err := paymentService.Create(payments.CreateInput{AmountRupees: 1, PaymentAccount: "paytm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	*now = time.Date(2026, 8, 27, 17, 26, 51, 0, time.UTC)
+	result, err := service.Ingest(Input{
+		Source: "android_relay", SourceEventID: "minute-precision-live", AppPackage: PaytmBusinessPackage,
+		Body:             "₹1.01 Received from Test User\nReceived on 27 Aug 2026 10:56 PM",
+		NotificationTime: time.Date(2026, 8, 27, 17, 26, 49, 952000000, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "matched" || result.Action != "marked_paid" || result.PaymentID != payment.ID {
+		t.Fatalf("minute-precision result = %+v", result)
+	}
+	stored, _ := paymentService.Get(payment.ID)
+	if stored.Status != domain.StatusPaid || stored.PaidAt.Second() != 49 {
+		t.Fatalf("stored payment = %+v", stored)
+	}
+}
+
+func TestDelayedMinutePrecisionStillMatchesCheckoutCreatedInsideMinute(t *testing.T) {
+	service, paymentService, _, now := paytmTestService(t)
+	*now = time.Date(2026, 8, 27, 17, 26, 31, 0, time.UTC)
+	payment, _, err := paymentService.Create(payments.CreateInput{AmountRupees: 1, PaymentAccount: "paytm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	*now = time.Date(2026, 8, 27, 17, 30, 0, 0, time.UTC)
+	result, err := service.Ingest(Input{
+		Source: "android_relay", SourceEventID: "minute-precision-delayed", AppPackage: PaytmBusinessPackage,
+		Body:             "₹1.01 Received from Test User\nReceived on 27 Aug 2026 10:56 PM",
+		NotificationTime: time.Date(2026, 8, 27, 17, 29, 55, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "matched" || result.Action != "marked_paid" || result.PaymentID != payment.ID {
+		t.Fatalf("delayed minute-precision result = %+v", result)
+	}
+}
+
+func TestRetryPreviouslyUnmatchedNotification(t *testing.T) {
+	service, paymentService, _, now := paytmTestService(t)
+	*now = time.Date(2026, 8, 27, 17, 26, 50, 0, time.UTC)
+	input := Input{
+		Source: "android_relay", SourceEventID: "retry-unmatched", AppPackage: PaytmBusinessPackage,
+		Body:             "₹1.01 Received from Test User\nReceived on 27 Aug 2026 10:56 PM",
+		NotificationTime: time.Date(2026, 8, 27, 17, 26, 49, 0, time.UTC),
+	}
+	first, err := service.Ingest(input)
+	if err != nil || first.Status != "unmatched" {
+		t.Fatalf("first result = %+v err=%v", first, err)
+	}
+
+	paymentService.Now = func() time.Time { return time.Date(2026, 8, 27, 17, 26, 31, 0, time.UTC) }
+	payment, _, err := paymentService.Create(payments.CreateInput{AmountRupees: 1, PaymentAccount: "paytm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymentService.Now = func() time.Time { return *now }
+	*now = time.Date(2026, 8, 27, 17, 26, 52, 0, time.UTC)
+
+	retried, err := service.RetryEvent(first.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Status != "matched" || retried.Action != "marked_paid" || retried.PaymentID != payment.ID || retried.Duplicate {
+		t.Fatalf("retry result = %+v", retried)
+	}
+	stored, _ := paymentService.Get(payment.ID)
+	if stored.Status != domain.StatusPaid {
+		t.Fatalf("retried payment status = %s", stored.Status)
+	}
+}

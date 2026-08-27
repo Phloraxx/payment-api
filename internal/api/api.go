@@ -88,6 +88,7 @@ func (a *API) Register(app core.App) {
 		e.Router.POST("/api/payments/{id}/cancel", a.cancelPayment)
 		e.Router.POST("/api/events/sms", a.ingestSMS).Bind(apis.BodyLimit(maxSMSRequestBytes))
 		e.Router.POST("/api/events/paytm-notification", a.ingestPaytmNotification).Bind(apis.BodyLimit(maxPaytmNotificationRequestBytes))
+		e.Router.POST("/api/events/paytm-notification/{id}/retry", a.retryPaytmNotification)
 		e.Router.POST("/api/relay/v1/enroll", a.androidRelayEnroll).Bind(apis.BodyLimit(maxAndroidRelayRequestBytes))
 		e.Router.POST("/api/relay/v1/events", a.androidRelayEvent).Bind(apis.BodyLimit(maxAndroidRelayRequestBytes))
 		e.Router.POST("/api/events/email", a.ingestEmail).Bind(apis.BodyLimit(maxEmailRequestBytes))
@@ -342,6 +343,20 @@ type paytmNotificationBody struct {
 	BigText                 string `json:"bigText"`
 	Channel                 string `json:"channel"`
 	NotificationTimestampMs string `json:"notificationTimestampMs"`
+}
+
+func (a *API) retryPaytmNotification(e *core.RequestEvent) error {
+	if !a.authorizedWrite(e) {
+		return e.UnauthorizedError("API key or dashboard authentication is required", nil)
+	}
+	if a.PaytmNotifications == nil {
+		return e.NotFoundError("route not found", nil)
+	}
+	result, err := a.PaytmNotifications.RetryEvent(e.Request.PathValue("id"))
+	if err != nil {
+		return writeDomainError(e, err)
+	}
+	return e.JSON(http.StatusOK, result)
 }
 
 func (a *API) ingestPaytmNotification(e *core.RequestEvent) error {
