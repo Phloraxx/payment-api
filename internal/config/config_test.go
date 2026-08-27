@@ -206,3 +206,23 @@ func TestValidateServeRazorpayTestRequiresTestModeCredentials(t *testing.T) {
 		t.Fatalf("valid Razorpay test config: %v", err)
 	}
 }
+
+func TestPaytmAccountRequiresStaticQRAndStrongNotificationSecret(t *testing.T) {
+	base := Config{UPIID: "operator@bank", APIKey: testAPISecret, SMSWebhookSecret: testSMSSecret, PaymentTTL: time.Minute, AmountQuarantine: time.Hour, StatementTimezone: "Asia/Kolkata"}
+	base.PaytmNotificationWebhookSecret = "short"
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "PAYTM_NOTIFICATION_WEBHOOK_SECRET") {
+		t.Fatalf("weak Paytm secret accepted: %v", err)
+	}
+	base.PaytmNotificationWebhookSecret = "paytm-notification-secret-long-enough"
+	if _, ok := base.PaymentAccount("paytm"); ok {
+		t.Fatal("Paytm account exposed without a static merchant QR payload")
+	}
+	base.PaytmQRPayload = "paytm-issued-static-merchant-qr-payload"
+	account, ok := base.PaymentAccount("paytm")
+	if !ok || account.Verification != "notification" || account.Flow != "merchant_qr" || account.QRPayload != base.PaytmQRPayload {
+		t.Fatalf("Paytm account = %+v ok=%v", account, ok)
+	}
+	if err := base.ValidateServe(); err != nil {
+		t.Fatalf("valid Paytm configuration rejected: %v", err)
+	}
+}

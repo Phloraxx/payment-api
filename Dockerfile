@@ -7,7 +7,7 @@ RUN npm ci
 COPY web ./web
 RUN npm run typecheck && npm run build
 
-FROM golang:1.25.12-bookworm AS go-build
+FROM golang:1.25.13-bookworm AS go-build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download

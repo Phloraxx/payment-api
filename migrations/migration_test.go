@@ -14,7 +14,7 @@ func TestDomainCollectionsOnlyExposeReadsToOperatorUsers(t *testing.T) {
 	}
 	defer app.Cleanup()
 
-	for _, name := range []string{"payments", "sms_events", "email_events", "webhook_deliveries", "audit_events", "review_cases", "reconciliation_runs", "reconciliation_entries", "alerts", "refunds", "razorpay_test_orders", "razorpay_test_events"} {
+	for _, name := range []string{"payments", "sms_events", "email_events", "notification_events", "webhook_deliveries", "audit_events", "review_cases", "reconciliation_runs", "reconciliation_entries", "alerts", "refunds", "razorpay_test_orders", "razorpay_test_events"} {
 		collection, err := app.FindCollectionByNameOrId(name)
 		if err != nil {
 			t.Fatalf("find %s: %v", name, err)
@@ -38,6 +38,9 @@ func TestDomainCollectionsOnlyExposeReadsToOperatorUsers(t *testing.T) {
 	}
 	if payments.Fields.GetByName("payment_account") == nil {
 		t.Fatal("payments.payment_account migration field is missing")
+	}
+	if payments.Fields.GetByName("evidence_source") == nil || payments.Fields.GetByName("evidence_reference") == nil {
+		t.Fatal("payments notification evidence fields are missing")
 	}
 	for _, name := range []string{"sms_events", "email_events"} {
 		collection, err := app.FindCollectionByNameOrId(name)

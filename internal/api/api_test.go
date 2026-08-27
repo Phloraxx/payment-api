@@ -15,10 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Phloraxx/payment-api/internal/androidrelay"
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/paytmnotification"
 	"github.com/Phloraxx/payment-api/internal/sms"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/apis"
@@ -53,6 +55,8 @@ func apiTestFactoryWithConfig(t testing.TB, configure func(*config.Config), befo
 		before(app, paymentService)
 	}
 	apiService := New(cfg, paymentService, smsService, nil)
+	apiService.PaytmNotifications = paytmnotification.NewService(app, paymentService)
+	apiService.AndroidRelay = androidrelay.NewService(app, apiService.PaytmNotifications)
 	apiService.Email = paymentemail.NewService(app, paymentService, cfg.EmailAllowedSender, cfg.EmailAuthServID)
 	apiService.Register(app)
 	return app
@@ -407,4 +411,66 @@ func TestLegacyWebhookAliasIsExplicitlyGated(t *testing.T) {
 		},
 	}
 	enabled.Test(t)
+}
+
+func TestPaytmNotificationWebhookAuthenticatesAndMatches(t *testing.T) {
+	var paymentID string
+	app := apiTestFactoryWithConfig(t, func(cfg *config.Config) {
+		cfg.PaytmQRPayload = "paytm-issued-static-qr"
+		cfg.PaytmNotificationWebhookSecret = "paytm-notification-secret-long-enough"
+	}, func(_ *tests.TestApp, service *payments.Service) {
+		payment, _, err := service.Create(payments.CreateInput{AmountRupees: 1, PaymentAccount: "paytm"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		paymentID = payment.ID
+	})
+	defer app.Cleanup()
+
+	bad := tests.ApiScenario{
+		Name: "bad Paytm webhook secret", Method: http.MethodPost, URL: "/api/events/paytm-notification",
+		Headers: map[string]string{"X-Webhook-Secret": "wrong", "Content-Type": "application/json"},
+		Body:    strings.NewReader(`{"sourceId":"evt-bad","appPackage":"com.paytm.business","body":"₹1.01 paid by Test","notificationTimestampMs":"1787763600000"}`),
+		TestAppFactory: func(t testing.TB) *tests.TestApp {
+			return apiTestFactoryWithConfig(t, func(cfg *config.Config) {
+				cfg.PaytmQRPayload = "qr"
+				cfg.PaytmNotificationWebhookSecret = "paytm-notification-secret-long-enough"
+			}, nil)
+		},
+		ExpectedStatus:  http.StatusUnauthorized,
+		ExpectedContent: []string{"Invalid webhook secret."},
+	}
+	bad.Test(t)
+
+	router, err := apis.NewRouter(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveEvent := &core.ServeEvent{App: app, Router: router}
+	if err := app.OnServe().Trigger(serveEvent, func(e *core.ServeEvent) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	mux, err := serveEvent.Router.BuildMux()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	payload := `{"sourceId":"evt-1","appPackage":"com.paytm.business","appName":"Paytm for Business","title":"Payment received","body":"₹1.01 paid by Test User","notificationTimestampMs":"` + strconv.FormatInt(time.Now().UnixMilli(), 10) + `"}`
+	req, _ := http.NewRequest(http.MethodPost, server.URL+"/api/events/paytm-notification", strings.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Webhook-Secret", "paytm-notification-secret-long-enough")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusAccepted || !strings.Contains(string(body), `"status":"matched"`) {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	record, err := app.FindRecordById("payments", paymentID)
+	if err != nil || record.GetString("status") != "paid" || record.GetString("evidence_source") != "paytm_notification" {
+		t.Fatalf("payment status=%v err=%v", record, err)
+	}
 }

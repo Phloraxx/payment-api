@@ -7,8 +7,8 @@ import type { BackupStatus, Connector } from "../types";
 type SafeConfig = {
   upiId: string;
   upiPayeeName: string;
-  defaultPaymentAccount: "kotak" | "slice";
-  paymentAccounts: Array<{ id: "kotak" | "slice"; label: string; verification: "sms" | "email" }>;
+  defaultPaymentAccount: "kotak" | "slice" | "paytm";
+  paymentAccounts: Array<{ id: "kotak" | "slice" | "paytm"; label: string; verification: "sms" | "email" | "notification" }>;
   paymentTtlSeconds: number;
   quarantineSeconds: number;
   webhookConfigured: boolean;

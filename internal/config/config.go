@@ -15,58 +15,62 @@ import (
 const minPrimarySecretLength = 24
 
 type Config struct {
-	DataDir                    string
-	DefaultPaymentAccount      string
-	KotakUPIID                 string
-	KotakUPIPayeeName          string
-	SliceUPIID                 string
-	SliceUPIPayeeName          string
-	UPIID                      string
-	UPIPayeeName               string
-	APIKey                     string
-	SMSWebhookSecret           string
-	EmailEvidenceEnabled       bool
-	EmailWebhookSecret         string
-	EmailAllowedSender         string
-	EmailAuthServID            string
-	EmailSignatureTolerance    time.Duration
-	LegacySMSWebhookSecret     string
-	LegacySMSWebhookEnabled    bool
-	PaymentTTL                 time.Duration
-	AmountQuarantine           time.Duration
-	OutgoingWebhookURL         string
-	OutgoingWebhookSecret      string
-	GMessagesEnabled           bool
-	GMessagesSessionPath       string
-	TestMode                   bool
-	RateLimitsEnabled          bool
-	RetentionEnabled           bool
-	SMSRawRetention            time.Duration
-	EmailRawRetention          time.Duration
-	ReconciliationRawRetention time.Duration
-	AuditRetention             time.Duration
-	BackupCron                 string
-	BackupMaxKeep              int
-	BackupS3Enabled            bool
-	BackupS3Bucket             string
-	BackupS3Region             string
-	BackupS3Endpoint           string
-	BackupS3AccessKey          string
-	BackupS3Secret             string
-	BackupS3ForcePathStyle     bool
-	OperatorAlertWebhookURL    string
-	OperatorAlertWebhookSecret string
-	StatementTimezone          string
-	RazorpayTestEnabled        bool
-	RazorpayTestKeyID          string
-	RazorpayTestKeySecret      string
-	RazorpayTestWebhookSecret  string
-	RazorpayTestDisplayName    string
-	RazorpayLiveEnabled        bool
-	RazorpayLiveKeyID          string
-	RazorpayLiveKeySecret      string
-	RazorpayLiveWebhookSecret  string
-	RazorpayLiveDisplayName    string
+	DataDir                        string
+	DefaultPaymentAccount          string
+	KotakUPIID                     string
+	KotakUPIPayeeName              string
+	SliceUPIID                     string
+	SliceUPIPayeeName              string
+	PaytmQRPayload                 string
+	PaytmPayeeName                 string
+	PaytmNotificationWebhookSecret string
+	AndroidRelayPairingSecret      string
+	UPIID                          string
+	UPIPayeeName                   string
+	APIKey                         string
+	SMSWebhookSecret               string
+	EmailEvidenceEnabled           bool
+	EmailWebhookSecret             string
+	EmailAllowedSender             string
+	EmailAuthServID                string
+	EmailSignatureTolerance        time.Duration
+	LegacySMSWebhookSecret         string
+	LegacySMSWebhookEnabled        bool
+	PaymentTTL                     time.Duration
+	AmountQuarantine               time.Duration
+	OutgoingWebhookURL             string
+	OutgoingWebhookSecret          string
+	GMessagesEnabled               bool
+	GMessagesSessionPath           string
+	TestMode                       bool
+	RateLimitsEnabled              bool
+	RetentionEnabled               bool
+	SMSRawRetention                time.Duration
+	EmailRawRetention              time.Duration
+	ReconciliationRawRetention     time.Duration
+	AuditRetention                 time.Duration
+	BackupCron                     string
+	BackupMaxKeep                  int
+	BackupS3Enabled                bool
+	BackupS3Bucket                 string
+	BackupS3Region                 string
+	BackupS3Endpoint               string
+	BackupS3AccessKey              string
+	BackupS3Secret                 string
+	BackupS3ForcePathStyle         bool
+	OperatorAlertWebhookURL        string
+	OperatorAlertWebhookSecret     string
+	StatementTimezone              string
+	RazorpayTestEnabled            bool
+	RazorpayTestKeyID              string
+	RazorpayTestKeySecret          string
+	RazorpayTestWebhookSecret      string
+	RazorpayTestDisplayName        string
+	RazorpayLiveEnabled            bool
+	RazorpayLiveKeyID              string
+	RazorpayLiveKeySecret          string
+	RazorpayLiveWebhookSecret      string
+	RazorpayLiveDisplayName        string
 }
 
 type PaymentAccount struct {
@@ -75,6 +79,8 @@ type PaymentAccount struct {
 	UPIID        string `json:"-"`
 	PayeeName    string `json:"-"`
 	Verification string `json:"verification"`
+	Flow         string `json:"flow"`
+	QRPayload    string `json:"-"`
 }
 
 func Load() (Config, error) {
@@ -163,57 +169,61 @@ func Load() (Config, error) {
 	kotakUPIID := strings.TrimSpace(firstNonEmpty(os.Getenv("KOTAK_UPI_ID"), os.Getenv("UPI_ID")))
 	kotakPayeeName := strings.TrimSpace(firstNonEmpty(os.Getenv("KOTAK_UPI_PAYEE_NAME"), os.Getenv("UPI_PAYEE_NAME"), os.Getenv("UPI_NAME"), "PayGate"))
 	cfg := Config{
-		DataDir:                    dataDir,
-		DefaultPaymentAccount:      strings.ToLower(strings.TrimSpace(env("PAYMENT_DEFAULT_ACCOUNT", "kotak"))),
-		KotakUPIID:                 kotakUPIID,
-		KotakUPIPayeeName:          kotakPayeeName,
-		SliceUPIID:                 strings.TrimSpace(os.Getenv("SLICE_UPI_ID")),
-		SliceUPIPayeeName:          strings.TrimSpace(firstNonEmpty(os.Getenv("SLICE_UPI_PAYEE_NAME"), os.Getenv("UPI_PAYEE_NAME"), os.Getenv("UPI_NAME"), "PayGate")),
-		UPIID:                      kotakUPIID,
-		UPIPayeeName:               kotakPayeeName,
-		APIKey:                     strings.TrimSpace(os.Getenv("PAYGATE_API_KEY")),
-		SMSWebhookSecret:           strings.TrimSpace(os.Getenv("SMS_WEBHOOK_SECRET")),
-		EmailEvidenceEnabled:       emailEvidenceEnabled,
-		EmailWebhookSecret:         strings.TrimSpace(os.Getenv("PAYMENT_EMAIL_WEBHOOK_SECRET")),
-		EmailAllowedSender:         strings.ToLower(strings.TrimSpace(env("PAYMENT_EMAIL_ALLOWED_SENDER", "noreply@slice.bank.in"))),
-		EmailAuthServID:            strings.ToLower(strings.TrimSpace(env("PAYMENT_EMAIL_AUTH_SERV_ID", "mx.cloudflare.net"))),
-		EmailSignatureTolerance:    emailSignatureTolerance,
-		LegacySMSWebhookSecret:     strings.TrimSpace(os.Getenv("WEBHOOK_SECRET")),
-		LegacySMSWebhookEnabled:    legacyEnabled,
-		PaymentTTL:                 paymentTTL,
-		AmountQuarantine:           quarantine,
-		OutgoingWebhookURL:         strings.TrimSpace(firstNonEmpty(os.Getenv("OUTGOING_WEBHOOK_URL"), os.Getenv("PAYMENT_WEBHOOK_URL"))),
-		OutgoingWebhookSecret:      strings.TrimSpace(firstNonEmpty(os.Getenv("OUTGOING_WEBHOOK_SECRET"), os.Getenv("PAYMENT_WEBHOOK_SECRET"))),
-		GMessagesEnabled:           gmessagesEnabled,
-		TestMode:                   testMode,
-		RateLimitsEnabled:          rateLimitsEnabled,
-		RetentionEnabled:           retentionEnabled,
-		SMSRawRetention:            smsRawRetention,
-		EmailRawRetention:          emailRawRetention,
-		ReconciliationRawRetention: reconciliationRetention,
-		AuditRetention:             auditRetention,
-		BackupCron:                 strings.TrimSpace(env("PAYGATE_BACKUP_CRON", "0 3 * * *")),
-		BackupMaxKeep:              backupMaxKeep,
-		BackupS3Enabled:            backupS3Enabled,
-		BackupS3Bucket:             strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_BUCKET")),
-		BackupS3Region:             strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_REGION")),
-		BackupS3Endpoint:           strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_ENDPOINT")),
-		BackupS3AccessKey:          strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_ACCESS_KEY")),
-		BackupS3Secret:             strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_SECRET")),
-		BackupS3ForcePathStyle:     backupS3ForcePathStyle,
-		OperatorAlertWebhookURL:    strings.TrimSpace(os.Getenv("OPERATOR_ALERT_WEBHOOK_URL")),
-		OperatorAlertWebhookSecret: strings.TrimSpace(os.Getenv("OPERATOR_ALERT_WEBHOOK_SECRET")),
-		StatementTimezone:          strings.TrimSpace(env("STATEMENT_TIMEZONE", "Asia/Kolkata")),
-		RazorpayTestEnabled:        razorpayTestEnabled,
-		RazorpayTestKeyID:          strings.TrimSpace(os.Getenv("RAZORPAY_TEST_KEY_ID")),
-		RazorpayTestKeySecret:      strings.TrimSpace(os.Getenv("RAZORPAY_TEST_KEY_SECRET")),
-		RazorpayTestWebhookSecret:  strings.TrimSpace(os.Getenv("RAZORPAY_TEST_WEBHOOK_SECRET")),
-		RazorpayTestDisplayName:    strings.TrimSpace(env("RAZORPAY_TEST_DISPLAY_NAME", "PayGate Razorpay Test")),
-		RazorpayLiveEnabled:        razorpayLiveEnabled,
-		RazorpayLiveKeyID:          strings.TrimSpace(os.Getenv("RAZORPAY_LIVE_KEY_ID")),
-		RazorpayLiveKeySecret:      strings.TrimSpace(os.Getenv("RAZORPAY_LIVE_KEY_SECRET")),
-		RazorpayLiveWebhookSecret:  strings.TrimSpace(os.Getenv("RAZORPAY_LIVE_WEBHOOK_SECRET")),
-		RazorpayLiveDisplayName:    strings.TrimSpace(env("RAZORPAY_LIVE_DISPLAY_NAME", "IEEE Sahrdaya Razorpay Live")),
+		DataDir:                        dataDir,
+		DefaultPaymentAccount:          strings.ToLower(strings.TrimSpace(env("PAYMENT_DEFAULT_ACCOUNT", "kotak"))),
+		KotakUPIID:                     kotakUPIID,
+		KotakUPIPayeeName:              kotakPayeeName,
+		SliceUPIID:                     strings.TrimSpace(os.Getenv("SLICE_UPI_ID")),
+		SliceUPIPayeeName:              strings.TrimSpace(firstNonEmpty(os.Getenv("SLICE_UPI_PAYEE_NAME"), os.Getenv("UPI_PAYEE_NAME"), os.Getenv("UPI_NAME"), "PayGate")),
+		PaytmQRPayload:                 strings.TrimSpace(os.Getenv("PAYTM_QR_PAYLOAD")),
+		PaytmPayeeName:                 strings.TrimSpace(firstNonEmpty(os.Getenv("PAYTM_PAYEE_NAME"), "Paytm for Business")),
+		PaytmNotificationWebhookSecret: strings.TrimSpace(os.Getenv("PAYTM_NOTIFICATION_WEBHOOK_SECRET")),
+		AndroidRelayPairingSecret:      strings.TrimSpace(os.Getenv("ANDROID_RELAY_PAIRING_SECRET")),
+		UPIID:                          kotakUPIID,
+		UPIPayeeName:                   kotakPayeeName,
+		APIKey:                         strings.TrimSpace(os.Getenv("PAYGATE_API_KEY")),
+		SMSWebhookSecret:               strings.TrimSpace(os.Getenv("SMS_WEBHOOK_SECRET")),
+		EmailEvidenceEnabled:           emailEvidenceEnabled,
+		EmailWebhookSecret:             strings.TrimSpace(os.Getenv("PAYMENT_EMAIL_WEBHOOK_SECRET")),
+		EmailAllowedSender:             strings.ToLower(strings.TrimSpace(env("PAYMENT_EMAIL_ALLOWED_SENDER", "noreply@slice.bank.in"))),
+		EmailAuthServID:                strings.ToLower(strings.TrimSpace(env("PAYMENT_EMAIL_AUTH_SERV_ID", "mx.cloudflare.net"))),
+		EmailSignatureTolerance:        emailSignatureTolerance,
+		LegacySMSWebhookSecret:         strings.TrimSpace(os.Getenv("WEBHOOK_SECRET")),
+		LegacySMSWebhookEnabled:        legacyEnabled,
+		PaymentTTL:                     paymentTTL,
+		AmountQuarantine:               quarantine,
+		OutgoingWebhookURL:             strings.TrimSpace(firstNonEmpty(os.Getenv("OUTGOING_WEBHOOK_URL"), os.Getenv("PAYMENT_WEBHOOK_URL"))),
+		OutgoingWebhookSecret:          strings.TrimSpace(firstNonEmpty(os.Getenv("OUTGOING_WEBHOOK_SECRET"), os.Getenv("PAYMENT_WEBHOOK_SECRET"))),
+		GMessagesEnabled:               gmessagesEnabled,
+		TestMode:                       testMode,
+		RateLimitsEnabled:              rateLimitsEnabled,
+		RetentionEnabled:               retentionEnabled,
+		SMSRawRetention:                smsRawRetention,
+		EmailRawRetention:              emailRawRetention,
+		ReconciliationRawRetention:     reconciliationRetention,
+		AuditRetention:                 auditRetention,
+		BackupCron:                     strings.TrimSpace(env("PAYGATE_BACKUP_CRON", "0 3 * * *")),
+		BackupMaxKeep:                  backupMaxKeep,
+		BackupS3Enabled:                backupS3Enabled,
+		BackupS3Bucket:                 strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_BUCKET")),
+		BackupS3Region:                 strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_REGION")),
+		BackupS3Endpoint:               strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_ENDPOINT")),
+		BackupS3AccessKey:              strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_ACCESS_KEY")),
+		BackupS3Secret:                 strings.TrimSpace(os.Getenv("PAYGATE_BACKUP_S3_SECRET")),
+		BackupS3ForcePathStyle:         backupS3ForcePathStyle,
+		OperatorAlertWebhookURL:        strings.TrimSpace(os.Getenv("OPERATOR_ALERT_WEBHOOK_URL")),
+		OperatorAlertWebhookSecret:     strings.TrimSpace(os.Getenv("OPERATOR_ALERT_WEBHOOK_SECRET")),
+		StatementTimezone:              strings.TrimSpace(env("STATEMENT_TIMEZONE", "Asia/Kolkata")),
+		RazorpayTestEnabled:            razorpayTestEnabled,
+		RazorpayTestKeyID:              strings.TrimSpace(os.Getenv("RAZORPAY_TEST_KEY_ID")),
+		RazorpayTestKeySecret:          strings.TrimSpace(os.Getenv("RAZORPAY_TEST_KEY_SECRET")),
+		RazorpayTestWebhookSecret:      strings.TrimSpace(os.Getenv("RAZORPAY_TEST_WEBHOOK_SECRET")),
+		RazorpayTestDisplayName:        strings.TrimSpace(env("RAZORPAY_TEST_DISPLAY_NAME", "PayGate Razorpay Test")),
+		RazorpayLiveEnabled:            razorpayLiveEnabled,
+		RazorpayLiveKeyID:              strings.TrimSpace(os.Getenv("RAZORPAY_LIVE_KEY_ID")),
+		RazorpayLiveKeySecret:          strings.TrimSpace(os.Getenv("RAZORPAY_LIVE_KEY_SECRET")),
+		RazorpayLiveWebhookSecret:      strings.TrimSpace(os.Getenv("RAZORPAY_LIVE_WEBHOOK_SECRET")),
+		RazorpayLiveDisplayName:        strings.TrimSpace(env("RAZORPAY_LIVE_DISPLAY_NAME", "IEEE Sahrdaya Razorpay Live")),
 	}
 	cfg.GMessagesSessionPath = strings.TrimSpace(os.Getenv("GMESSAGES_SESSION_PATH"))
 	if cfg.GMessagesSessionPath == "" {
@@ -248,11 +258,20 @@ func (c Config) ValidateServe() error {
 			return fmt.Errorf("SMS_WEBHOOK_SECRET must be at least %d characters", minPrimarySecretLength)
 		}
 	}
-	if defaultPaymentAccount != "kotak" && defaultPaymentAccount != "slice" {
-		return errors.New("PAYMENT_DEFAULT_ACCOUNT must be kotak or slice")
+	if defaultPaymentAccount != "kotak" && defaultPaymentAccount != "slice" && defaultPaymentAccount != "paytm" {
+		return errors.New("PAYMENT_DEFAULT_ACCOUNT must be kotak, slice, or paytm")
+	}
+	if strings.TrimSpace(c.PaytmNotificationWebhookSecret) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
+		return fmt.Errorf("PAYTM_NOTIFICATION_WEBHOOK_SECRET must be at least %d characters when configured", minPrimarySecretLength)
+	}
+	if strings.TrimSpace(c.AndroidRelayPairingSecret) != "" && len(c.AndroidRelayPairingSecret) < minPrimarySecretLength {
+		return fmt.Errorf("ANDROID_RELAY_PAIRING_SECRET must be at least %d characters when configured", minPrimarySecretLength)
+	}
+	if strings.TrimSpace(c.PaytmQRPayload) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
+		return errors.New("PAYTM_NOTIFICATION_WEBHOOK_SECRET is required when PAYTM_QR_PAYLOAD is configured")
 	}
 	if _, ok := c.PaymentAccount(defaultPaymentAccount); !ok && !c.TestMode {
-		return fmt.Errorf("%s UPI ID is required for PAYMENT_DEFAULT_ACCOUNT", strings.ToUpper(defaultPaymentAccount))
+		return fmt.Errorf("%s payment account configuration is required for PAYMENT_DEFAULT_ACCOUNT", strings.ToUpper(defaultPaymentAccount))
 	}
 	if c.EmailEvidenceEnabled && strings.TrimSpace(c.SliceUPIID) == "" {
 		return errors.New("SLICE_UPI_ID is required when PAYMENT_EMAIL_ENABLED=true")
@@ -364,20 +383,25 @@ func (c Config) PaymentAccount(id string) (PaymentAccount, bool) {
 		if upiID == "" && !c.TestMode {
 			return PaymentAccount{}, false
 		}
-		return PaymentAccount{ID: "kotak", Label: "Kotak", UPIID: upiID, PayeeName: firstNonEmpty(c.KotakUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "sms"}, true
+		return PaymentAccount{ID: "kotak", Label: "Kotak", UPIID: upiID, PayeeName: firstNonEmpty(c.KotakUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "sms", Flow: "upi_intent"}, true
 	case "slice":
 		if strings.TrimSpace(c.SliceUPIID) == "" && !c.TestMode {
 			return PaymentAccount{}, false
 		}
-		return PaymentAccount{ID: "slice", Label: "Slice", UPIID: strings.TrimSpace(c.SliceUPIID), PayeeName: firstNonEmpty(c.SliceUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "email"}, true
+		return PaymentAccount{ID: "slice", Label: "Slice", UPIID: strings.TrimSpace(c.SliceUPIID), PayeeName: firstNonEmpty(c.SliceUPIPayeeName, c.UPIPayeeName, "PayGate"), Verification: "email", Flow: "upi_intent"}, true
+	case "paytm":
+		if (strings.TrimSpace(c.PaytmQRPayload) == "" || strings.TrimSpace(c.PaytmNotificationWebhookSecret) == "") && !c.TestMode {
+			return PaymentAccount{}, false
+		}
+		return PaymentAccount{ID: "paytm", Label: "Paytm", PayeeName: firstNonEmpty(c.PaytmPayeeName, "Paytm for Business"), Verification: "notification", Flow: "merchant_qr", QRPayload: strings.TrimSpace(c.PaytmQRPayload)}, true
 	default:
 		return PaymentAccount{}, false
 	}
 }
 
 func (c Config) PaymentAccounts() []PaymentAccount {
-	accounts := make([]PaymentAccount, 0, 2)
-	for _, id := range []string{"kotak", "slice"} {
+	accounts := make([]PaymentAccount, 0, 3)
+	for _, id := range []string{"kotak", "slice", "paytm"} {
 		if account, ok := c.PaymentAccount(id); ok {
 			accounts = append(accounts, account)
 		}
