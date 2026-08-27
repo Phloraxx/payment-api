@@ -237,8 +237,19 @@ func (s *Service) RetryEvent(eventID string) (Result, error) {
 		}
 		return Result{}, err
 	}
-	if event.GetString("processing_status") != "unmatched" {
-		return Result{}, domain.New("NOTIFICATION_EVENT_NOT_RETRYABLE", "only unmatched notification events can be retried", 409)
+	status := event.GetString("processing_status")
+	if status != "unmatched" && status != "error" {
+		return Result{}, domain.New("NOTIFICATION_EVENT_NOT_RETRYABLE", "only unmatched or failed notification events can be retried", 409)
+	}
+	if event.GetString("matched_payment") != "" {
+		return Result{}, domain.New("NOTIFICATION_EVENT_NOT_RETRYABLE", "matched notification events cannot be retried", 409)
+	}
+	if status == "error" {
+		event.Set("processing_status", "unmatched")
+		event.Set("error", "")
+		if err := s.App.Save(event); err != nil {
+			return Result{}, err
+		}
 	}
 	return s.Ingest(Input{
 		Source: event.GetString("source"), SourceEventID: event.GetString("source_event_id"),

@@ -148,6 +148,45 @@ func TestDelayedMinutePrecisionStillMatchesCheckoutCreatedInsideMinute(t *testin
 	}
 }
 
+func TestRetryPreviouslyFailedNotification(t *testing.T) {
+	service, paymentService, app, now := paytmTestService(t)
+	*now = time.Date(2026, 8, 27, 17, 26, 50, 0, time.UTC)
+	input := Input{
+		Source: "android_relay", SourceEventID: "retry-failed", AppPackage: PaytmBusinessPackage,
+		Body:             "₹1.01 Received from Test User\nReceived on 27 Aug 2026 10:56 PM",
+		NotificationTime: time.Date(2026, 8, 27, 17, 26, 49, 0, time.UTC),
+	}
+	first, err := service.Ingest(input)
+	if err != nil || first.Status != "unmatched" {
+		t.Fatalf("first result = %+v err=%v", first, err)
+	}
+	event, err := app.FindRecordById("notification_events", first.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	event.Set("processing_status", "error")
+	event.Set("error", "temporary account configuration failure")
+	if err := app.Save(event); err != nil {
+		t.Fatal(err)
+	}
+
+	paymentService.Now = func() time.Time { return time.Date(2026, 8, 27, 17, 26, 31, 0, time.UTC) }
+	payment, _, err := paymentService.Create(payments.CreateInput{AmountRupees: 1, PaymentAccount: "paytm"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	paymentService.Now = func() time.Time { return *now }
+	*now = time.Date(2026, 8, 27, 17, 26, 52, 0, time.UTC)
+
+	retried, err := service.RetryEvent(first.EventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Status != "matched" || retried.Action != "marked_paid" || retried.PaymentID != payment.ID {
+		t.Fatalf("retry result = %+v", retried)
+	}
+}
+
 func TestRetryPreviouslyUnmatchedNotification(t *testing.T) {
 	service, paymentService, _, now := paytmTestService(t)
 	*now = time.Date(2026, 8, 27, 17, 26, 50, 0, time.UTC)
