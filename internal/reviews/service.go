@@ -130,15 +130,15 @@ func (s *Service) Resolve(input ResolveInput) (ResolveResult, error) {
 	now := s.now()
 	var result ResolveResult
 	var wake bool
-	err := s.App.RunInTransaction(func(tx core.App) error {
-		caseRecord, err := tx.FindRecordById("review_cases", input.CaseID)
+	err := s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		review, err := uow.Reviews().Get(input.CaseID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return domain.New("REVIEW_CASE_NOT_FOUND", "review case not found", 404)
 			}
 			return err
 		}
-		if caseRecord.GetString("status") != "open" {
+		if review.Status != "open" {
 			return domain.New("REVIEW_CASE_RESOLVED", "review case is already resolved", 409)
 		}
 
@@ -148,46 +148,30 @@ func (s *Service) Resolve(input ResolveInput) (ResolveResult, error) {
 			if input.PaymentID == "" {
 				return domain.New("INVALID_REVIEW_RESOLUTION", "paymentId is required for a manual match", 400)
 			}
-			eventID := caseRecord.GetString("sms_event")
-			emailEventID := caseRecord.GetString("email_event")
-			entryID := caseRecord.GetString("reconciliation_entry")
 			var parsed domain.ParsedSMS
-			var event *core.Record
-			var entry *core.Record
-			var emailEvent *core.Record
-			if eventID != "" {
-				event, err = tx.FindRecordById("sms_events", eventID)
+			var smsEvent *domain.SMSEvent
+			var emailEvent *domain.EmailEvent
+			var entry *domain.ReconciliationEntry
+			switch {
+			case review.SMSEventID != "":
+				smsEvent, err = uow.SMSEvents().Get(review.SMSEventID)
 				if err != nil {
 					return err
 				}
-				parsed = domain.ParsedSMS{
-					Account:     domain.PaymentAccount(event.GetString("payment_account")),
-					AmountPaise: int64(event.GetInt("amount")), RRN: event.GetString("rrn"),
-					UPIId: event.GetString("upi_id"), PayerName: event.GetString("payer_name"),
-					OccurredAt: event.GetDateTime("message_time").Time(),
-				}
-			} else if emailEventID != "" {
-				emailEvent, err = tx.FindRecordById("email_events", emailEventID)
+				parsed = domain.ParsedSMS{Account: smsEvent.Account, AmountPaise: smsEvent.AmountPaise, RRN: smsEvent.RRN, UPIId: smsEvent.UPIID, PayerName: smsEvent.PayerName, OccurredAt: smsEvent.MessageTime}
+			case review.EmailEventID != "":
+				emailEvent, err = uow.EmailEvents().Get(review.EmailEventID)
 				if err != nil {
 					return err
 				}
-				parsed = domain.ParsedSMS{
-					Account:     domain.PaymentAccount(emailEvent.GetString("payment_account")),
-					AmountPaise: int64(emailEvent.GetInt("amount")), RRN: emailEvent.GetString("rrn"),
-					UPIId: emailEvent.GetString("upi_id"), PayerName: emailEvent.GetString("payer_name"),
-					OccurredAt: emailEvent.GetDateTime("message_time").Time(),
-				}
-			} else if entryID != "" {
-				entry, err = tx.FindRecordById("reconciliation_entries", entryID)
+				parsed = domain.ParsedSMS{Account: emailEvent.Account, AmountPaise: emailEvent.AmountPaise, RRN: emailEvent.RRN, UPIId: emailEvent.UPIID, PayerName: emailEvent.PayerName, OccurredAt: emailEvent.MessageTime}
+			case review.ReconciliationEntryID != "":
+				entry, err = uow.ReconciliationEntries().Get(review.ReconciliationEntryID)
 				if err != nil {
 					return err
 				}
-				parsed = domain.ParsedSMS{
-					Account:     domain.PaymentAccountKotak,
-					AmountPaise: int64(entry.GetInt("amount")), RRN: entry.GetString("rrn"),
-					OccurredAt: entry.GetDateTime("transaction_time").Time(),
-				}
-			} else {
+				parsed = domain.ParsedSMS{Account: domain.PaymentAccountKotak, AmountPaise: entry.AmountPaise, RRN: entry.RRN, OccurredAt: entry.TransactionTime}
+			default:
 				return domain.New("REVIEW_HAS_NO_EVIDENCE", "review case has no bank evidence", 409)
 			}
 			reference := normalizeReference(parsed.RRN)
@@ -198,80 +182,65 @@ func (s *Service) Resolve(input ResolveInput) (ResolveResult, error) {
 				return domain.New("BANK_REFERENCE_REQUIRED", "enter the bank RRN/UTR before manually matching this evidence", 400)
 			}
 			parsed.RRN = reference
-			payment, action, queued, err := s.Payments.ManualMatchInApp(tx, input.PaymentID, parsed, now)
+			payment, action, queued, err := s.Payments.ManualMatch(uow, input.PaymentID, parsed, now)
 			if err != nil {
 				return err
 			}
 			wake = wake || queued
-			if event != nil {
-				event.Set("rrn", reference)
-				event.Set("processing_status", "matched")
-				event.Set("matched_payment", payment.Id)
-				event.Set("error", "")
-				if err := tx.Save(event); err != nil {
+			if smsEvent != nil {
+				smsEvent.RRN, smsEvent.ProcessingStatus, smsEvent.MatchedPaymentID, smsEvent.Error = reference, "matched", payment.ID, ""
+				if err := uow.SMSEvents().Save(smsEvent); err != nil {
 					return err
 				}
 			}
 			if emailEvent != nil {
-				emailEvent.Set("rrn", reference)
-				emailEvent.Set("processing_status", "matched")
-				emailEvent.Set("matched_payment", payment.Id)
-				emailEvent.Set("error", "")
-				if err := tx.Save(emailEvent); err != nil {
+				emailEvent.RRN, emailEvent.ProcessingStatus, emailEvent.MatchedPaymentID, emailEvent.Error = reference, "matched", payment.ID, ""
+				if err := uow.EmailEvents().Save(emailEvent); err != nil {
 					return err
 				}
 			}
 			if entry != nil {
-				entry.Set("rrn", reference)
-				entry.Set("status", "matched")
-				entry.Set("payment", payment.Id)
-				entry.Set("notes", "Manually reconciled by operator")
-				if err := tx.Save(entry); err != nil {
+				entry.RRN, entry.Status, entry.PaymentID, entry.Notes = reference, "matched", payment.ID, "Manually reconciled by operator"
+				if err := uow.ReconciliationEntries().Save(entry); err != nil {
 					return err
 				}
 			}
-			caseRecord.Set("payment", payment.Id)
-			result.PaymentID = payment.Id
-			result.Action = action
+			review.PaymentID = payment.ID
+			result.PaymentID, result.Action = payment.ID, action
 		case "dismissed", "duplicate", "not_payment", "corrected":
 			if input.Action == "dismissed" {
-				caseRecord.Set("status", "dismissed")
+				review.Status = "dismissed"
 			}
 			result.Action = input.Action
 		default:
 			return domain.New("INVALID_REVIEW_RESOLUTION", "unsupported review action", 400)
 		}
 
-		if caseRecord.GetString("status") != "dismissed" {
-			caseRecord.Set("status", "resolved")
+		if review.Status != "dismissed" {
+			review.Status = "resolved"
 		}
-		caseRecord.Set("resolution", resolution)
-		caseRecord.Set("resolution_note", input.Note)
-		caseRecord.Set("resolved_by", input.Actor.ID)
-		caseRecord.Set("resolved_at", now)
-		if err := tx.Save(caseRecord); err != nil {
+		review.Resolution = resolution
+		review.ResolutionNote = input.Note
+		review.ResolvedBy = input.Actor.ID
+		review.ResolvedAt = now
+		if err := uow.Reviews().Save(review); err != nil {
 			return err
 		}
 		if s.Audit != nil {
-			if err := s.Audit.RecordInApp(tx, audit.Entry{
+			if err := s.Audit.RecordUoW(uow, audit.Entry{
 				Action: "review." + resolution, Actor: input.Actor,
-				EntityType: "review_case", EntityID: caseRecord.Id,
+				EntityType: "review_case", EntityID: review.ID,
 				Summary: "Operator resolved payment evidence review",
 				Details: map[string]any{
-					"paymentId":             result.PaymentID,
-					"smsEventId":            caseRecord.GetString("sms_event"),
-					"emailEventId":          caseRecord.GetString("email_event"),
-					"reconciliationEntryId": caseRecord.GetString("reconciliation_entry"),
-					"resolution":            resolution,
-					"note":                  input.Note,
-				},
-				OccurredAt: now,
+					"paymentId": result.PaymentID, "smsEventId": review.SMSEventID,
+					"emailEventId": review.EmailEventID, "reconciliationEntryId": review.ReconciliationEntryID,
+					"resolution": resolution, "note": input.Note,
+				}, OccurredAt: now,
 			}); err != nil {
 				return err
 			}
 		}
-		result.CaseID = caseRecord.Id
-		result.Status = caseRecord.GetString("status")
+		result.CaseID, result.Status = review.ID, review.Status
 		return nil
 	})
 	if err != nil {

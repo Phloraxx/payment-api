@@ -9,6 +9,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/androidrelay"
 	"github.com/Phloraxx/payment-api/internal/audit"
 	"github.com/Phloraxx/payment-api/internal/domain"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/pocketbase/core"
 )
 
@@ -129,7 +130,7 @@ func (a *API) setRelayDeviceEnabled(e *core.RequestEvent) error {
 		if auditService == nil {
 			auditService = audit.NewService(e.App)
 		}
-		if auditErr := auditService.RecordInApp(tx, audit.Entry{
+		if auditErr := auditService.RecordUoW(store.NewPocketBaseUnit(tx), audit.Entry{
 			Action: "relay_device.enabled_changed", Actor: a.actor(e), EntityType: "relay_device", EntityID: updated.Id,
 			Summary: "Android relay device enabled state changed", Details: map[string]any{"enabled": *body.Enabled, "deviceName": updated.GetString("name")},
 		}); auditErr != nil {

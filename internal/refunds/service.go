@@ -11,6 +11,7 @@ import (
 
 	"github.com/Phloraxx/payment-api/internal/audit"
 	"github.com/Phloraxx/payment-api/internal/domain"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 )
@@ -124,7 +125,7 @@ func (s *Service) Request(input RequestInput) (*core.Record, bool, error) {
 			return err
 		}
 		if s.Audit != nil {
-			if err := s.Audit.RecordInApp(tx, audit.Entry{
+			if err := s.Audit.RecordUoW(store.NewPocketBaseUnit(tx), audit.Entry{
 				Action: "refund.requested", Actor: input.Actor, EntityType: "refund", EntityID: record.Id,
 				Summary: "Operator recorded a refund request", Details: map[string]any{"paymentId": payment.Id, "amountPaise": input.AmountPaise, "reason": input.Reason}, OccurredAt: now,
 			}); err != nil {
@@ -221,7 +222,7 @@ func (s *Service) Update(input UpdateInput) (*core.Record, error) {
 			return err
 		}
 		if s.Audit != nil {
-			if err := s.Audit.RecordInApp(tx, audit.Entry{
+			if err := s.Audit.RecordUoW(store.NewPocketBaseUnit(tx), audit.Entry{
 				Action: "refund." + input.Status, Actor: input.Actor, EntityType: "refund", EntityID: refund.Id,
 				Summary: "Operator updated a refund lifecycle record", Details: map[string]any{"from": current, "to": input.Status, "reference": input.Reference, "note": input.Note}, OccurredAt: now,
 			}); err != nil {

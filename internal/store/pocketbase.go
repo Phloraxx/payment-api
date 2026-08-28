@@ -18,6 +18,8 @@ type pocketBaseUnit struct{ app core.App }
 type pocketBasePayments struct{ app core.App }
 type pocketBaseSMSEvents struct{ app core.App }
 type pocketBaseEmailEvents struct{ app core.App }
+type pocketBaseReconciliationEntries struct{ app core.App }
+type pocketBaseAudit struct{ app core.App }
 type pocketBaseNotificationEvents struct{ app core.App }
 type pocketBaseReviews struct{ app core.App }
 type pocketBaseRelay struct{ app core.App }
@@ -42,6 +44,10 @@ func (u *pocketBaseUnit) SMSEvents() SMSEventRepository { return &pocketBaseSMSE
 func (u *pocketBaseUnit) EmailEvents() EmailEventRepository {
 	return &pocketBaseEmailEvents{app: u.app}
 }
+func (u *pocketBaseUnit) ReconciliationEntries() ReconciliationEntryRepository {
+	return &pocketBaseReconciliationEntries{app: u.app}
+}
+func (u *pocketBaseUnit) Audit() AuditRepository { return &pocketBaseAudit{app: u.app} }
 func (u *pocketBaseUnit) NotificationEvents() NotificationEventRepository {
 	return &pocketBaseNotificationEvents{app: u.app}
 }
@@ -239,6 +245,14 @@ func paymentFromRecord(record *core.Record) *domain.Payment {
 	}
 }
 
+func (r *pocketBaseSMSEvents) Get(id string) (*domain.SMSEvent, error) {
+	record, err := r.app.FindRecordById("sms_events", id)
+	if err != nil {
+		return nil, err
+	}
+	return smsEventFromRecord(record), nil
+}
+
 func (r *pocketBaseSMSEvents) FindBySourceEvent(source, sourceEventID string) (*domain.SMSEvent, error) {
 	record, err := r.app.FindFirstRecordByFilter("sms_events", "source = {:source} && source_event_id = {:id}", dbx.Params{"source": source, "id": sourceEventID})
 	if err != nil {
@@ -294,6 +308,14 @@ func smsEventFromRecord(record *core.Record) *domain.SMSEvent {
 		return nil
 	}
 	return &domain.SMSEvent{ID: record.Id, Source: record.GetString("source"), SourceEventID: record.GetString("source_event_id"), Sender: record.GetString("sender"), Body: record.GetString("body"), Account: domain.PaymentAccount(record.GetString("payment_account")), MessageTime: record.GetDateTime("message_time").Time(), AmountPaise: int64(record.GetInt("amount")), RRN: record.GetString("rrn"), UPIID: record.GetString("upi_id"), PayerName: record.GetString("payer_name"), ProcessingStatus: record.GetString("processing_status"), MatchedPaymentID: record.GetString("matched_payment"), Error: record.GetString("error"), RawPayload: record.Get("raw_payload")}
+}
+
+func (r *pocketBaseEmailEvents) Get(id string) (*domain.EmailEvent, error) {
+	record, err := r.app.FindRecordById("email_events", id)
+	if err != nil {
+		return nil, err
+	}
+	return emailEventFromRecord(record), nil
 }
 
 func (r *pocketBaseEmailEvents) FindBySourceEvent(source, sourceEventID string) (*domain.EmailEvent, error) {
@@ -356,6 +378,52 @@ func emailEventFromRecord(record *core.Record) *domain.EmailEvent {
 		return nil
 	}
 	return &domain.EmailEvent{ID: record.Id, Source: record.GetString("source"), SourceEventID: record.GetString("source_event_id"), EnvelopeSender: record.GetString("envelope_sender"), Recipient: record.GetString("recipient"), Sender: record.GetString("sender"), Subject: record.GetString("subject"), Body: record.GetString("body"), Account: domain.PaymentAccount(record.GetString("payment_account")), MessageTime: record.GetDateTime("message_time").Time(), ReceivedAt: record.GetDateTime("received_at").Time(), AuthResult: record.GetString("auth_result"), AmountPaise: int64(record.GetInt("amount")), RRN: record.GetString("rrn"), UPIID: record.GetString("upi_id"), PayerName: record.GetString("payer_name"), ProcessingStatus: record.GetString("processing_status"), MatchedPaymentID: record.GetString("matched_payment"), Error: record.GetString("error"), RawPayload: record.Get("raw_payload")}
+}
+
+func (r *pocketBaseReconciliationEntries) Get(id string) (*domain.ReconciliationEntry, error) {
+	record, err := r.app.FindRecordById("reconciliation_entries", id)
+	if err != nil {
+		return nil, err
+	}
+	return reconciliationEntryFromRecord(record), nil
+}
+
+func (r *pocketBaseReconciliationEntries) Save(entry *domain.ReconciliationEntry) error {
+	record, err := r.app.FindRecordById("reconciliation_entries", entry.ID)
+	if err != nil {
+		return err
+	}
+	record.Set("rrn", entry.RRN)
+	record.Set("status", entry.Status)
+	record.Set("payment", entry.PaymentID)
+	record.Set("notes", entry.Notes)
+	return r.app.Save(record)
+}
+
+func reconciliationEntryFromRecord(record *core.Record) *domain.ReconciliationEntry {
+	if record == nil {
+		return nil
+	}
+	return &domain.ReconciliationEntry{ID: record.Id, RunID: record.GetString("run"), RowNumber: record.GetInt("row_number"), TransactionTime: record.GetDateTime("transaction_time").Time(), AmountPaise: int64(record.GetInt("amount")), RRN: record.GetString("rrn"), Description: record.GetString("description"), Status: record.GetString("status"), PaymentID: record.GetString("payment"), Notes: record.GetString("notes"), RawRow: record.Get("raw_row")}
+}
+
+func (r *pocketBaseAudit) Record(event domain.AuditEvent) error {
+	collection, err := r.app.FindCollectionByNameOrId("audit_events")
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	record.Set("action", event.Action)
+	record.Set("actor_id", event.ActorID)
+	record.Set("actor_email", event.ActorEmail)
+	record.Set("entity_type", event.EntityType)
+	record.Set("entity_id", event.EntityID)
+	record.Set("summary", event.Summary)
+	record.Set("occurred_at", event.OccurredAt)
+	if event.Details != nil {
+		record.Set("details", event.Details)
+	}
+	return r.app.Save(record)
 }
 
 func (r *pocketBaseNotificationEvents) FindBySourceEvent(source, sourceEventID string) (*domain.NotificationEvent, error) {

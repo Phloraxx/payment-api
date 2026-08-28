@@ -19,6 +19,8 @@ type UnitOfWork interface {
 	Payments() PaymentRepository
 	SMSEvents() SMSEventRepository
 	EmailEvents() EmailEventRepository
+	ReconciliationEntries() ReconciliationEntryRepository
+	Audit() AuditRepository
 	NotificationEvents() NotificationEventRepository
 	Reviews() ReviewRepository
 	Relay() RelayRepository
@@ -53,15 +55,26 @@ type NewPayment struct {
 }
 
 type SMSEventRepository interface {
+	Get(id string) (*domain.SMSEvent, error)
 	FindBySourceEvent(source, sourceEventID string) (*domain.SMSEvent, error)
 	Create(event *domain.SMSEvent) error
 	Save(event *domain.SMSEvent) error
 }
 
 type EmailEventRepository interface {
+	Get(id string) (*domain.EmailEvent, error)
 	FindBySourceEvent(source, sourceEventID string) (*domain.EmailEvent, error)
 	Create(event *domain.EmailEvent) error
 	Save(event *domain.EmailEvent) error
+}
+
+type ReconciliationEntryRepository interface {
+	Get(id string) (*domain.ReconciliationEntry, error)
+	Save(entry *domain.ReconciliationEntry) error
+}
+
+type AuditRepository interface {
+	Record(event domain.AuditEvent) error
 }
 
 type NotificationEventRepository interface {

@@ -230,7 +230,7 @@ func (s *Service) completeRun(runID string, actor audit.Actor, now time.Time, re
 			return err
 		}
 		if s.Audit != nil {
-			if err := s.Audit.RecordInApp(tx, audit.Entry{
+			if err := s.Audit.RecordUoW(store.NewPocketBaseUnit(tx), audit.Entry{
 				Action: "reconciliation.import", Actor: actor,
 				EntityType: "reconciliation_run", EntityID: runID,
 				Summary: "Imported bank statement for reconciliation", Details: result, OccurredAt: now,
