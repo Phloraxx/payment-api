@@ -104,6 +104,45 @@ func TestPaytmQROnlyCreateResponseEncodesExactAmountWithoutTransactionNote(t *te
 	}
 }
 
+func TestCreateGuardedSkipsReadinessGateForIdempotentReplay(t *testing.T) {
+	service, _, _ := paymentTestService(t)
+	input := CreateInput{AmountRupees: 25, PaymentAccount: "kotak", IdempotencyKey: "guarded-replay"}
+	gateCalls := 0
+	first, replayed, err := service.CreateGuarded(input, func(core.App) error {
+		gateCalls++
+		return nil
+	})
+	if err != nil || replayed || gateCalls != 1 {
+		t.Fatalf("first guarded create = %+v replayed=%v calls=%d err=%v", first, replayed, gateCalls, err)
+	}
+
+	replay, replayed, err := service.CreateGuarded(input, func(core.App) error {
+		t.Fatal("readiness gate must not run for an exact idempotency replay")
+		return errors.New("unreachable")
+	})
+	if err != nil || !replayed || replay.ID != first.ID {
+		t.Fatalf("guarded replay = %+v replayed=%v err=%v", replay, replayed, err)
+	}
+
+	before, err := service.App.CountRecords("payments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, replayed, err = service.CreateGuarded(CreateInput{AmountRupees: 26, IdempotencyKey: "guarded-denied"}, func(core.App) error {
+		return domain.New("PAYMENT_ACCOUNT_UNAVAILABLE", "verification unavailable", 503)
+	})
+	if err == nil || replayed {
+		t.Fatalf("denied guarded create err=%v replayed=%v", err, replayed)
+	}
+	after, err := service.App.CountRecords("payments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("guard failure allocated a payment: before=%d after=%d", before, after)
+	}
+}
+
 func TestCreateAllocatesAllNinetyNineSlotsAndExhausts(t *testing.T) {
 	service, _, _ := paymentTestService(t)
 	seen := make(map[int64]bool)

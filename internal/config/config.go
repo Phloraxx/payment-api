@@ -26,6 +26,8 @@ type Config struct {
 	PaytmPayeeName                 string
 	PaytmNotificationWebhookSecret string
 	AndroidRelayPairingSecret      string
+	AndroidRelayEnrollmentEnabled  bool
+	AndroidRelayStaleAfter         time.Duration
 	UPIID                          string
 	UPIPayeeName                   string
 	APIKey                         string
@@ -50,6 +52,8 @@ type Config struct {
 	EmailRawRetention              time.Duration
 	ReconciliationRawRetention     time.Duration
 	AuditRetention                 time.Duration
+	PaytmNotificationRawRetention  time.Duration
+	RelayRawRetention              time.Duration
 	BackupCron                     string
 	BackupMaxKeep                  int
 	BackupS3Enabled                bool
@@ -117,6 +121,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	androidRelayEnrollmentEnabled, err := boolEnv("ANDROID_RELAY_ENROLLMENT_ENABLED", false)
+	if err != nil {
+		return Config{}, err
+	}
 	emailEvidenceEnabled, err := boolEnv("PAYMENT_EMAIL_ENABLED", false)
 	if err != nil {
 		return Config{}, err
@@ -142,6 +150,18 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	auditRetention, err := durationEnv("AUDIT_RETENTION", 2*365*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	paytmNotificationRawRetention, err := durationEnv("PAYTM_NOTIFICATION_RAW_RETENTION", 30*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	relayRawRetention, err := durationEnv("RELAY_RAW_RETENTION", 30*24*time.Hour)
+	if err != nil {
+		return Config{}, err
+	}
+	androidRelayStaleAfter, err := durationEnv("ANDROID_RELAY_STALE_AFTER", time.Hour)
 	if err != nil {
 		return Config{}, err
 	}
@@ -181,6 +201,8 @@ func Load() (Config, error) {
 		PaytmPayeeName:                 strings.TrimSpace(firstNonEmpty(os.Getenv("PAYTM_PAYEE_NAME"), "Paytm for Business")),
 		PaytmNotificationWebhookSecret: strings.TrimSpace(os.Getenv("PAYTM_NOTIFICATION_WEBHOOK_SECRET")),
 		AndroidRelayPairingSecret:      strings.TrimSpace(os.Getenv("ANDROID_RELAY_PAIRING_SECRET")),
+		AndroidRelayEnrollmentEnabled:  androidRelayEnrollmentEnabled,
+		AndroidRelayStaleAfter:         androidRelayStaleAfter,
 		UPIID:                          kotakUPIID,
 		UPIPayeeName:                   kotakPayeeName,
 		APIKey:                         strings.TrimSpace(os.Getenv("PAYGATE_API_KEY")),
@@ -204,6 +226,8 @@ func Load() (Config, error) {
 		EmailRawRetention:              emailRawRetention,
 		ReconciliationRawRetention:     reconciliationRetention,
 		AuditRetention:                 auditRetention,
+		PaytmNotificationRawRetention:  paytmNotificationRawRetention,
+		RelayRawRetention:              relayRawRetention,
 		BackupCron:                     strings.TrimSpace(env("PAYGATE_BACKUP_CRON", "0 3 * * *")),
 		BackupMaxKeep:                  backupMaxKeep,
 		BackupS3Enabled:                backupS3Enabled,
@@ -266,11 +290,23 @@ func (c Config) ValidateServe() error {
 	if strings.TrimSpace(c.PaytmNotificationWebhookSecret) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
 		return fmt.Errorf("PAYTM_NOTIFICATION_WEBHOOK_SECRET must be at least %d characters when configured", minPrimarySecretLength)
 	}
+	if c.AndroidRelayEnrollmentEnabled && strings.TrimSpace(c.AndroidRelayPairingSecret) == "" {
+		return errors.New("ANDROID_RELAY_PAIRING_SECRET is required when ANDROID_RELAY_ENROLLMENT_ENABLED=true")
+	}
 	if strings.TrimSpace(c.AndroidRelayPairingSecret) != "" && len(c.AndroidRelayPairingSecret) < minPrimarySecretLength {
 		return fmt.Errorf("ANDROID_RELAY_PAIRING_SECRET must be at least %d characters when configured", minPrimarySecretLength)
 	}
-	if strings.TrimSpace(c.PaytmQRPayload) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
-		return errors.New("PAYTM_NOTIFICATION_WEBHOOK_SECRET is required when PAYTM_QR_PAYLOAD is configured")
+	if c.AndroidRelayStaleAfter < 0 {
+		return errors.New("ANDROID_RELAY_STALE_AFTER cannot be negative")
+	}
+	if c.PaytmNotificationRawRetention < 0 {
+		return errors.New("PAYTM_NOTIFICATION_RAW_RETENTION cannot be negative")
+	}
+	if c.RelayRawRetention < 0 {
+		return errors.New("RELAY_RAW_RETENTION cannot be negative")
+	}
+	if strings.TrimSpace(c.PaytmUPIID) == "" && strings.TrimSpace(c.PaytmQRPayload) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
+		return errors.New("PAYTM_NOTIFICATION_WEBHOOK_SECRET is required when legacy PAYTM_QR_PAYLOAD is the active Paytm flow")
 	}
 	if _, ok := c.PaymentAccount(defaultPaymentAccount); !ok && !c.TestMode {
 		return fmt.Errorf("%s payment account configuration is required for PAYMENT_DEFAULT_ACCOUNT", strings.ToUpper(defaultPaymentAccount))

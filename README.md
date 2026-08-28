@@ -11,12 +11,12 @@ PayGate does **not** custody, route or settle funds. The payer pays the configur
 The production deployment is intentionally one small service:
 
 ```text
-Android phone / bank SMS
+Android phone
         │
-        ├── Google Messages → libgm ──┐
-        │                             │
-        └── legacy Android relay ─────┤
-                                      ▼
+        ├── Google Messages → libgm ───────────┐
+        ├── Paytm for Business notification ──┤ signed PayGate Relay
+        └── legacy SMS relay (migration only) ┤
+                                              ▼
                          ┌──────────────────────────┐
                          │       PayGate (Go)       │
                          │                          │
@@ -79,7 +79,7 @@ Content-Type: application/json
 }
 ```
 
-`amount` may also be an integer string such as `"100"`. Fractional requested amounts are rejected. `paymentAccount` is `kotak` or `slice`; omitted requests retain the backward-compatible Kotak default. Use `GET /api/payment-accounts` to discover the enabled choices without exposing either UPI ID.
+`amount` may also be an integer string such as `"100"`. Fractional requested amounts are rejected. `paymentAccount` is `kotak`, `slice`, or `paytm`; omitted requests retain the configured default. Use `GET /api/payment-accounts` to discover configured choices plus their current `ready` state without exposing a UPI ID. Slice fails closed unless signed email evidence is enabled. Paytm exact-amount QR checkout fails closed unless a recently active signed Android relay is available.
 
 Example response:
 
@@ -136,6 +136,12 @@ Content-Type: application/json
 
 `source` must be `android_webhook`, `gmessages` or `manual`. Supplying `sourceId` and the original `timestamp` is strongly recommended for durable deduplication and stale-message protection.
 
+### PayGate Relay Android
+
+`POST /api/relay/v1/events` accepts allowlisted notification evidence signed by a P-256 key generated in Android Keystore. `POST /api/relay/v1/heartbeat` reports notification-access/listener state and queue health with the same device signature. The server stores only the public key and can disable a device immediately from the operator console.
+
+For Paytm `qr_only`, payment creation is fail-closed: an enabled relay device must have recent validated activity. Old active notifications that predate device enrollment are persisted as ignored evidence and cannot settle a payment. Raw relay/Paytm notification text is redacted after the configured retention period while matching metadata remains. See `ANDROID_RELAY.md`.
+
 ### Legacy Android relay
 
 `POST /api/webhook` accepts the old `{ "sms": "..." }` payload only when `LEGACY_SMS_WEBHOOK_ENABLED=true`. It authenticates with the separate legacy `WEBHOOK_SECRET` and always records the source as `android_webhook`.
@@ -179,7 +185,7 @@ Refund endpoints record operator/bank evidence only; they never initiate a bank 
 ### Health
 
 - `GET /api/health` — PocketBase liveness endpoint, used by the container healthcheck.
-- `GET /api/paygate/health` — PayGate readiness, database state and a redacted connector summary.
+- `GET /api/paygate/health` — PayGate database readiness plus redacted connector/relay readiness; phone/relay degradation does not crash or restart the API process.
 
 Unknown `/api/*` paths remain JSON 404 responses; the React SPA fallback never converts API errors into HTML 200 responses.
 
@@ -397,3 +403,6 @@ A future proprietary/commercial distribution needs a separate licensing review r
 - `RAZORPAY_TEST.md` — isolated Razorpay Test Mode setup and verification flow
 - `RESEARCH.md` — technical research and constraints behind the design
 - `IMPLEMENTATION_SPEC.md` — rebuild requirements used during implementation
+
+
+During the v0.2 → v0.3 rollout, an existing **enabled** relay device receives a bounded 48-hour heartbeat grace only if it had validated signed traffic within the preceding 24 hours. Disabled or long-idle devices and new enrollments receive no grace. The first signed heartbeat immediately switches the device to normal permission/listener/staleness readiness checks, and any operator enable/disable state change permanently clears migration grace for that device.

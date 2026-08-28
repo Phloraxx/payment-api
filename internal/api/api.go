@@ -62,6 +62,7 @@ type API struct {
 	Reviews            *reviews.Service
 	Reconciliation     *reconciliation.Service
 	Alerts             *alerts.Service
+	Audit              *audit.Service
 	Refunds            *refunds.Service
 	Backups            *backups.Service
 	RazorpayTest       *razorpaytest.Service
@@ -91,6 +92,10 @@ func (a *API) Register(app core.App) {
 		e.Router.POST("/api/events/paytm-notification/{id}/retry", a.retryPaytmNotification)
 		e.Router.POST("/api/relay/v1/enroll", a.androidRelayEnroll).Bind(apis.BodyLimit(maxAndroidRelayRequestBytes))
 		e.Router.POST("/api/relay/v1/events", a.androidRelayEvent).Bind(apis.BodyLimit(maxAndroidRelayRequestBytes))
+		e.Router.POST("/api/relay/v1/heartbeat", a.androidRelayHeartbeat).Bind(apis.BodyLimit(maxAndroidRelayRequestBytes))
+		e.Router.GET("/api/relay/status", a.relayStatus)
+		e.Router.GET("/api/relay/devices", a.relayDevices)
+		e.Router.POST("/api/relay/devices/{id}/enabled", a.setRelayDeviceEnabled).Bind(apis.BodyLimit(maxReviewRequestBytes))
 		e.Router.POST("/api/events/email", a.ingestEmail).Bind(apis.BodyLimit(maxEmailRequestBytes))
 		e.Router.POST("/api/webhook", a.ingestLegacySMS).Bind(apis.BodyLimit(maxSMSRequestBytes))
 		e.Router.GET("/api/paygate/health", a.health)
@@ -273,12 +278,14 @@ func (a *API) createPayment(e *core.RequestEvent) error {
 		}
 	}
 
-	payment, replayed, err := a.Payments.Create(payments.CreateInput{
+	payment, replayed, err := a.Payments.CreateGuarded(payments.CreateInput{
 		AmountRupees:   amount,
 		PaymentAccount: strings.TrimSpace(body.PaymentAccount),
 		ExternalID:     strings.TrimSpace(body.ExternalID),
 		Metadata:       metadata,
 		IdempotencyKey: strings.TrimSpace(e.Request.Header.Get("Idempotency-Key")),
+	}, func(tx core.App) error {
+		return a.ensurePaymentAccountReadyInApp(tx, body.PaymentAccount)
 	})
 	if err != nil {
 		return writeDomainError(e, err)
@@ -299,10 +306,11 @@ func (a *API) paymentAccounts(e *core.RequestEvent) error {
 	if defaultAccount == "" {
 		defaultAccount = "kotak"
 	}
-	return e.JSON(http.StatusOK, map[string]any{
-		"default":  defaultAccount,
-		"accounts": a.Config.PaymentAccounts(),
-	})
+	accounts, err := a.paymentAccountOptions()
+	if err != nil {
+		return e.InternalServerError("failed to determine payment account readiness", err)
+	}
+	return e.JSON(http.StatusOK, map[string]any{"default": defaultAccount, "accounts": accounts})
 }
 
 func (a *API) getPayment(e *core.RequestEvent) error {
@@ -487,9 +495,25 @@ func (a *API) health(e *core.RequestEvent) error {
 		})
 	}
 
-	return e.JSON(http.StatusOK, map[string]any{
+	payload := map[string]any{
 		"status": "healthy", "ready": true, "db": "ok", "connector": a.publicConnectorStatus(),
-	})
+	}
+	if a.AndroidRelay != nil {
+		relayStatus, err := a.AndroidRelay.Status(a.Config.AndroidRelayStaleAfter)
+		if err != nil {
+			return e.JSON(http.StatusServiceUnavailable, map[string]any{
+				"status": "unhealthy", "ready": false, "db": "error", "connector": a.publicConnectorStatus(),
+			})
+		}
+		payload["relay"] = relayStatus
+		if account, ok := a.Config.PaymentAccount("paytm"); ok && account.Flow == "qr_only" && !relayStatus.Ready {
+			payload["status"] = "degraded"
+			payload["paytmReady"] = false
+		} else if ok {
+			payload["paytmReady"] = true
+		}
+	}
+	return e.JSON(http.StatusOK, payload)
 }
 
 func (a *API) getConfig(e *core.RequestEvent) error {
@@ -500,31 +524,48 @@ func (a *API) getConfig(e *core.RequestEvent) error {
 	if defaultAccount == "" {
 		defaultAccount = "kotak"
 	}
+	accounts, err := a.paymentAccountOptions()
+	if err != nil {
+		return e.InternalServerError("failed to determine payment account readiness", err)
+	}
+	var relayStatus any
+	if a.AndroidRelay != nil {
+		status, statusErr := a.AndroidRelay.Status(a.Config.AndroidRelayStaleAfter)
+		if statusErr != nil {
+			return e.InternalServerError("failed to load relay status", statusErr)
+		}
+		relayStatus = status
+	}
 	return e.JSON(http.StatusOK, map[string]any{
-		"upiId":                             a.Config.UPIID,
-		"upiPayeeName":                      a.Config.UPIPayeeName,
-		"defaultPaymentAccount":             defaultAccount,
-		"paymentAccounts":                   a.Config.PaymentAccounts(),
-		"paymentTtlSeconds":                 int64(a.Config.PaymentTTL / time.Second),
-		"quarantineSeconds":                 int64(a.Config.AmountQuarantine / time.Second),
-		"webhookConfigured":                 a.Config.OutgoingWebhookURL != "",
-		"rateLimitsEnabled":                 a.Config.RateLimitsEnabled,
-		"legacySMSWebhookEnabled":           a.Config.LegacySMSWebhookEnabled,
-		"emailEvidenceEnabled":              a.Config.EmailEvidenceEnabled,
-		"emailAllowedSender":                a.Config.EmailAllowedSender,
-		"retentionEnabled":                  a.Config.RetentionEnabled,
-		"smsRawRetentionSeconds":            int64(a.Config.SMSRawRetention / time.Second),
-		"emailRawRetentionSeconds":          int64(a.Config.EmailRawRetention / time.Second),
-		"reconciliationRawRetentionSeconds": int64(a.Config.ReconciliationRawRetention / time.Second),
-		"auditRetentionSeconds":             int64(a.Config.AuditRetention / time.Second),
-		"backupEnabled":                     a.Config.BackupCron != "",
-		"backupCron":                        a.Config.BackupCron,
-		"backupMaxKeep":                     a.Config.BackupMaxKeep,
-		"backupOffsite":                     a.Config.BackupS3Enabled,
-		"operatorAlertWebhookConfigured":    a.Config.OperatorAlertWebhookURL != "",
-		"statementTimezone":                 a.Config.StatementTimezone,
-		"razorpayTestEnabled":               a.Config.RazorpayTestEnabled,
-		"connector":                         a.connectorStatus(),
+		"upiId":                                a.Config.UPIID,
+		"upiPayeeName":                         a.Config.UPIPayeeName,
+		"defaultPaymentAccount":                defaultAccount,
+		"paymentAccounts":                      accounts,
+		"relay":                                relayStatus,
+		"androidRelayEnrollmentEnabled":        a.Config.AndroidRelayEnrollmentEnabled,
+		"androidRelayStaleAfterSeconds":        int64(a.Config.AndroidRelayStaleAfter / time.Second),
+		"paymentTtlSeconds":                    int64(a.Config.PaymentTTL / time.Second),
+		"quarantineSeconds":                    int64(a.Config.AmountQuarantine / time.Second),
+		"webhookConfigured":                    a.Config.OutgoingWebhookURL != "",
+		"rateLimitsEnabled":                    a.Config.RateLimitsEnabled,
+		"legacySMSWebhookEnabled":              a.Config.LegacySMSWebhookEnabled,
+		"emailEvidenceEnabled":                 a.Config.EmailEvidenceEnabled,
+		"emailAllowedSender":                   a.Config.EmailAllowedSender,
+		"retentionEnabled":                     a.Config.RetentionEnabled,
+		"smsRawRetentionSeconds":               int64(a.Config.SMSRawRetention / time.Second),
+		"emailRawRetentionSeconds":             int64(a.Config.EmailRawRetention / time.Second),
+		"reconciliationRawRetentionSeconds":    int64(a.Config.ReconciliationRawRetention / time.Second),
+		"auditRetentionSeconds":                int64(a.Config.AuditRetention / time.Second),
+		"paytmNotificationRawRetentionSeconds": int64(a.Config.PaytmNotificationRawRetention / time.Second),
+		"relayRawRetentionSeconds":             int64(a.Config.RelayRawRetention / time.Second),
+		"backupEnabled":                        a.Config.BackupCron != "",
+		"backupCron":                           a.Config.BackupCron,
+		"backupMaxKeep":                        a.Config.BackupMaxKeep,
+		"backupOffsite":                        a.Config.BackupS3Enabled,
+		"operatorAlertWebhookConfigured":       a.Config.OperatorAlertWebhookURL != "",
+		"statementTimezone":                    a.Config.StatementTimezone,
+		"razorpayTestEnabled":                  a.Config.RazorpayTestEnabled,
+		"connector":                            a.connectorStatus(),
 	})
 }
 
@@ -537,6 +578,13 @@ func (a *API) dashboard(e *core.RequestEvent) error {
 		return e.InternalServerError("failed to load dashboard", err)
 	}
 	payload := map[string]any{"stats": stats, "connector": a.connectorStatus()}
+	if a.AndroidRelay != nil {
+		relayStatus, err := a.AndroidRelay.Status(a.Config.AndroidRelayStaleAfter)
+		if err != nil {
+			return e.InternalServerError("failed to load relay status", err)
+		}
+		payload["relay"] = relayStatus
+	}
 	if a.Payments != nil {
 		capacity, err := a.Payments.Capacity()
 		if err != nil {

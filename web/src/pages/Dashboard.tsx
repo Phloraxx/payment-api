@@ -34,6 +34,7 @@ export function Dashboard() {
   const connector = data?.connector;
   const capacityPools = data?.capacity?.pools?.slice(0, 8) ?? [];
   const backup = data?.backup;
+  const relay = data?.relay;
   return <>
     {error && <p className="error banner">{error}</p>}
     <div className="grid six">
@@ -52,6 +53,14 @@ export function Dashboard() {
           <p className="muted">{connector?.lastError || (connector?.phoneResponsive ? `Phone responding · last bank SMS ${formatDate(connector.lastMessageAt)}` : "Waiting for phone response")}</p>
         </div>
         <Badge status={connector?.connected ? "connected" : connector?.state ?? "disabled"} />
+      </section>
+      <section className="card split">
+        <div>
+          <p className="eyebrow">ANDROID RELAY</p>
+          <h2>{relay?.ready ? "ready" : "unavailable"}</h2>
+          <p className="muted">{relay ? `${relay.activeDevices}/${relay.enabledDevices} active · last heartbeat ${formatDate(relay.lastHeartbeatAt ?? undefined)} · queue ${relay.pendingQueueCount} pending / ${relay.failedQueueCount} failed · ${relay.recentErrorCount} server errors/24h` : "Relay status unavailable"}</p>
+        </div>
+        <Badge status={relay?.ready ? "connected" : "warning"} />
       </section>
       <section className="card split">
         <div>

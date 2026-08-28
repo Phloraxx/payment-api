@@ -103,6 +103,7 @@ func main() {
 	apiService.Reviews = reviewService
 	apiService.Reconciliation = reconciliationService
 	apiService.Alerts = alertService
+	apiService.Audit = auditService
 	apiService.Refunds = refundService
 	apiService.Backups = backupService
 	apiService.RazorpayTest = razorpayTestService
@@ -162,6 +163,19 @@ func main() {
 		if err := alertService.CheckWebhookExhaustion(); err != nil {
 			stdLogger.Error("webhook exhaustion alert check failed", "error", err)
 		}
+		if account, ok := cfg.PaymentAccount("paytm"); ok && account.Flow == "qr_only" {
+			relayStatus, relayErr := androidRelayService.Status(cfg.AndroidRelayStaleAfter)
+			if relayErr != nil {
+				stdLogger.Error("relay health check failed", "error", relayErr)
+			} else if !relayStatus.Ready {
+				_, _, _ = alertService.Open(alerts.Input{
+					Kind: "relay_unavailable", Severity: "warning", DedupeKey: "relay:paytm",
+					Message: "Paytm verification relay is unavailable; new Paytm checkouts are blocked.", Details: relayStatus,
+				})
+			} else {
+				_ = alertService.Resolve("relay:paytm")
+			}
+		}
 	})
 	app.Cron().MustAdd("paygate-retention", "17 2 * * *", func() {
 		result, err := retentionService.Run()
@@ -169,8 +183,15 @@ func main() {
 			stdLogger.Error("retention job failed", "error", err)
 			return
 		}
-		if result.SMSEventsRedacted+result.EmailEventsRedacted+result.ReconciliationEntriesRedacted+result.AuditEventsDeleted > 0 {
-			stdLogger.Info("retention job completed", "smsRedacted", result.SMSEventsRedacted, "emailRedacted", result.EmailEventsRedacted, "reconciliationRedacted", result.ReconciliationEntriesRedacted, "auditDeleted", result.AuditEventsDeleted)
+		if result.SMSEventsRedacted+result.EmailEventsRedacted+result.PaytmNotificationsRedacted+result.RelayEventsRedacted+result.ReconciliationEntriesRedacted+result.AuditEventsDeleted > 0 {
+			stdLogger.Info("retention job completed",
+				"smsRedacted", result.SMSEventsRedacted,
+				"emailRedacted", result.EmailEventsRedacted,
+				"paytmNotificationsRedacted", result.PaytmNotificationsRedacted,
+				"relayEventsRedacted", result.RelayEventsRedacted,
+				"reconciliationRedacted", result.ReconciliationEntriesRedacted,
+				"auditDeleted", result.AuditEventsDeleted,
+			)
 		}
 	})
 	app.Cron().MustAdd("paygate-backup-verify", "23 4 * * *", func() {
@@ -238,6 +259,7 @@ func mergeManagedRateLimitRules(existing []core.RateLimitRule) []core.RateLimitR
 		{Label: "POST /api/events/paytm-notification", MaxRequests: 60, Duration: 60},
 		{Label: "POST /api/relay/v1/enroll", MaxRequests: 10, Duration: 60},
 		{Label: "POST /api/relay/v1/events", MaxRequests: 180, Duration: 60},
+		{Label: "POST /api/relay/v1/heartbeat", MaxRequests: 60, Duration: 60},
 		{Label: "POST /api/events/email", MaxRequests: 60, Duration: 60},
 		{Label: "POST /api/webhook", MaxRequests: 30, Duration: 60},
 		{Label: "POST /api/payments", MaxRequests: 120, Duration: 60},
