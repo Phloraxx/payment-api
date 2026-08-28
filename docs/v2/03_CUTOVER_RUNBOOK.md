@@ -25,7 +25,7 @@ All of the following must be true before merging/deploying:
 
 ## Environment normalization
 
-Before Phase A, normalize names in the deployment source of truth without printing or rotating existing values:
+The current production environment passes a non-printing v2 `Load()` + `ValidateServe()` dry-run unchanged. Do **not** normalize names before the first compatibility deployment; minimizing simultaneous changes is safer. After Phase A is healthy and before Phase B, normalize names in the deployment source of truth without printing or rotating existing values:
 - copy `UPI_ID` to `KOTAK_UPI_ID`, then retire `UPI_ID`;
 - copy `UPI_PAYEE_NAME` to `KOTAK_UPI_PAYEE_NAME`, then retire `UPI_PAYEE_NAME`;
 - retain `PAYMENT_TTL` and retire the older `TICKET_TTL_MINUTES` fallback;
@@ -34,7 +34,7 @@ Before Phase A, normalize names in the deployment source of truth without printi
 - retain active PayGate API, SMS/email evidence, Android relay, outgoing webhook, Slice, Paytm, Google Messages, persistence, payment TTL/quarantine, and rate-limit settings;
 - leave orchestrator-level `HOST`/`PORT` unchanged for the first cutover even though the PayGate binary does not consume them directly.
 
-A non-printing config dry-run must pass after normalization. `PAYGATE_CHECKOUT_ORIGINS` stays unset in Phase A. In Phase B set it only to `https://payment.mulearnscet.in,https://pay.ieeesahrdaya.com`.
+A non-printing config dry-run must pass again after normalization. `PAYGATE_CHECKOUT_ORIGINS` stays unset in Phase A. In Phase B set it only to `https://payment.mulearnscet.in,https://pay.ieeesahrdaya.com`.
 
 ## Phase A — API compatibility deployment
 
