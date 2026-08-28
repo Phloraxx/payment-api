@@ -18,6 +18,7 @@ type pocketBaseUnit struct{ app core.App }
 type pocketBasePayments struct{ app core.App }
 type pocketBaseSMSEvents struct{ app core.App }
 type pocketBaseEmailEvents struct{ app core.App }
+type pocketBaseReconciliationRuns struct{ app core.App }
 type pocketBaseReconciliationEntries struct{ app core.App }
 type pocketBaseAudit struct{ app core.App }
 type pocketBaseRefunds struct{ app core.App }
@@ -44,6 +45,9 @@ func (u *pocketBaseUnit) Payments() PaymentRepository   { return &pocketBasePaym
 func (u *pocketBaseUnit) SMSEvents() SMSEventRepository { return &pocketBaseSMSEvents{app: u.app} }
 func (u *pocketBaseUnit) EmailEvents() EmailEventRepository {
 	return &pocketBaseEmailEvents{app: u.app}
+}
+func (u *pocketBaseUnit) ReconciliationRuns() ReconciliationRunRepository {
+	return &pocketBaseReconciliationRuns{app: u.app}
 }
 func (u *pocketBaseUnit) ReconciliationEntries() ReconciliationEntryRepository {
 	return &pocketBaseReconciliationEntries{app: u.app}
@@ -193,6 +197,26 @@ func (r *pocketBasePayments) ListDue(now time.Time, limit int) ([]*domain.Paymen
 
 func (r *pocketBasePayments) ListAll() ([]*domain.Payment, error) {
 	records, err := r.app.FindAllRecords("payments")
+	if err != nil {
+		return nil, err
+	}
+	return paymentsFromRecords(records), nil
+}
+
+func (r *pocketBasePayments) FindReconciliationCandidates(account domain.PaymentAccount, amount int64, transactionTime, now time.Time, limit int) ([]*domain.Payment, error) {
+	if amount <= 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	var records []*core.Record
+	var err error
+	if !transactionTime.IsZero() {
+		records, err = r.app.FindRecordsByFilter("payments", "payment_account = {:account} && payable_amount = {:amount} && created_at <= {:createdBefore} && reuse_after >= {:at}", "-created_at", limit, 0, dbx.Params{"account": string(account), "amount": amount, "at": storeDate(transactionTime), "createdBefore": storeDate(transactionTime.Add(2 * time.Second))})
+	} else {
+		records, err = r.app.FindRecordsByFilter("payments", "payment_account = {:account} && payable_amount = {:amount} && reuse_after > {:now}", "-created_at", limit, 0, dbx.Params{"account": string(account), "amount": amount, "now": storeDate(now)})
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -380,6 +404,96 @@ func emailEventFromRecord(record *core.Record) *domain.EmailEvent {
 		return nil
 	}
 	return &domain.EmailEvent{ID: record.Id, Source: record.GetString("source"), SourceEventID: record.GetString("source_event_id"), EnvelopeSender: record.GetString("envelope_sender"), Recipient: record.GetString("recipient"), Sender: record.GetString("sender"), Subject: record.GetString("subject"), Body: record.GetString("body"), Account: domain.PaymentAccount(record.GetString("payment_account")), MessageTime: record.GetDateTime("message_time").Time(), ReceivedAt: record.GetDateTime("received_at").Time(), AuthResult: record.GetString("auth_result"), AmountPaise: int64(record.GetInt("amount")), RRN: record.GetString("rrn"), UPIID: record.GetString("upi_id"), PayerName: record.GetString("payer_name"), ProcessingStatus: record.GetString("processing_status"), MatchedPaymentID: record.GetString("matched_payment"), Error: record.GetString("error"), RawPayload: record.Get("raw_payload")}
+}
+
+func (r *pocketBaseReconciliationRuns) FindCompletedByHash(hash string) (*domain.ReconciliationRun, error) {
+	record, err := r.app.FindFirstRecordByFilter("reconciliation_runs", "sha256 = {:hash} && status = 'completed'", dbx.Params{"hash": hash})
+	if err != nil {
+		return nil, err
+	}
+	return reconciliationRunFromRecord(record), nil
+}
+
+func (r *pocketBaseReconciliationRuns) Get(id string) (*domain.ReconciliationRun, error) {
+	record, err := r.app.FindRecordById("reconciliation_runs", id)
+	if err != nil {
+		return nil, err
+	}
+	return reconciliationRunFromRecord(record), nil
+}
+
+func (r *pocketBaseReconciliationRuns) Create(run *domain.ReconciliationRun) error {
+	collection, err := r.app.FindCollectionByNameOrId("reconciliation_runs")
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	applyReconciliationRunRecord(record, run)
+	if err := r.app.Save(record); err != nil {
+		return err
+	}
+	run.ID = record.Id
+	return nil
+}
+
+func (r *pocketBaseReconciliationRuns) Save(run *domain.ReconciliationRun) error {
+	record, err := r.app.FindRecordById("reconciliation_runs", run.ID)
+	if err != nil {
+		return err
+	}
+	applyReconciliationRunRecord(record, run)
+	return r.app.Save(record)
+}
+
+func applyReconciliationRunRecord(record *core.Record, run *domain.ReconciliationRun) {
+	record.Set("filename", run.Filename)
+	record.Set("sha256", run.SHA256)
+	record.Set("status", run.Status)
+	record.Set("created_by", run.CreatedBy)
+	record.Set("started_at", run.StartedAt)
+	record.Set("completed_at", run.CompletedAt)
+	record.Set("total_rows", run.TotalRows)
+	record.Set("matched_rows", run.MatchedRows)
+	record.Set("unmatched_rows", run.UnmatchedRows)
+	record.Set("duplicate_rows", run.DuplicateRows)
+	record.Set("conflict_rows", run.ConflictRows)
+	record.Set("invalid_rows", run.InvalidRows)
+	record.Set("error", run.Error)
+	if run.Summary != nil {
+		record.Set("summary", run.Summary)
+	}
+}
+
+func reconciliationRunFromRecord(record *core.Record) *domain.ReconciliationRun {
+	if record == nil {
+		return nil
+	}
+	return &domain.ReconciliationRun{ID: record.Id, Filename: record.GetString("filename"), SHA256: record.GetString("sha256"), Status: record.GetString("status"), CreatedBy: record.GetString("created_by"), StartedAt: record.GetDateTime("started_at").Time(), CompletedAt: record.GetDateTime("completed_at").Time(), TotalRows: record.GetInt("total_rows"), MatchedRows: record.GetInt("matched_rows"), UnmatchedRows: record.GetInt("unmatched_rows"), DuplicateRows: record.GetInt("duplicate_rows"), ConflictRows: record.GetInt("conflict_rows"), InvalidRows: record.GetInt("invalid_rows"), Error: record.GetString("error"), Summary: record.Get("summary")}
+}
+
+func (r *pocketBaseReconciliationEntries) Create(entry *domain.ReconciliationEntry) error {
+	collection, err := r.app.FindCollectionByNameOrId("reconciliation_entries")
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	record.Set("run", entry.RunID)
+	record.Set("row_number", entry.RowNumber)
+	record.Set("transaction_time", entry.TransactionTime)
+	record.Set("amount", entry.AmountPaise)
+	record.Set("rrn", entry.RRN)
+	record.Set("description", entry.Description)
+	record.Set("status", entry.Status)
+	record.Set("payment", entry.PaymentID)
+	record.Set("notes", entry.Notes)
+	if entry.RawRow != nil {
+		record.Set("raw_row", entry.RawRow)
+	}
+	if err := r.app.Save(record); err != nil {
+		return err
+	}
+	entry.ID = record.Id
+	return nil
 }
 
 func (r *pocketBaseReconciliationEntries) Get(id string) (*domain.ReconciliationEntry, error) {

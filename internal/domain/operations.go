@@ -41,3 +41,21 @@ type Refund struct {
 	RequestedAt    time.Time
 	CompletedAt    time.Time
 }
+
+type ReconciliationRun struct {
+	ID            string
+	Filename      string
+	SHA256        string
+	Status        string
+	CreatedBy     string
+	StartedAt     time.Time
+	CompletedAt   time.Time
+	TotalRows     int
+	MatchedRows   int
+	UnmatchedRows int
+	DuplicateRows int
+	ConflictRows  int
+	InvalidRows   int
+	Error         string
+	Summary       any
+}

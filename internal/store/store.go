@@ -19,6 +19,7 @@ type UnitOfWork interface {
 	Payments() PaymentRepository
 	SMSEvents() SMSEventRepository
 	EmailEvents() EmailEventRepository
+	ReconciliationRuns() ReconciliationRunRepository
 	ReconciliationEntries() ReconciliationEntryRepository
 	Audit() AuditRepository
 	Refunds() RefundRepository
@@ -41,6 +42,7 @@ type PaymentRepository interface {
 	ListAll() ([]*domain.Payment, error)
 	ListBlocked(now time.Time) ([]*domain.Payment, error)
 	ListFingerprintCandidates(account domain.PaymentAccount, amount int64, now time.Time, limit int) ([]*domain.Payment, error)
+	FindReconciliationCandidates(account domain.PaymentAccount, amount int64, transactionTime, now time.Time, limit int) ([]*domain.Payment, error)
 }
 
 type NewPayment struct {
@@ -69,8 +71,16 @@ type EmailEventRepository interface {
 	Save(event *domain.EmailEvent) error
 }
 
+type ReconciliationRunRepository interface {
+	FindCompletedByHash(hash string) (*domain.ReconciliationRun, error)
+	Get(id string) (*domain.ReconciliationRun, error)
+	Create(run *domain.ReconciliationRun) error
+	Save(run *domain.ReconciliationRun) error
+}
+
 type ReconciliationEntryRepository interface {
 	Get(id string) (*domain.ReconciliationEntry, error)
+	Create(entry *domain.ReconciliationEntry) error
 	Save(entry *domain.ReconciliationEntry) error
 }
 
