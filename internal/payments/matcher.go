@@ -9,7 +9,6 @@ import (
 
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/store"
-	"github.com/pocketbase/pocketbase/core"
 )
 
 // MatchEvidence is the single automatic payment matcher used by every trusted
@@ -96,21 +95,6 @@ func (s *Service) MatchEvidence(uow store.UnitOfWork, evidence domain.Evidence, 
 		return payment, domain.MatchMarkedLate, true, nil
 	}
 	return nil, domain.MatchUnmatched, false, nil
-}
-
-// MatchEvidenceInApp is a compatibility shim for evidence ingestors that still
-// own a PocketBase transaction. The matching algorithm itself no longer sees
-// core.Record or collection fields.
-func (s *Service) MatchEvidenceInApp(tx core.App, evidence domain.Evidence, now time.Time) (*core.Record, domain.MatchOutcome, bool, error) {
-	payment, outcome, queued, err := s.MatchEvidence(store.NewPocketBaseUnit(tx), evidence, now)
-	if err != nil || payment == nil {
-		return nil, outcome, queued, err
-	}
-	record, findErr := tx.FindRecordById("payments", payment.ID)
-	if findErr != nil {
-		return nil, domain.MatchError, queued, findErr
-	}
-	return record, outcome, queued, nil
 }
 
 type evidenceOutcomes struct {

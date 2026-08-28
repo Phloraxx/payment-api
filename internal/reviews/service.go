@@ -1,6 +1,7 @@
 package reviews
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"strings"
@@ -11,12 +12,13 @@ import (
 	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/sms"
-	"github.com/pocketbase/dbx"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/pocketbase/core"
 )
 
 type Service struct {
-	App      core.App
+	App      core.App // transitional adapter for resolve/evidence reads
+	Store    store.Database
 	Payments *payments.Service
 	Audit    *audit.Service
 	Now      func() time.Time
@@ -51,79 +53,66 @@ type ResolveResult struct {
 }
 
 func NewService(app core.App, paymentService *payments.Service, auditService *audit.Service) *Service {
-	return &Service{App: app, Payments: paymentService, Audit: auditService, Now: time.Now}
+	return &Service{App: app, Store: store.NewPocketBase(app), Payments: paymentService, Audit: auditService, Now: time.Now}
 }
 
-func (s *Service) OpenSMSReviewInApp(app core.App, input sms.ReviewInput) (string, error) {
-	return s.OpenInApp(app, OpenInput{
+func (s *Service) OpenSMSReview(uow store.UnitOfWork, input sms.ReviewInput) (string, error) {
+	return s.Open(uow, OpenInput{
 		Kind: input.Kind, Severity: input.Severity, SMSEventID: input.SMSEventID,
 		PaymentID: input.PaymentID, CandidatePaymentIDs: input.CandidatePaymentIDs,
 		Reason: input.Reason, OpenedAt: input.OpenedAt,
 	})
 }
 
-func (s *Service) OpenEmailReviewInApp(app core.App, input paymentemail.ReviewInput) (string, error) {
-	return s.OpenInApp(app, OpenInput{
+func (s *Service) OpenSMSReviewInApp(app core.App, input sms.ReviewInput) (string, error) {
+	return s.OpenSMSReview(store.NewPocketBaseUnit(app), input)
+}
+
+func (s *Service) OpenEmailReview(uow store.UnitOfWork, input paymentemail.ReviewInput) (string, error) {
+	return s.Open(uow, OpenInput{
 		Kind: input.Kind, Severity: input.Severity, EmailEventID: input.EmailEventID,
 		PaymentID: input.PaymentID, CandidatePaymentIDs: input.CandidatePaymentIDs,
 		Reason: input.Reason, OpenedAt: input.OpenedAt,
 	})
 }
 
-func (s *Service) OpenInApp(app core.App, input OpenInput) (string, error) {
+func (s *Service) OpenEmailReviewInApp(app core.App, input paymentemail.ReviewInput) (string, error) {
+	return s.OpenEmailReview(store.NewPocketBaseUnit(app), input)
+}
+
+func (s *Service) Open(uow store.UnitOfWork, input OpenInput) (string, error) {
 	if input.SMSEventID == "" && input.EmailEventID == "" && input.ReconciliationEntryID == "" {
 		return "", errors.New("evidence record is required for review")
 	}
-	if input.EmailEventID != "" {
-		existing, err := app.FindFirstRecordByData("review_cases", "email_event", input.EmailEventID)
-		if err == nil {
-			return existing.Id, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return "", err
-		}
+	repo := uow.Reviews()
+	existing, err := repo.FindByEvidence(input.SMSEventID, input.EmailEventID, input.ReconciliationEntryID)
+	if err == nil {
+		return existing.ID, nil
 	}
-	if input.SMSEventID != "" {
-		existing, err := app.FindFirstRecordByData("review_cases", "sms_event", input.SMSEventID)
-		if err == nil {
-			return existing.Id, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return "", err
-		}
-	}
-	if input.ReconciliationEntryID != "" {
-		existing, err := app.FindFirstRecordByData("review_cases", "reconciliation_entry", input.ReconciliationEntryID)
-		if err == nil {
-			return existing.Id, nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return "", err
-		}
-	}
-	collection, err := app.FindCollectionByNameOrId("review_cases")
-	if err != nil {
+	if !errors.Is(err, sql.ErrNoRows) {
 		return "", err
 	}
-	now := input.OpenedAt.UTC()
-	if now.IsZero() {
-		now = s.now()
+	openedAt := input.OpenedAt.UTC()
+	if openedAt.IsZero() {
+		openedAt = s.now()
 	}
-	record := core.NewRecord(collection)
-	record.Set("kind", input.Kind)
-	record.Set("status", "open")
-	record.Set("severity", input.Severity)
-	record.Set("sms_event", input.SMSEventID)
-	record.Set("email_event", input.EmailEventID)
-	record.Set("reconciliation_entry", input.ReconciliationEntryID)
-	record.Set("payment", input.PaymentID)
-	record.Set("candidate_payment_ids", input.CandidatePaymentIDs)
-	record.Set("reason", truncate(input.Reason, 4096))
-	record.Set("opened_at", now)
-	if err := app.Save(record); err != nil {
+	review := &domain.ReviewCase{
+		Kind: input.Kind, Status: "open", Severity: input.Severity,
+		SMSEventID: input.SMSEventID, EmailEventID: input.EmailEventID,
+		ReconciliationEntryID: input.ReconciliationEntryID, PaymentID: input.PaymentID,
+		CandidatePaymentIDs: append([]string(nil), input.CandidatePaymentIDs...),
+		Reason:              truncate(input.Reason, 4096), OpenedAt: openedAt,
+	}
+	if err := repo.Create(review); err != nil {
 		return "", err
 	}
-	return record.Id, nil
+	return review.ID, nil
+}
+
+// OpenInApp is retained while legacy evidence/reconciliation transactions are
+// migrated to Store.Write. New callers should pass the existing UnitOfWork.
+func (s *Service) OpenInApp(app core.App, input OpenInput) (string, error) {
+	return s.Open(store.NewPocketBaseUnit(app), input)
 }
 
 func (s *Service) Resolve(input ResolveInput) (ResolveResult, error) {
@@ -295,7 +284,13 @@ func (s *Service) Resolve(input ResolveInput) (ResolveResult, error) {
 }
 
 func (s *Service) OpenCount() (int64, error) {
-	return s.App.CountRecords("review_cases", dbx.NewExp("status = 'open'"))
+	var count int64
+	err := s.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		var err error
+		count, err = uow.Reviews().OpenCount()
+		return err
+	})
+	return count, err
 }
 
 func (s *Service) now() time.Time {

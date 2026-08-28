@@ -18,6 +18,7 @@ import (
 
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/paytmnotification"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 )
@@ -306,7 +307,7 @@ func (s *Service) Ingest(device *core.Record, in EventInput, raw any) (EventResu
 			return tx.Save(event)
 		}
 		custom := strings.Join(n.CustomTexts, "\n")
-		downstream, matchQueued, err := s.Paytm.IngestInApp(tx, paytmnotification.Input{
+		downstream, matchQueued, err := s.Paytm.IngestUoW(store.NewPocketBaseUnit(tx), paytmnotification.Input{
 			Source:        "android_relay",
 			SourceEventID: "android:" + device.GetString("device_id") + ":" + in.EventID,
 			AppPackage:    n.PackageName, AppName: n.AppName,

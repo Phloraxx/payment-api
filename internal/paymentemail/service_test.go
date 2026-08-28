@@ -7,8 +7,8 @@ import (
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/store"
 	_ "github.com/Phloraxx/payment-api/migrations"
-	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
 )
 
@@ -16,7 +16,7 @@ type reviewRecorder struct {
 	inputs []ReviewInput
 }
 
-func (r *reviewRecorder) OpenEmailReviewInApp(_ core.App, input ReviewInput) (string, error) {
+func (r *reviewRecorder) OpenEmailReview(_ store.UnitOfWork, input ReviewInput) (string, error) {
 	r.inputs = append(r.inputs, input)
 	return "review-case", nil
 }

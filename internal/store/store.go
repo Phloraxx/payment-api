@@ -17,6 +17,10 @@ type Database interface {
 
 type UnitOfWork interface {
 	Payments() PaymentRepository
+	SMSEvents() SMSEventRepository
+	EmailEvents() EmailEventRepository
+	NotificationEvents() NotificationEventRepository
+	Reviews() ReviewRepository
 	Relay() RelayRepository
 	Outbox() OutboxRepository
 }
@@ -33,6 +37,7 @@ type PaymentRepository interface {
 	ListDue(now time.Time, limit int) ([]*domain.Payment, error)
 	ListAll() ([]*domain.Payment, error)
 	ListBlocked(now time.Time) ([]*domain.Payment, error)
+	ListFingerprintCandidates(account domain.PaymentAccount, amount int64, now time.Time, limit int) ([]*domain.Payment, error)
 }
 
 type NewPayment struct {
@@ -45,6 +50,33 @@ type NewPayment struct {
 	ExternalID     string
 	IdempotencyKey string
 	Metadata       any
+}
+
+type SMSEventRepository interface {
+	FindBySourceEvent(source, sourceEventID string) (*domain.SMSEvent, error)
+	Create(event *domain.SMSEvent) error
+	Save(event *domain.SMSEvent) error
+}
+
+type EmailEventRepository interface {
+	FindBySourceEvent(source, sourceEventID string) (*domain.EmailEvent, error)
+	Create(event *domain.EmailEvent) error
+	Save(event *domain.EmailEvent) error
+}
+
+type NotificationEventRepository interface {
+	FindBySourceEvent(source, sourceEventID string) (*domain.NotificationEvent, error)
+	Get(id string) (*domain.NotificationEvent, error)
+	Create(event *domain.NotificationEvent) error
+	Save(event *domain.NotificationEvent) error
+}
+
+type ReviewRepository interface {
+	FindByEvidence(smsEventID, emailEventID, reconciliationEntryID string) (*domain.ReviewCase, error)
+	Create(review *domain.ReviewCase) error
+	Get(id string) (*domain.ReviewCase, error)
+	Save(review *domain.ReviewCase) error
+	OpenCount() (int64, error)
 }
 
 type RelayRepository interface {

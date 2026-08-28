@@ -16,6 +16,10 @@ import (
 type pocketBaseDatabase struct{ app core.App }
 type pocketBaseUnit struct{ app core.App }
 type pocketBasePayments struct{ app core.App }
+type pocketBaseSMSEvents struct{ app core.App }
+type pocketBaseEmailEvents struct{ app core.App }
+type pocketBaseNotificationEvents struct{ app core.App }
+type pocketBaseReviews struct{ app core.App }
 type pocketBaseRelay struct{ app core.App }
 type pocketBaseOutbox struct{ app core.App }
 
@@ -33,9 +37,17 @@ func (db *pocketBaseDatabase) Write(_ context.Context, fn func(UnitOfWork) error
 	return db.app.RunInTransaction(func(tx core.App) error { return fn(&pocketBaseUnit{app: tx}) })
 }
 
-func (u *pocketBaseUnit) Payments() PaymentRepository { return &pocketBasePayments{app: u.app} }
-func (u *pocketBaseUnit) Relay() RelayRepository      { return &pocketBaseRelay{app: u.app} }
-func (u *pocketBaseUnit) Outbox() OutboxRepository    { return &pocketBaseOutbox{app: u.app} }
+func (u *pocketBaseUnit) Payments() PaymentRepository   { return &pocketBasePayments{app: u.app} }
+func (u *pocketBaseUnit) SMSEvents() SMSEventRepository { return &pocketBaseSMSEvents{app: u.app} }
+func (u *pocketBaseUnit) EmailEvents() EmailEventRepository {
+	return &pocketBaseEmailEvents{app: u.app}
+}
+func (u *pocketBaseUnit) NotificationEvents() NotificationEventRepository {
+	return &pocketBaseNotificationEvents{app: u.app}
+}
+func (u *pocketBaseUnit) Reviews() ReviewRepository { return &pocketBaseReviews{app: u.app} }
+func (u *pocketBaseUnit) Relay() RelayRepository    { return &pocketBaseRelay{app: u.app} }
+func (u *pocketBaseUnit) Outbox() OutboxRepository  { return &pocketBaseOutbox{app: u.app} }
 
 func (r *pocketBasePayments) Get(id string) (*domain.Payment, error) {
 	record, err := r.app.FindRecordById("payments", id)
@@ -187,6 +199,22 @@ func (r *pocketBasePayments) ListBlocked(now time.Time) ([]*domain.Payment, erro
 	return paymentsFromRecords(records), nil
 }
 
+func (r *pocketBasePayments) ListFingerprintCandidates(account domain.PaymentAccount, amount int64, now time.Time, limit int) ([]*domain.Payment, error) {
+	if amount <= 0 || limit <= 0 {
+		return nil, nil
+	}
+	records, err := r.app.FindRecordsByFilter(
+		"payments",
+		"payment_account = {:account} && payable_amount = {:amount} && reuse_after > {:now}",
+		"-created_at", limit, 0,
+		dbx.Params{"account": string(account), "amount": amount, "now": storeDate(now)},
+	)
+	if err != nil {
+		return nil, err
+	}
+	return paymentsFromRecords(records), nil
+}
+
 func paymentsFromRecords(records []*core.Record) []*domain.Payment {
 	result := make([]*domain.Payment, 0, len(records))
 	for _, record := range records {
@@ -208,6 +236,287 @@ func paymentFromRecord(record *core.Record) *domain.Payment {
 		EvidenceSource: record.GetString("evidence_source"), EvidenceReference: record.GetString("evidence_reference"),
 		PaidAt: record.GetDateTime("paid_at").Time(), ResolvedAt: record.GetDateTime("resolved_at").Time(),
 		ExternalID: record.GetString("external_id"), IdempotencyKey: record.GetString("idempotency_key"), Metadata: record.Get("metadata"),
+	}
+}
+
+func (r *pocketBaseSMSEvents) FindBySourceEvent(source, sourceEventID string) (*domain.SMSEvent, error) {
+	record, err := r.app.FindFirstRecordByFilter("sms_events", "source = {:source} && source_event_id = {:id}", dbx.Params{"source": source, "id": sourceEventID})
+	if err != nil {
+		return nil, err
+	}
+	return smsEventFromRecord(record), nil
+}
+
+func (r *pocketBaseSMSEvents) Create(event *domain.SMSEvent) error {
+	collection, err := r.app.FindCollectionByNameOrId("sms_events")
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	writeSMSEvent(record, event)
+	if err := r.app.Save(record); err != nil {
+		return err
+	}
+	event.ID = record.Id
+	return nil
+}
+
+func (r *pocketBaseSMSEvents) Save(event *domain.SMSEvent) error {
+	record, err := r.app.FindRecordById("sms_events", event.ID)
+	if err != nil {
+		return err
+	}
+	writeSMSEvent(record, event)
+	return r.app.Save(record)
+}
+
+func writeSMSEvent(record *core.Record, event *domain.SMSEvent) {
+	record.Set("source", event.Source)
+	record.Set("source_event_id", event.SourceEventID)
+	record.Set("sender", event.Sender)
+	record.Set("body", event.Body)
+	record.Set("payment_account", string(event.Account))
+	record.Set("message_time", event.MessageTime)
+	record.Set("amount", event.AmountPaise)
+	record.Set("rrn", event.RRN)
+	record.Set("upi_id", event.UPIID)
+	record.Set("payer_name", event.PayerName)
+	record.Set("processing_status", event.ProcessingStatus)
+	record.Set("matched_payment", event.MatchedPaymentID)
+	record.Set("error", event.Error)
+	if event.RawPayload != nil {
+		record.Set("raw_payload", event.RawPayload)
+	}
+}
+
+func smsEventFromRecord(record *core.Record) *domain.SMSEvent {
+	if record == nil {
+		return nil
+	}
+	return &domain.SMSEvent{ID: record.Id, Source: record.GetString("source"), SourceEventID: record.GetString("source_event_id"), Sender: record.GetString("sender"), Body: record.GetString("body"), Account: domain.PaymentAccount(record.GetString("payment_account")), MessageTime: record.GetDateTime("message_time").Time(), AmountPaise: int64(record.GetInt("amount")), RRN: record.GetString("rrn"), UPIID: record.GetString("upi_id"), PayerName: record.GetString("payer_name"), ProcessingStatus: record.GetString("processing_status"), MatchedPaymentID: record.GetString("matched_payment"), Error: record.GetString("error"), RawPayload: record.Get("raw_payload")}
+}
+
+func (r *pocketBaseEmailEvents) FindBySourceEvent(source, sourceEventID string) (*domain.EmailEvent, error) {
+	record, err := r.app.FindFirstRecordByFilter("email_events", "source = {:source} && source_event_id = {:id}", dbx.Params{"source": source, "id": sourceEventID})
+	if err != nil {
+		return nil, err
+	}
+	return emailEventFromRecord(record), nil
+}
+
+func (r *pocketBaseEmailEvents) Create(event *domain.EmailEvent) error {
+	collection, err := r.app.FindCollectionByNameOrId("email_events")
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	writeEmailEvent(record, event)
+	if err := r.app.Save(record); err != nil {
+		return err
+	}
+	event.ID = record.Id
+	return nil
+}
+
+func (r *pocketBaseEmailEvents) Save(event *domain.EmailEvent) error {
+	record, err := r.app.FindRecordById("email_events", event.ID)
+	if err != nil {
+		return err
+	}
+	writeEmailEvent(record, event)
+	return r.app.Save(record)
+}
+
+func writeEmailEvent(record *core.Record, event *domain.EmailEvent) {
+	record.Set("source", event.Source)
+	record.Set("source_event_id", event.SourceEventID)
+	record.Set("envelope_sender", event.EnvelopeSender)
+	record.Set("recipient", event.Recipient)
+	record.Set("sender", event.Sender)
+	record.Set("subject", event.Subject)
+	record.Set("body", event.Body)
+	record.Set("payment_account", string(event.Account))
+	record.Set("message_time", event.MessageTime)
+	record.Set("received_at", event.ReceivedAt)
+	record.Set("auth_result", event.AuthResult)
+	record.Set("amount", event.AmountPaise)
+	record.Set("rrn", event.RRN)
+	record.Set("upi_id", event.UPIID)
+	record.Set("payer_name", event.PayerName)
+	record.Set("processing_status", event.ProcessingStatus)
+	record.Set("matched_payment", event.MatchedPaymentID)
+	record.Set("error", event.Error)
+	if event.RawPayload != nil {
+		record.Set("raw_payload", event.RawPayload)
+	}
+}
+
+func emailEventFromRecord(record *core.Record) *domain.EmailEvent {
+	if record == nil {
+		return nil
+	}
+	return &domain.EmailEvent{ID: record.Id, Source: record.GetString("source"), SourceEventID: record.GetString("source_event_id"), EnvelopeSender: record.GetString("envelope_sender"), Recipient: record.GetString("recipient"), Sender: record.GetString("sender"), Subject: record.GetString("subject"), Body: record.GetString("body"), Account: domain.PaymentAccount(record.GetString("payment_account")), MessageTime: record.GetDateTime("message_time").Time(), ReceivedAt: record.GetDateTime("received_at").Time(), AuthResult: record.GetString("auth_result"), AmountPaise: int64(record.GetInt("amount")), RRN: record.GetString("rrn"), UPIID: record.GetString("upi_id"), PayerName: record.GetString("payer_name"), ProcessingStatus: record.GetString("processing_status"), MatchedPaymentID: record.GetString("matched_payment"), Error: record.GetString("error"), RawPayload: record.Get("raw_payload")}
+}
+
+func (r *pocketBaseNotificationEvents) FindBySourceEvent(source, sourceEventID string) (*domain.NotificationEvent, error) {
+	record, err := r.app.FindFirstRecordByFilter("notification_events", "source = {:source} && source_event_id = {:id}", dbx.Params{"source": source, "id": sourceEventID})
+	if err != nil {
+		return nil, err
+	}
+	return notificationEventFromRecord(record), nil
+}
+
+func (r *pocketBaseNotificationEvents) Get(id string) (*domain.NotificationEvent, error) {
+	record, err := r.app.FindRecordById("notification_events", id)
+	if err != nil {
+		return nil, err
+	}
+	return notificationEventFromRecord(record), nil
+}
+
+func (r *pocketBaseNotificationEvents) Create(event *domain.NotificationEvent) error {
+	collection, err := r.app.FindCollectionByNameOrId("notification_events")
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	writeNotificationEvent(record, event)
+	if err := r.app.Save(record); err != nil {
+		return err
+	}
+	event.ID = record.Id
+	return nil
+}
+
+func (r *pocketBaseNotificationEvents) Save(event *domain.NotificationEvent) error {
+	record, err := r.app.FindRecordById("notification_events", event.ID)
+	if err != nil {
+		return err
+	}
+	writeNotificationEvent(record, event)
+	return r.app.Save(record)
+}
+
+func writeNotificationEvent(record *core.Record, event *domain.NotificationEvent) {
+	record.Set("source", event.Source)
+	record.Set("source_event_id", event.SourceEventID)
+	record.Set("app_package", event.AppPackage)
+	record.Set("app_name", event.AppName)
+	record.Set("title", event.Title)
+	record.Set("body", event.Body)
+	record.Set("big_text", event.BigText)
+	record.Set("channel", event.Channel)
+	record.Set("notification_time", event.NotificationTime)
+	record.Set("payment_account", string(event.Account))
+	record.Set("amount", event.AmountPaise)
+	record.Set("payer_name", event.PayerName)
+	record.Set("processing_status", event.ProcessingStatus)
+	record.Set("matched_payment", event.MatchedPaymentID)
+	record.Set("error", event.Error)
+	if event.RawPayload != nil {
+		record.Set("raw_payload", event.RawPayload)
+	}
+}
+
+func notificationEventFromRecord(record *core.Record) *domain.NotificationEvent {
+	if record == nil {
+		return nil
+	}
+	return &domain.NotificationEvent{ID: record.Id, Source: record.GetString("source"), SourceEventID: record.GetString("source_event_id"), AppPackage: record.GetString("app_package"), AppName: record.GetString("app_name"), Title: record.GetString("title"), Body: record.GetString("body"), BigText: record.GetString("big_text"), Channel: record.GetString("channel"), NotificationTime: record.GetDateTime("notification_time").Time(), Account: domain.PaymentAccount(record.GetString("payment_account")), AmountPaise: int64(record.GetInt("amount")), PayerName: record.GetString("payer_name"), ProcessingStatus: record.GetString("processing_status"), MatchedPaymentID: record.GetString("matched_payment"), Error: record.GetString("error"), RawPayload: record.Get("raw_payload")}
+}
+
+func (r *pocketBaseReviews) FindByEvidence(smsEventID, emailEventID, reconciliationEntryID string) (*domain.ReviewCase, error) {
+	field, value := "", ""
+	switch {
+	case emailEventID != "":
+		field, value = "email_event", emailEventID
+	case smsEventID != "":
+		field, value = "sms_event", smsEventID
+	case reconciliationEntryID != "":
+		field, value = "reconciliation_entry", reconciliationEntryID
+	default:
+		return nil, sql.ErrNoRows
+	}
+	record, err := r.app.FindFirstRecordByData("review_cases", field, value)
+	if err != nil {
+		return nil, err
+	}
+	return reviewFromRecord(record), nil
+}
+
+func (r *pocketBaseReviews) Create(review *domain.ReviewCase) error {
+	collection, err := r.app.FindCollectionByNameOrId("review_cases")
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	writeReview(record, review)
+	if err := r.app.Save(record); err != nil {
+		return err
+	}
+	review.ID = record.Id
+	return nil
+}
+
+func (r *pocketBaseReviews) Get(id string) (*domain.ReviewCase, error) {
+	record, err := r.app.FindRecordById("review_cases", id)
+	if err != nil {
+		return nil, err
+	}
+	return reviewFromRecord(record), nil
+}
+
+func (r *pocketBaseReviews) Save(review *domain.ReviewCase) error {
+	record, err := r.app.FindRecordById("review_cases", review.ID)
+	if err != nil {
+		return err
+	}
+	writeReview(record, review)
+	return r.app.Save(record)
+}
+
+func (r *pocketBaseReviews) OpenCount() (int64, error) {
+	return r.app.CountRecords("review_cases", dbx.NewExp("status = 'open'"))
+}
+
+func writeReview(record *core.Record, review *domain.ReviewCase) {
+	record.Set("kind", review.Kind)
+	record.Set("status", review.Status)
+	record.Set("severity", review.Severity)
+	record.Set("sms_event", review.SMSEventID)
+	record.Set("email_event", review.EmailEventID)
+	record.Set("reconciliation_entry", review.ReconciliationEntryID)
+	record.Set("payment", review.PaymentID)
+	record.Set("candidate_payment_ids", review.CandidatePaymentIDs)
+	record.Set("reason", review.Reason)
+	record.Set("resolution", review.Resolution)
+	record.Set("resolution_note", review.ResolutionNote)
+	record.Set("resolved_by", review.ResolvedBy)
+	record.Set("opened_at", review.OpenedAt)
+	record.Set("resolved_at", review.ResolvedAt)
+}
+
+func reviewFromRecord(record *core.Record) *domain.ReviewCase {
+	if record == nil {
+		return nil
+	}
+	return &domain.ReviewCase{ID: record.Id, Kind: record.GetString("kind"), Status: record.GetString("status"), Severity: record.GetString("severity"), SMSEventID: record.GetString("sms_event"), EmailEventID: record.GetString("email_event"), ReconciliationEntryID: record.GetString("reconciliation_entry"), PaymentID: record.GetString("payment"), CandidatePaymentIDs: stringSlice(record.Get("candidate_payment_ids")), Reason: record.GetString("reason"), Resolution: record.GetString("resolution"), ResolutionNote: record.GetString("resolution_note"), ResolvedBy: record.GetString("resolved_by"), OpenedAt: record.GetDateTime("opened_at").Time(), ResolvedAt: record.GetDateTime("resolved_at").Time()}
+}
+
+func stringSlice(value any) []string {
+	switch items := value.(type) {
+	case []string:
+		return append([]string(nil), items...)
+	case []any:
+		result := make([]string, 0, len(items))
+		for _, item := range items {
+			if text, ok := item.(string); ok {
+				result = append(result, text)
+			}
+		}
+		return result
+	default:
+		return nil
 	}
 }
 

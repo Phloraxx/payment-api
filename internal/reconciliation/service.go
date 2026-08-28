@@ -23,6 +23,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/reviews"
 	"github.com/Phloraxx/payment-api/internal/sms"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/xuri/excelize/v2"
@@ -188,7 +189,7 @@ func (s *Service) persistRowsBatch(runID string, rows []statementRow, seenRRN ma
 
 			needsReview := status == "conflict" || (status == "unmatched" && (row.RRN != "" || strings.Contains(strings.ToLower(row.Description), "upi")))
 			if needsReview && s.Reviews != nil {
-				caseID, err := s.Reviews.OpenInApp(tx, reviews.OpenInput{
+				caseID, err := s.Reviews.Open(store.NewPocketBaseUnit(tx), reviews.OpenInput{
 					Kind: "reconciliation_conflict", Severity: severityForStatus(status),
 					ReconciliationEntryID: entry.Id, PaymentID: paymentID,
 					CandidatePaymentIDs: candidateIDs, Reason: note, OpenedAt: now,

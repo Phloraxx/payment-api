@@ -237,12 +237,12 @@ func (s *Service) Match(parsed domain.ParsedSMS) (*MatchResult, error) {
 		return nil, domain.New("SMS_NOT_MATCHABLE", "bank SMS requires an exact amount and RRN", http.StatusUnprocessableEntity)
 	}
 	now := s.now()
-	var record *core.Record
+	var payment *domain.Payment
 	var outcome domain.MatchOutcome
 	var queued bool
-	err := s.App.RunInTransaction(func(tx core.App) error {
+	err := s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
 		var err error
-		record, outcome, queued, err = s.matchBankEvidenceInApp(tx, parsed, now)
+		payment, outcome, queued, err = s.MatchBankEvidence(uow, parsed, now)
 		return err
 	})
 	if err != nil {
@@ -251,17 +251,11 @@ func (s *Service) Match(parsed domain.ParsedSMS) (*MatchResult, error) {
 	if queued {
 		s.WakeWebhooks()
 	}
-	return &MatchResult{Payment: FromRecord(record), Action: string(outcome)}, nil
+	return &MatchResult{Payment: payment, Action: string(outcome)}, nil
 }
 
-// MatchInApp is the backward-compatible bank-evidence adapter. New sources
-// should normalize into domain.Evidence and call MatchEvidenceInApp instead.
-func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time) (*core.Record, string, bool, error) {
-	record, outcome, queued, err := s.matchBankEvidenceInApp(tx, parsed, now)
-	return record, string(outcome), queued, err
-}
-
-func (s *Service) matchBankEvidenceInApp(tx core.App, parsed domain.ParsedSMS, now time.Time) (*core.Record, domain.MatchOutcome, bool, error) {
+// MatchBankEvidence normalizes trusted bank evidence into the common matcher.
+func (s *Service) MatchBankEvidence(uow store.UnitOfWork, parsed domain.ParsedSMS, now time.Time) (*domain.Payment, domain.MatchOutcome, bool, error) {
 	if parsed.AmountPaise <= 0 || strings.TrimSpace(parsed.RRN) == "" {
 		return nil, domain.MatchNotMatchable, false, domain.New("SMS_NOT_MATCHABLE", "bank SMS requires an exact amount and RRN", http.StatusUnprocessableEntity)
 	}
@@ -269,7 +263,7 @@ func (s *Service) matchBankEvidenceInApp(tx core.App, parsed domain.ParsedSMS, n
 	if parsed.Account == domain.PaymentAccountSlice {
 		source = domain.EvidenceSourceBankEmail
 	}
-	return s.MatchEvidenceInApp(tx, domain.Evidence{
+	return s.MatchEvidence(uow, domain.Evidence{
 		Account: parsed.Account, AmountPaise: parsed.AmountPaise,
 		OccurredFrom: parsed.OccurredAt, OccurredUntil: parsed.OccurredAt,
 		Reference: strings.TrimSpace(parsed.RRN), ReferenceKind: domain.EvidenceReferenceRRN,
@@ -286,22 +280,21 @@ type NotificationEvidence struct {
 	Reference     string
 }
 
-// MatchNotificationInApp remains the Paytm compatibility adapter while all
-// automatic matching is enforced by MatchEvidenceInApp.
-func (s *Service) MatchNotificationInApp(tx core.App, evidence NotificationEvidence, now time.Time) (*core.Record, string, bool, error) {
+// MatchNotification applies normalized Paytm relay evidence through the same matcher.
+func (s *Service) MatchNotification(uow store.UnitOfWork, evidence NotificationEvidence, now time.Time) (*domain.Payment, string, bool, error) {
 	if evidence.Account != domain.PaymentAccountPaytm {
 		return nil, string(domain.MatchNotMatchable), false, domain.New("NOTIFICATION_ACCOUNT_INVALID", "notification evidence is only valid for the Paytm account", http.StatusBadRequest)
 	}
 	if evidence.AmountPaise <= 0 || strings.TrimSpace(evidence.Reference) == "" {
 		return nil, string(domain.MatchNotMatchable), false, domain.New("NOTIFICATION_NOT_MATCHABLE", "Paytm notification requires an exact amount and evidence reference", http.StatusUnprocessableEntity)
 	}
-	record, outcome, queued, err := s.MatchEvidenceInApp(tx, domain.Evidence{
+	payment, outcome, queued, err := s.MatchEvidence(uow, domain.Evidence{
 		Account: evidence.Account, AmountPaise: evidence.AmountPaise,
 		OccurredFrom: evidence.OccurredAt, OccurredUntil: evidence.OccurredUntil,
 		Reference: strings.TrimSpace(evidence.Reference), ReferenceKind: domain.EvidenceReferenceRelay,
 		Source: domain.EvidenceSourcePaytmNotification, PayerName: evidence.PayerName,
 	}, now)
-	return record, string(outcome), queued, err
+	return payment, string(outcome), queued, err
 }
 
 // ManualMatch applies reviewed bank evidence to one explicitly selected payment.
@@ -462,12 +455,6 @@ func (s *Service) ExpireDueUoW(uow store.UnitOfWork, now time.Time) (int, error)
 		}
 	}
 	return len(payments), nil
-}
-
-// ExpireDueInApp remains only as a migration adapter for callers that already
-// own a PocketBase transaction.
-func (s *Service) ExpireDueInApp(tx core.App, now time.Time) (int, error) {
-	return s.ExpireDueUoW(store.NewPocketBaseUnit(tx), now)
 }
 
 func (s *Service) Stats() (map[string]int64, error) {
