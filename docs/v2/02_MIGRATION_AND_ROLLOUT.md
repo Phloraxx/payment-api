@@ -110,3 +110,15 @@ Immediate rollback for any of:
 - checkout regression that obscures exact amount, expiry or authoritative verification status.
 
 Deletion of old code occurs only after a separate stable soak period; rollback must remain possible before deletion.
+## Production-copy acceptance harness
+
+Never point migration acceptance at the live `/app/pb_data` volume. Restore or copy a verified backup into an isolated directory first, then create an explicit marker only in that copy:
+
+```bash
+touch /protected/paygate-v2-copy/.paygate-acceptance-copy
+./scripts/v2-production-copy-acceptance.sh \
+  --source-copy /protected/paygate-v2-copy \
+  --binary /path/to/v2/paygate
+```
+
+The harness clones that supplied copy again into a temporary workspace, checks SQLite integrity, snapshots financial/evidence row counts and uniqueness violations, applies `migrate up` only to the temporary clone, rechecks integrity, verifies the v2 shadow schema/migration, and requires the invariant snapshot to remain unchanged. The temporary workspace is deleted automatically.
