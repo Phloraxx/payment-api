@@ -26,7 +26,7 @@ func TestClientCreatesOrderWithBasicAuthAndRefusesRedirects(t *testing.T) {
 	}))
 	defer server.Close()
 	client := NewClient("rzp_live_key", "secret")
-	client.baseURL = server.URL
+	client.BaseURL = server.URL
 	_, err := client.CreateOrder(context.Background(), 100, "receipt")
 	if err == nil {
 		t.Fatal("expected redirect response to be rejected")
@@ -43,7 +43,7 @@ func TestClientValidatesProviderOrderAmount(t *testing.T) {
 	}))
 	defer server.Close()
 	client := NewClient("rzp_live_key", "secret")
-	client.baseURL = server.URL
+	client.BaseURL = server.URL
 	if _, err := client.CreateOrder(context.Background(), 100, "receipt"); err == nil {
 		t.Fatal("expected inconsistent amount error")
 	}
