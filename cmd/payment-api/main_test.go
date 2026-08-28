@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,6 +53,29 @@ func TestStartBackgroundRunnersStartsEveryRunner(t *testing.T) {
 		case <-started:
 		case <-time.After(time.Second):
 			t.Fatalf("runner %d did not start", index)
+		}
+	}
+}
+
+func TestWithServeOriginsInjectsCheckoutAllowlist(t *testing.T) {
+	want := []string{"https://payment.mulearnscet.in", "https://pay.ieeesahrdaya.com"}
+	got, changed := withServeOrigins([]string{"serve", "--http=127.0.0.1:3000"}, want)
+	if !changed {
+		t.Fatal("expected serve origins injection")
+	}
+	if !slices.Contains(got, "--origins="+strings.Join(want, ",")) {
+		t.Fatalf("args=%v", got)
+	}
+}
+
+func TestWithServeOriginsPreservesExplicitOrNonServeArgs(t *testing.T) {
+	for _, tc := range [][]string{
+		{"serve", "--origins=https://custom.example"},
+		{"migrate", "up"},
+	} {
+		got, changed := withServeOrigins(tc, []string{"https://payment.example.com"})
+		if changed || !slices.Equal(got, tc) {
+			t.Fatalf("args=%v got=%v changed=%v", tc, got, changed)
 		}
 	}
 }
