@@ -2,16 +2,19 @@ package alerts
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/webhooks"
 	_ "github.com/Phloraxx/payment-api/migrations"
+	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
 )
 
@@ -225,5 +228,126 @@ func TestOperatorAlertClientDoesNotFollowRedirects(t *testing.T) {
 	record, _ := app.FindRecordById("alerts", id)
 	if record.GetString("notification_status") != "failed" {
 		t.Fatalf("notification status=%s", record.GetString("notification_status"))
+	}
+}
+
+func TestEnsureOpenDoesNotInflatePersistentCondition(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+	service := NewService(app)
+	now := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	service.Now = func() time.Time { return now }
+
+	id, created, err := service.EnsureOpen(Input{Kind: "relay_unavailable", Severity: "warning", DedupeKey: "relay:paytm", Message: "relay unavailable", Details: map[string]any{"ready": false}})
+	if err != nil || !created {
+		t.Fatalf("id=%s created=%v err=%v", id, created, err)
+	}
+	now = now.Add(time.Minute)
+	if second, created, err := service.EnsureOpen(Input{Kind: "relay_unavailable", Severity: "warning", DedupeKey: "relay:paytm", Message: "still unavailable", Details: map[string]any{"ready": false}}); err != nil || created || second != id {
+		t.Fatalf("second=%s created=%v err=%v", second, created, err)
+	}
+	record, _ := app.FindRecordById("alerts", id)
+	if got := record.GetInt("occurrence_count"); got != 1 {
+		t.Fatalf("occurrences while continuously open=%d", got)
+	}
+	if err := service.Resolve("relay:paytm"); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Minute)
+	if _, _, err := service.EnsureOpen(Input{Kind: "relay_unavailable", Severity: "warning", DedupeKey: "relay:paytm", Message: "unavailable again"}); err != nil {
+		t.Fatal(err)
+	}
+	record, _ = app.FindRecordById("alerts", id)
+	if got := record.GetInt("occurrence_count"); got != 2 {
+		t.Fatalf("occurrences after real reactivation=%d", got)
+	}
+}
+
+func TestWebhookExhaustionIsOneAggregateCondition(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+	service := NewService(app)
+	now := time.Date(2026, 8, 1, 8, 0, 0, 0, time.UTC)
+	service.Now = func() time.Time { return now }
+
+	paymentService := payments.NewService(app, config.Config{PaymentTTL: 5 * time.Minute, AmountQuarantine: 24 * time.Hour, UPIID: "operator@bank", UPIPayeeName: "PayGate"}, nil)
+	paymentService.Now = func() time.Time { return now }
+	paymentService.SuffixStart = func() (int64, error) { return 1, nil }
+	payment, _, err := paymentService.Create(payments.CreateInput{AmountRupees: 100, PaymentAccount: "kotak"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	collection, err := app.FindCollectionByNameOrId("webhook_deliveries")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deliveries []*core.Record
+	for i := 0; i < 2; i++ {
+		record := core.NewRecord(collection)
+		record.Set("event_id", fmt.Sprintf("evt_exhausted_%d", i))
+		record.Set("event", "payment.paid")
+		record.Set("payment", payment.ID)
+		record.Set("url", "https://example.invalid/webhook")
+		record.Set("body", `{}`)
+		record.Set("attempts", 8)
+		record.Set("status", "exhausted")
+		record.Set("next_attempt_at", now.Add(24*time.Hour))
+		record.Set("last_error", "historical failure")
+		if err := app.Save(record); err != nil {
+			t.Fatal(err)
+		}
+		deliveries = append(deliveries, record)
+		if _, _, err := service.Open(Input{Kind: "webhook_exhausted", Severity: "critical", DedupeKey: "webhook:" + record.Id, Message: "legacy per-delivery alert"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := service.CheckWebhookExhaustion(); err != nil {
+		t.Fatal(err)
+	}
+	aggregate, err := app.FindFirstRecordByData("alerts", "dedupe_key", "webhook:exhausted")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := aggregate.GetInt("occurrence_count"); got != 1 {
+		t.Fatalf("aggregate occurrences=%d", got)
+	}
+	for _, delivery := range deliveries {
+		legacy, err := app.FindFirstRecordByData("alerts", "dedupe_key", "webhook:"+delivery.Id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if legacy.GetString("status") != "resolved" || legacy.GetString("notification_status") != "disabled" {
+			t.Fatalf("legacy alert status=%s notification=%s", legacy.GetString("status"), legacy.GetString("notification_status"))
+		}
+	}
+	if err := service.CheckWebhookExhaustion(); err != nil {
+		t.Fatal(err)
+	}
+	aggregate, _ = app.FindRecordById("alerts", aggregate.Id)
+	if got := aggregate.GetInt("occurrence_count"); got != 1 {
+		t.Fatalf("aggregate occurrences after repeat scan=%d", got)
+	}
+
+	for _, delivery := range deliveries {
+		delivery.Set("status", "delivered")
+		delivery.Set("delivered_at", now.Add(time.Hour))
+		if err := app.Save(delivery); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.CheckWebhookExhaustion(); err != nil {
+		t.Fatal(err)
+	}
+	aggregate, _ = app.FindRecordById("alerts", aggregate.Id)
+	if aggregate.GetString("status") != "resolved" {
+		t.Fatalf("aggregate status after recovery=%s", aggregate.GetString("status"))
 	}
 }

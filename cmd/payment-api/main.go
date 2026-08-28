@@ -168,7 +168,7 @@ func main() {
 			if relayErr != nil {
 				stdLogger.Error("relay health check failed", "error", relayErr)
 			} else if !relayStatus.Ready {
-				_, _, _ = alertService.Open(alerts.Input{
+				_, _, _ = alertService.EnsureOpen(alerts.Input{
 					Kind: "relay_unavailable", Severity: "warning", DedupeKey: "relay:paytm",
 					Message: "Paytm verification relay is unavailable; new Paytm checkouts are blocked.", Details: relayStatus,
 				})
