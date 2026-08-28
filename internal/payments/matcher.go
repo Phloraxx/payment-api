@@ -51,7 +51,7 @@ func (s *Service) MatchEvidenceInApp(tx core.App, evidence domain.Evidence, now 
 	createdBefore := evidence.OccurredUntil.Add(EvidenceTimestampTolerance)
 	onTime, err := tx.FindRecordsByFilter(
 		"payments",
-		"payment_account = {:account} && payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
+		"payment_account = {:account} && payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
 		"created",
 		2,
 		0,
@@ -81,15 +81,9 @@ func (s *Service) MatchEvidenceInApp(tx core.App, evidence domain.Evidence, now 
 		return record, domain.MatchMarkedPaid, true, nil
 	}
 
-	expired, err := s.ExpireDueInApp(tx, now)
-	if err != nil {
-		return nil, domain.MatchError, false, err
-	}
-	queued := expired > 0
-
 	late, err := tx.FindRecordsByFilter(
 		"payments",
-		"payment_account = {:account} && payable_amount = {:amount} && (status = 'expired' || status = 'cancelled') && reuse_after > {:now} && created_at <= {:createdBefore}",
+		"payment_account = {:account} && payable_amount = {:amount} && (status = 'expired' || status = 'cancelled' || (status = 'pending' && expires_at < {:evidenceAt})) && reuse_after > {:now} && created_at <= {:createdBefore}",
 		"-created",
 		2,
 		0,
@@ -97,27 +91,36 @@ func (s *Service) MatchEvidenceInApp(tx core.App, evidence domain.Evidence, now 
 			"account":       account,
 			"amount":        evidence.AmountPaise,
 			"now":           filterDate(now),
+			"evidenceAt":    filterDate(evidence.OccurredFrom),
 			"createdBefore": filterDate(createdBefore),
 		},
 	)
 	if err != nil {
-		return nil, domain.MatchError, queued, err
+		return nil, domain.MatchError, false, err
 	}
 	if len(late) > 1 {
-		return nil, domain.MatchAmbiguous, queued, domain.AmbiguousMatch()
+		return nil, domain.MatchAmbiguous, false, domain.AmbiguousMatch()
 	}
 	if len(late) == 1 {
 		record := late[0]
+		if record.GetString("status") == string(domain.StatusPending) {
+			expiredView := record.Clone()
+			expiredView.Set("status", string(domain.StatusExpired))
+			expiredView.Set("resolved_at", now)
+			if err := s.schedule(tx, "payment.expired", expiredView, now); err != nil {
+				return nil, domain.MatchError, false, err
+			}
+		}
 		applyNormalizedEvidence(record, evidence, domain.StatusLate, now, s.Config.AmountQuarantine)
 		if err := tx.Save(record); err != nil {
-			return nil, domain.MatchError, queued, err
+			return nil, domain.MatchError, false, err
 		}
 		if err := s.schedule(tx, "payment.late", record, now); err != nil {
-			return nil, domain.MatchError, queued, err
+			return nil, domain.MatchError, false, err
 		}
 		return record, domain.MatchMarkedLate, true, nil
 	}
-	return nil, domain.MatchUnmatched, queued, nil
+	return nil, domain.MatchUnmatched, false, nil
 }
 
 type evidenceOutcomes struct {

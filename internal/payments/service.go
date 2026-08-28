@@ -95,15 +95,8 @@ func (s *Service) CreateGuarded(input CreateInput, gate CreateGate) (*domain.Pay
 	now := s.now()
 	var result *core.Record
 	var reused bool
-	var queued bool
 
 	err = s.App.RunInTransaction(func(tx core.App) error {
-		expired, err := s.ExpireDueInApp(tx, now)
-		if err != nil {
-			return err
-		}
-		queued = expired > 0
-
 		if input.IdempotencyKey != "" {
 			existing, findErr := tx.FindFirstRecordByData("payments", "idempotency_key", input.IdempotencyKey)
 			if findErr == nil {
@@ -181,39 +174,22 @@ func (s *Service) CreateGuarded(input CreateInput, gate CreateGate) (*domain.Pay
 	if err != nil {
 		return nil, false, err
 	}
-	if queued {
-		s.WakeWebhooks()
-	}
 	return FromRecord(result), reused, nil
 }
 
 func (s *Service) Get(id string) (*domain.Payment, error) {
-	now := s.now()
-	var result *core.Record
-	var queued bool
-	err := s.App.RunInTransaction(func(tx core.App) error {
-		expired, err := s.ExpireDueInApp(tx, now)
-		if err != nil {
-			return err
-		}
-		queued = expired > 0
-		record, err := tx.FindRecordById("payments", id)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return domain.PaymentNotFound()
-			}
-			return err
-		}
-		result = record.Clone()
-		return nil
-	})
+	record, err := s.App.FindRecordById("payments", strings.TrimSpace(id))
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, domain.PaymentNotFound()
+		}
 		return nil, err
 	}
-	if queued {
-		s.WakeWebhooks()
+	payment := FromRecord(record)
+	if payment.Status == domain.StatusPending && !payment.ExpiresAt.IsZero() && !payment.ExpiresAt.After(s.now()) {
+		payment.Status = domain.StatusExpired
 	}
-	return FromRecord(result), nil
+	return payment, nil
 }
 
 func (s *Service) Cancel(id string) (*domain.Payment, error) {
@@ -221,11 +197,6 @@ func (s *Service) Cancel(id string) (*domain.Payment, error) {
 	var result *core.Record
 	var queued bool
 	err := s.App.RunInTransaction(func(tx core.App) error {
-		expired, err := s.ExpireDueInApp(tx, now)
-		if err != nil {
-			return err
-		}
-		queued = expired > 0
 		record, err := tx.FindRecordById("payments", id)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -240,6 +211,9 @@ func (s *Service) Cancel(id string) (*domain.Payment, error) {
 		}
 		if status != string(domain.StatusPending) {
 			return domain.PaymentResolved(status)
+		}
+		if expiresAt := record.GetDateTime("expires_at").Time(); !expiresAt.IsZero() && !expiresAt.After(now) {
+			return domain.PaymentResolved(string(domain.StatusExpired))
 		}
 		record.Set("status", string(domain.StatusCancelled))
 		record.Set("resolved_at", now)
@@ -439,30 +413,44 @@ func extendReuseAfter(record *core.Record, candidate time.Time) {
 	}
 }
 
+const (
+	expireBatchSize  = 100
+	expireMaxBatches = 10
+)
+
 func (s *Service) ExpireDue() (int, error) {
 	now := s.now()
-	count := 0
-	err := s.App.RunInTransaction(func(tx core.App) error {
-		var err error
-		count, err = s.ExpireDueInApp(tx, now)
-		return err
-	})
-	if err == nil && count > 0 {
+	total := 0
+	for batch := 0; batch < expireMaxBatches; batch++ {
+		count := 0
+		err := s.App.RunInTransaction(func(tx core.App) error {
+			var err error
+			count, err = s.ExpireDueInApp(tx, now)
+			return err
+		})
+		if err != nil {
+			return total, err
+		}
+		total += count
+		if count < expireBatchSize {
+			break
+		}
+	}
+	if total > 0 {
 		s.WakeWebhooks()
 	}
-	return count, err
+	return total, nil
 }
 
-// ExpireDueInApp changes only currently pending records whose persisted expiry
-// timestamp is due. Existing reuse_after is retained because it was fixed at
-// creation as expires_at + quarantine.
+// ExpireDueInApp processes one bounded batch. Keeping the batch small limits
+// SQLite writer-lock duration while preserving atomic payment + outbox updates.
 func (s *Service) ExpireDueInApp(tx core.App, now time.Time) (int, error) {
 	now = now.UTC()
 	records, err := tx.FindRecordsByFilter(
 		"payments",
 		"status = 'pending' && expires_at <= {:now}",
 		"expires_at",
-		0,
+		expireBatchSize,
 		0,
 		dbx.Params{"now": filterDate(now)},
 	)
@@ -486,9 +474,7 @@ func (s *Service) ExpireDueInApp(tx core.App, now time.Time) (int, error) {
 }
 
 func (s *Service) Stats() (map[string]int64, error) {
-	if _, err := s.ExpireDue(); err != nil {
-		return nil, err
-	}
+	now := s.now()
 	result := map[string]int64{
 		"total": 0, "pending": 0, "paid": 0, "expired": 0, "cancelled": 0, "late": 0,
 	}
@@ -499,6 +485,12 @@ func (s *Service) Stats() (map[string]int64, error) {
 	for _, record := range records {
 		result["total"]++
 		status := record.GetString("status")
+		if status == string(domain.StatusPending) {
+			expiresAt := record.GetDateTime("expires_at").Time()
+			if !expiresAt.IsZero() && !expiresAt.After(now) {
+				status = string(domain.StatusExpired)
+			}
+		}
 		if _, ok := result[status]; ok {
 			result[status]++
 		}
@@ -697,9 +689,6 @@ type CapacitySnapshot struct {
 
 func (s *Service) Capacity() (CapacitySnapshot, error) {
 	now := s.now()
-	if _, err := s.ExpireDue(); err != nil {
-		return CapacitySnapshot{}, err
-	}
 	records, err := s.App.FindRecordsByFilter(
 		"payments",
 		"reuse_after > {:now}",
@@ -726,7 +715,12 @@ func (s *Service) Capacity() (CapacitySnapshot, error) {
 		}
 		entry.amounts[int64(record.GetInt("payable_amount"))] = struct{}{}
 		if record.GetString("status") == string(domain.StatusPending) {
-			entry.pending++
+			expiresAt := record.GetDateTime("expires_at").Time()
+			if expiresAt.IsZero() || expiresAt.After(now) {
+				entry.pending++
+			} else {
+				entry.quarantined++
+			}
 		} else {
 			entry.quarantined++
 		}
