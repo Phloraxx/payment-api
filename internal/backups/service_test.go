@@ -2,12 +2,16 @@ package backups
 
 import (
 	"context"
+	"database/sql"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/config"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/tests"
+	_ "modernc.org/sqlite"
 )
 
 func TestConfigureCreateAndVerifyLocalBackup(t *testing.T) {
@@ -45,5 +49,36 @@ func TestConfigureCreateAndVerifyLocalBackup(t *testing.T) {
 	}
 	if drill.BackupName != name || drill.IntegrityChecked == 0 || len(drill.DatabaseFiles) == 0 {
 		t.Fatalf("drill=%+v", drill)
+	}
+}
+
+func TestValidateRestoredDatabasesIgnoresNestedForensicSnapshots(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"data.db", "auxiliary.db"} {
+		db, err := sql.Open("sqlite", filepath.Join(dir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT)"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quarantine := filepath.Join(dir, "quarantine", "20260811")
+	if err := os.MkdirAll(quarantine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(quarantine, "auxiliary.db"), []byte("not sqlite"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := validateRestoredDatabases(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 2 {
+		t.Fatalf("validated files=%v", files)
 	}
 }
