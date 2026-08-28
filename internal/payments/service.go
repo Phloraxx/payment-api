@@ -373,20 +373,6 @@ func (s *Service) ManualMatch(uow store.UnitOfWork, paymentID string, parsed dom
 	return payment, action, true, nil
 }
 
-// ManualMatchInApp is the temporary adapter for review workflows that still
-// own a PocketBase transaction.
-func (s *Service) ManualMatchInApp(tx core.App, paymentID string, parsed domain.ParsedSMS, now time.Time) (*core.Record, string, bool, error) {
-	payment, action, queued, err := s.ManualMatch(store.NewPocketBaseUnit(tx), paymentID, parsed, now)
-	if err != nil || payment == nil {
-		return nil, action, queued, err
-	}
-	record, findErr := tx.FindRecordById("payments", payment.ID)
-	if findErr != nil {
-		return nil, "error", queued, findErr
-	}
-	return record, action, queued, nil
-}
-
 func applyBankEvidence(payment *domain.Payment, parsed domain.ParsedSMS, status domain.PaymentStatus, now time.Time, quarantine time.Duration) {
 	paidAt := parsed.OccurredAt.UTC()
 	if paidAt.IsZero() || paidAt.After(now) {

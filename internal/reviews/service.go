@@ -64,20 +64,12 @@ func (s *Service) OpenSMSReview(uow store.UnitOfWork, input sms.ReviewInput) (st
 	})
 }
 
-func (s *Service) OpenSMSReviewInApp(app core.App, input sms.ReviewInput) (string, error) {
-	return s.OpenSMSReview(store.NewPocketBaseUnit(app), input)
-}
-
 func (s *Service) OpenEmailReview(uow store.UnitOfWork, input paymentemail.ReviewInput) (string, error) {
 	return s.Open(uow, OpenInput{
 		Kind: input.Kind, Severity: input.Severity, EmailEventID: input.EmailEventID,
 		PaymentID: input.PaymentID, CandidatePaymentIDs: input.CandidatePaymentIDs,
 		Reason: input.Reason, OpenedAt: input.OpenedAt,
 	})
-}
-
-func (s *Service) OpenEmailReviewInApp(app core.App, input paymentemail.ReviewInput) (string, error) {
-	return s.OpenEmailReview(store.NewPocketBaseUnit(app), input)
 }
 
 func (s *Service) Open(uow store.UnitOfWork, input OpenInput) (string, error) {
@@ -107,12 +99,6 @@ func (s *Service) Open(uow store.UnitOfWork, input OpenInput) (string, error) {
 		return "", err
 	}
 	return review.ID, nil
-}
-
-// OpenInApp is retained while legacy evidence/reconciliation transactions are
-// migrated to Store.Write. New callers should pass the existing UnitOfWork.
-func (s *Service) OpenInApp(app core.App, input OpenInput) (string, error) {
-	return s.Open(store.NewPocketBaseUnit(app), input)
 }
 
 func (s *Service) Resolve(input ResolveInput) (ResolveResult, error) {

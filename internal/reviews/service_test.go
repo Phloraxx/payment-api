@@ -11,6 +11,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/sms"
+	"github.com/Phloraxx/payment-api/internal/store"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
@@ -97,7 +98,7 @@ func TestResolveManualMatchPersistsPaymentEventCaseAndAudit(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventID := createSMSEvent(t, app, payment.PayablePaise, "", now.Add(time.Minute))
-	caseID, err := service.OpenSMSReviewInApp(app, sms.ReviewInput{
+	caseID, err := service.OpenSMSReview(store.NewPocketBaseUnit(app), sms.ReviewInput{
 		Kind: "missing_rrn", Severity: "warning", SMSEventID: eventID,
 		CandidatePaymentIDs: []string{payment.ID}, Reason: "missing reference", OpenedAt: *now,
 	})
@@ -139,7 +140,7 @@ func TestManualMatchRejectsDifferentAmount(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventID := createSMSEvent(t, app, payment.PayablePaise+1, "999988887777", *now)
-	caseID, err := service.OpenSMSReviewInApp(app, sms.ReviewInput{Kind: "unmatched", Severity: "warning", SMSEventID: eventID, Reason: "amount mismatch"})
+	caseID, err := service.OpenSMSReview(store.NewPocketBaseUnit(app), sms.ReviewInput{Kind: "unmatched", Severity: "warning", SMSEventID: eventID, Reason: "amount mismatch"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,7 +162,7 @@ func TestResolveManualEmailMatchUpdatesEmailEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	eventID := createEmailEvent(t, app, payment.PayablePaise, "", now.Add(time.Minute))
-	caseID, err := service.OpenEmailReviewInApp(app, paymentemail.ReviewInput{
+	caseID, err := service.OpenEmailReview(store.NewPocketBaseUnit(app), paymentemail.ReviewInput{
 		Kind: "missing_rrn", Severity: "warning", EmailEventID: eventID,
 		CandidatePaymentIDs: []string{payment.ID}, Reason: "missing reference", OpenedAt: *now,
 	})
@@ -188,11 +189,11 @@ func TestResolveManualEmailMatchUpdatesEmailEvidence(t *testing.T) {
 func TestOpenSMSReviewIsIdempotentPerEvidenceEvent(t *testing.T) {
 	service, _, app, now := reviewTestService(t)
 	eventID := createSMSEvent(t, app, 10001, "", *now)
-	first, err := service.OpenSMSReviewInApp(app, sms.ReviewInput{Kind: "missing_rrn", Severity: "warning", SMSEventID: eventID, Reason: "missing"})
+	first, err := service.OpenSMSReview(store.NewPocketBaseUnit(app), sms.ReviewInput{Kind: "missing_rrn", Severity: "warning", SMSEventID: eventID, Reason: "missing"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.OpenSMSReviewInApp(app, sms.ReviewInput{Kind: "missing_rrn", Severity: "warning", SMSEventID: eventID, Reason: "missing again"})
+	second, err := service.OpenSMSReview(store.NewPocketBaseUnit(app), sms.ReviewInput{Kind: "missing_rrn", Severity: "warning", SMSEventID: eventID, Reason: "missing again"})
 	if err != nil || first != second {
 		t.Fatalf("first=%s second=%s err=%v", first, second, err)
 	}

@@ -1,6 +1,7 @@
 package payments
 
 import (
+	"context"
 	"errors"
 	"net/url"
 	"strings"
@@ -470,12 +471,12 @@ func TestManualMatchKeepsExactAmountAndRRNInvariants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var matched *core.Record
-	err = service.App.RunInTransaction(func(tx core.App) error {
+	var matched *domain.Payment
+	err = service.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
 		var action string
 		var queued bool
 		var matchErr error
-		matched, action, queued, matchErr = service.ManualMatchInApp(tx, payment.ID, domain.ParsedSMS{
+		matched, action, queued, matchErr = service.ManualMatch(uow, payment.ID, domain.ParsedSMS{
 			AmountPaise: payment.PayablePaise,
 			RRN:         "800800800800",
 			OccurredAt:  *now,
@@ -491,16 +492,16 @@ func TestManualMatchKeepsExactAmountAndRRNInvariants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if matched.GetString("status") != "paid" {
-		t.Fatalf("status=%s", matched.GetString("status"))
+	if matched.Status != domain.StatusPaid {
+		t.Fatalf("status=%s", matched.Status)
 	}
 
 	other, _, err := service.Create(CreateInput{AmountRupees: 801})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = service.App.RunInTransaction(func(tx core.App) error {
-		_, _, _, err := service.ManualMatchInApp(tx, other.ID, domain.ParsedSMS{
+	err = service.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		_, _, _, err := service.ManualMatch(uow, other.ID, domain.ParsedSMS{
 			AmountPaise: other.PayablePaise,
 			RRN:         "800800800800",
 		}, *now)
@@ -546,11 +547,11 @@ func TestManualMatchUsesEvidenceTimeForHistoricalReconciliation(t *testing.T) {
 	if _, err := service.ExpireDue(); err != nil {
 		t.Fatal(err)
 	}
-	var matched *core.Record
-	err = service.App.RunInTransaction(func(tx core.App) error {
+	var matched *domain.Payment
+	err = service.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
 		var action string
 		var matchErr error
-		matched, action, _, matchErr = service.ManualMatchInApp(tx, payment.ID, domain.ParsedSMS{
+		matched, action, _, matchErr = service.ManualMatch(uow, payment.ID, domain.ParsedSMS{
 			AmountPaise: payment.PayablePaise,
 			RRN:         "850850850850",
 			OccurredAt:  evidenceAt,
@@ -563,8 +564,8 @@ func TestManualMatchUsesEvidenceTimeForHistoricalReconciliation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("historical evidence inside original quarantine was rejected: %v", err)
 	}
-	if matched.GetString("status") != "late" {
-		t.Fatalf("status=%s", matched.GetString("status"))
+	if matched.Status != domain.StatusLate {
+		t.Fatalf("status=%s", matched.Status)
 	}
 }
 
@@ -575,8 +576,8 @@ func TestManualMatchRejectsTransactionAfterFingerprintReuseBoundary(t *testing.T
 		t.Fatal(err)
 	}
 	*now = payment.ReuseAfter.Add(2 * time.Hour)
-	err = service.App.RunInTransaction(func(tx core.App) error {
-		_, _, _, err := service.ManualMatchInApp(tx, payment.ID, domain.ParsedSMS{
+	err = service.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		_, _, _, err := service.ManualMatch(uow, payment.ID, domain.ParsedSMS{
 			AmountPaise: payment.PayablePaise,
 			RRN:         "851851851851",
 			OccurredAt:  payment.ReuseAfter.Add(time.Minute),
