@@ -58,4 +58,13 @@ func TestDomainCollectionsOnlyExposeReadsToOperatorUsers(t *testing.T) {
 	if reviews.Fields.GetByName("email_event") == nil {
 		t.Fatal("review_cases.email_event migration field is missing")
 	}
+	relayDevices, err := app.FindCollectionByNameOrId("relay_devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"power_health_reported", "battery_optimization_exempt", "power_save_mode", "background_restricted", "foreground_service_active"} {
+		if relayDevices.Fields.GetByName(name) == nil {
+			t.Fatalf("relay_devices.%s migration field is missing", name)
+		}
+	}
 }

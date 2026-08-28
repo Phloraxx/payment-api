@@ -242,3 +242,81 @@ func TestRelayStatusMarksStaleDeviceInactive(t *testing.T) {
 		t.Fatalf("stale device status = %+v", status)
 	}
 }
+
+func TestV031PowerHealthGatesReadinessButAllowsPowerSaver(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+	now := time.Date(2026, 8, 28, 7, 30, 0, 0, time.UTC)
+	service := NewService(app, nil)
+	service.Now = func() time.Time { return now }
+	collection, _ := app.FindCollectionByNameOrId("relay_devices")
+	device := core.NewRecord(collection)
+	device.Set("device_id", "abababababababababababababababababababababababababababababababab")
+	device.Set("name", "Always-on phone")
+	device.Set("public_key_pem", "test-key")
+	device.Set("enabled", true)
+	if err := app.Save(device); err != nil {
+		t.Fatal(err)
+	}
+
+	heartbeat := func(exempt, saver, restricted, foreground bool) {
+		t.Helper()
+		if _, err := service.Heartbeat(device, HeartbeatInput{
+			SchemaVersion:             1,
+			AppVersion:                "0.3.1",
+			NotificationAccess:        true,
+			ListenerConnected:         true,
+			BatteryOptimizationExempt: boolPointer(exempt),
+			PowerSaveMode:             boolPointer(saver),
+			BackgroundRestricted:      boolPointer(restricted),
+			ForegroundService:         boolPointer(foreground),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	heartbeat(true, true, false, true)
+	status, err := service.Status(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Ready || status.ActiveDevices != 1 || status.PowerUnhealthyDevices != 0 {
+		t.Fatalf("power saver should remain ready when v0.3.1 is exempt and foreground: %+v", status)
+	}
+	devices, err := service.Devices(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || !devices[0].PowerHealthReported || !devices[0].PowerHealthy || !devices[0].BatteryOptimizationExempt || !devices[0].PowerSaveMode || !devices[0].ForegroundService {
+		t.Fatalf("unexpected power health: %+v", devices)
+	}
+
+	heartbeat(false, true, false, true)
+	status, _ = service.Status(time.Hour)
+	if status.Ready || status.PowerUnhealthyDevices != 1 {
+		t.Fatalf("battery-optimized v0.3.1 must fail closed: %+v", status)
+	}
+
+	heartbeat(true, true, true, true)
+	status, _ = service.Status(time.Hour)
+	if status.Ready {
+		t.Fatalf("background-restricted v0.3.1 must fail closed: %+v", status)
+	}
+
+	heartbeat(true, true, false, false)
+	status, _ = service.Status(time.Hour)
+	if status.Ready {
+		t.Fatalf("v0.3.1 without foreground runtime must fail closed: %+v", status)
+	}
+
+	heartbeat(true, true, false, true)
+	status, _ = service.Status(time.Hour)
+	if !status.Ready {
+		t.Fatalf("healthy always-on state should recover readiness: %+v", status)
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }

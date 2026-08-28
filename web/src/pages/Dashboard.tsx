@@ -58,7 +58,7 @@ export function Dashboard() {
         <div>
           <p className="eyebrow">ANDROID RELAY</p>
           <h2>{relay?.ready ? "ready" : "unavailable"}</h2>
-          <p className="muted">{relay ? `${relay.activeDevices}/${relay.enabledDevices} active · last heartbeat ${formatDate(relay.lastHeartbeatAt ?? undefined)} · queue ${relay.pendingQueueCount} pending / ${relay.failedQueueCount} failed · ${relay.recentErrorCount} server errors/24h` : "Relay status unavailable"}</p>
+          <p className="muted">{relay ? `${relay.activeDevices}/${relay.enabledDevices} active · ${relay.powerUnhealthyDevices} power-unhealthy · last heartbeat ${formatDate(relay.lastHeartbeatAt ?? undefined)} · queue ${relay.pendingQueueCount} pending / ${relay.failedQueueCount} failed · ${relay.recentErrorCount} server errors/24h` : "Relay status unavailable"}</p>
         </div>
         <Badge status={relay?.ready ? "connected" : "warning"} />
       </section>

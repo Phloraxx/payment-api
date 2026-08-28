@@ -317,6 +317,7 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
       <p className="muted">Paytm QR checkouts fail closed when no recently active relay device is available.</p>
       <dl className="settings compact">
         <div><dt>Active devices</dt><dd>{relay ? `${relay.activeDevices} / ${relay.enabledDevices}` : "—"}</dd></div>
+        <div><dt>Power unhealthy</dt><dd>{relay?.powerUnhealthyDevices ?? 0}</dd></div>
         <div><dt>Last heartbeat</dt><dd>{formatDate(relay?.lastHeartbeatAt ?? undefined)}</dd></div>
         <div><dt>Last relay event</dt><dd>{formatDate(relay?.lastEventAt ?? undefined)}</dd></div>
         <div><dt>Last matched payment</dt><dd>{formatDate(relay?.lastMatchedAt ?? undefined)}</dd></div>
@@ -331,6 +332,7 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
             <small>{device.deviceModel || "Android"} · app {device.appVersion || "unknown"} · fingerprint {device.deviceId ? `${device.deviceId.slice(0, 12)}…` : "unknown"}</small>
             <small>Last seen {formatDate(device.lastSeenAt ?? undefined)} · phone delivered {formatDate(device.lastDeliveryAt ?? undefined)} · last event {formatDate(device.lastEventAt ?? undefined)} · last match {formatDate(device.lastMatchedAt ?? undefined)}{!device.lastHeartbeatAt && device.heartbeatGraceUntil ? ` · legacy heartbeat grace until ${formatDate(device.heartbeatGraceUntil)}` : ""}</small>
             <small>Notifications {device.notificationAccess ? "allowed" : device.lastHeartbeatAt ? "blocked" : "not reported"} · listener {device.listenerConnected ? "connected" : device.lastHeartbeatAt ? "disconnected" : "not reported"} · queue {device.pendingCount} pending / {device.failedCount} failed · {device.recentErrorCount} server errors/24h{device.lastClientError ? ` · ${device.lastClientError}` : ""}</small>
+            <small>Power {device.powerHealthReported ? (device.powerHealthy ? "ready" : "NOT ready") : "not required/reported"} · battery {device.batteryOptimizationExempt ? "unrestricted" : device.powerHealthReported ? "optimized" : "unknown"} · foreground {device.foregroundService ? "active" : device.powerHealthReported ? "inactive" : "unknown"} · saver {device.powerSaveMode ? "on" : "off"} · background {device.backgroundRestricted ? "RESTRICTED" : "allowed"}</small>
           </div>
           <Badge status={device.active ? "connected" : device.enabled ? "warning" : "disabled"} />
           <button className={device.enabled ? "danger" : ""} disabled={relayBusy} onClick={() => void setRelayEnabled(device, !device.enabled)}>{device.enabled ? "Disable" : "Enable"}</button>
