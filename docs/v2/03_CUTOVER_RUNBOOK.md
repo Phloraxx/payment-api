@@ -21,6 +21,7 @@ All of the following must be true before merging/deploying:
 - `scripts/v2-production-copy-acceptance.sh` passes against a fresh restored production backup.
 - The production-copy alert test proves legacy webhook alerts aggregate without replay.
 - Production health is green before cutover.
+- `./scripts/v2-host-preflight.sh disabled` passes from the deployment host.
 
 ## Environment normalization
 
@@ -47,7 +48,7 @@ A non-printing config dry-run must pass after normalization. `PAYGATE_CHECKOUT_O
 8. Verify `/api/health` and `/api/paygate/health` immediately.
 9. Verify Google Messages remains paired/connected and the Android relay remains ready.
 10. Verify trusted payment creation remains authenticated and public checkout remains disabled.
-11. Verify retired Google Messages QR routes return 404.
+11. Verify retired Google Messages QR routes return 404 for an authenticated operator. Current v1 keeps these routes behind auth and returns 401 anonymously; v2 removes them entirely.
 12. Verify operator login and `/api/operator/v2/overview`.
 13. Wait through at least one operational-alert cron pass and confirm:
    - exhausted webhook rows are unchanged;
@@ -61,7 +62,7 @@ Rollback immediately if database health, payment reads, relay readiness, connect
 
 After the API compatibility soak is clean:
 1. Set `PAYGATE_CHECKOUT_ORIGINS` to the exact production customer origins only.
-2. Redeploy/restart the API and verify CORS preflight from both customer domains.
+2. Redeploy/restart the API and run `./scripts/v2-host-preflight.sh enabled https://payment.mulearnscet.in` and again for `https://pay.ieeesahrdaya.com`; both must pass exact-origin CORS and denied-origin checks.
 3. Confirm anonymous trusted `/api/payments` remains 401.
 4. Confirm `/api/checkout/v2/payment-accounts` is reachable only from an allowed browser origin.
 5. Confirm create/status quotas and `Retry-After` behavior.
