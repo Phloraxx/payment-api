@@ -63,6 +63,7 @@ type SMSEventRepository interface {
 	FindBySourceEvent(source, sourceEventID string) (*domain.SMSEvent, error)
 	Create(event *domain.SMSEvent) error
 	Save(event *domain.SMSEvent) error
+	ListBySourceSince(source string, since time.Time, limit int) ([]*domain.SMSEvent, error)
 }
 
 type EmailEventRepository interface {
@@ -129,6 +130,7 @@ type RelayEventRepository interface {
 	Latest(deviceRecordID string) (*domain.RelayEvent, error)
 	LatestMatched(deviceRecordID string) (*domain.RelayEvent, error)
 	CountErrorsSince(deviceRecordID string, since time.Time) (int64, error)
+	ListByPackageSince(appPackage string, since time.Time, limit int) ([]*domain.RelayEvent, error)
 }
 
 type OutboxDelivery struct {

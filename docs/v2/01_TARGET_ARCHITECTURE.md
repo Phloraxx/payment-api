@@ -184,4 +184,6 @@ No ordinary `GET` should expire unrelated payments or create unrelated webhook r
 
 ## Google Messages exit strategy
 
-The libgm connector remains available during migration, but Android Google Messages notification observation is shadow-compared against it. If measured miss rate, latency and parsed evidence quality satisfy the acceptance threshold, remove server-side pairing/reauth/QR/session machinery and delete unsupported QR fallback paths. The removal requires measured parity, not assumption.
+The libgm connector remains available during migration, but Android Google Messages notification observation is shadow-compared against it. The Android shadow path cannot mutate payments or open reviews; it records only parser status, amount and a SHA-256 hash of the bank reference in the existing relay event. Operator-facing QR pairing/refresh routes and UI are retired during this phase, while Google-account pairing and reauthentication remain available for libgm continuity.
+
+The manual removal-review gate is deliberately strict over a bounded 14-day default window: at least 100 complete libgm samples, at least 100 parseable Android samples, 100% Android bank-reference coverage, 100% exact amount+reference parity within the correlation window, and zero libgm-only complete events. Reaching the gate does not disable the connector automatically; it only permits a reviewed removal change. The removal requires measured parity, not assumption.

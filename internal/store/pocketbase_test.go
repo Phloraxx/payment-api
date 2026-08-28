@@ -202,3 +202,43 @@ func TestRelayEventRollsBackWithUnitOfWork(t *testing.T) {
 		t.Fatalf("events=%d", count)
 	}
 }
+
+func TestShadowHistoryQueriesRoundTrip(t *testing.T) {
+	_, db := testDatabase(t)
+	now := time.Now().UTC()
+	var deviceID string
+	if err := db.Write(context.Background(), func(uow UnitOfWork) error {
+		sms := &domain.SMSEvent{Source: "gmessages", SourceEventID: "shadow-sms", Body: "credit", Account: domain.PaymentAccountKotak, MessageTime: now, AmountPaise: 10001, RRN: "123456789012", ProcessingStatus: "matched"}
+		if err := uow.SMSEvents().Create(sms); err != nil {
+			return err
+		}
+		device := &domain.RelayDevice{DeviceID: strings.Repeat("e", 64), Name: "Phone", PublicKeyPEM: "key", Enabled: true}
+		if err := uow.Relay().Create(device); err != nil {
+			return err
+		}
+		deviceID = device.ID
+		event := &domain.RelayEvent{DeviceRecordID: device.ID, EventID: strings.Repeat("f", 64), Kind: "notification", AppPackage: "com.google.android.apps.messaging", ProcessingStatus: "shadow_observed", NotificationWhen: now, ProviderResult: map[string]any{"provider": "google_messages_android_shadow", "parseStatus": "complete", "amountPaise": 10001}}
+		return uow.RelayEvents().Create(event)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.View(context.Background(), func(uow UnitOfWork) error {
+		smsItems, err := uow.SMSEvents().ListBySourceSince("gmessages", now.Add(-time.Minute), 10)
+		if err != nil {
+			return err
+		}
+		if len(smsItems) != 1 || smsItems[0].RRN != "123456789012" {
+			t.Fatalf("sms items=%+v", smsItems)
+		}
+		relayItems, err := uow.RelayEvents().ListByPackageSince("com.google.android.apps.messaging", now.Add(-time.Minute), 10)
+		if err != nil {
+			return err
+		}
+		if len(relayItems) != 1 || relayItems[0].DeviceRecordID != deviceID || relayItems[0].ProcessingStatus != "shadow_observed" {
+			t.Fatalf("relay items=%+v", relayItems)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}

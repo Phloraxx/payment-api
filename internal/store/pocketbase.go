@@ -314,6 +314,21 @@ func (r *pocketBaseSMSEvents) Save(event *domain.SMSEvent) error {
 	return r.app.Save(record)
 }
 
+func (r *pocketBaseSMSEvents) ListBySourceSince(source string, since time.Time, limit int) ([]*domain.SMSEvent, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	records, err := r.app.FindRecordsByFilter("sms_events", "source = {:source} && message_time >= {:since}", "message_time", limit, 0, dbx.Params{"source": source, "since": storeDate(since)})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]*domain.SMSEvent, 0, len(records))
+	for _, record := range records {
+		items = append(items, smsEventFromRecord(record))
+	}
+	return items, nil
+}
+
 func writeSMSEvent(record *core.Record, event *domain.SMSEvent) {
 	record.Set("source", event.Source)
 	record.Set("source_event_id", event.SourceEventID)
@@ -1001,6 +1016,21 @@ func (r *pocketBaseRelayEvents) CountErrorsSince(deviceRecordID string, since ti
 		return r.app.CountRecords("relay_events", dbx.NewExp("processing_status = 'error' AND created >= {:cutoff}", dbx.Params{"cutoff": storeDate(since)}))
 	}
 	return r.app.CountRecords("relay_events", dbx.NewExp("device = {:device} AND processing_status = 'error' AND created >= {:cutoff}", dbx.Params{"device": deviceRecordID, "cutoff": storeDate(since)}))
+}
+
+func (r *pocketBaseRelayEvents) ListByPackageSince(appPackage string, since time.Time, limit int) ([]*domain.RelayEvent, error) {
+	if limit <= 0 {
+		limit = 5000
+	}
+	records, err := r.app.FindRecordsByFilter("relay_events", "app_package = {:package} && created >= {:since}", "created", limit, 0, dbx.Params{"package": appPackage, "since": storeDate(since)})
+	if err != nil {
+		return nil, err
+	}
+	items := make([]*domain.RelayEvent, 0, len(records))
+	for _, record := range records {
+		items = append(items, relayEventFromRecord(record))
+	}
+	return items, nil
 }
 
 func writeRelayEvent(record *core.Record, event *domain.RelayEvent) {

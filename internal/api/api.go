@@ -121,6 +121,7 @@ func (a *API) Register(app core.App) {
 		e.Router.POST("/api/operator/v2/reviews/{id}/resolve", a.operatorV2ResolveReview).Bind(apis.BodyLimit(maxReviewRequestBytes))
 		e.Router.GET("/api/operator/v2/alerts", a.operatorV2Alerts)
 		e.Router.GET("/api/operator/v2/relay", a.operatorV2Relay)
+		e.Router.GET("/api/operator/v2/evidence-shadow/google-messages", a.operatorV2GoogleMessagesShadow)
 		e.Router.GET("/api/operator/v2/reconciliation", a.operatorV2ReconciliationRuns)
 		e.Router.GET("/api/operator/v2/reconciliation/{id}/entries", a.operatorV2ReconciliationEntries)
 		e.Router.GET("/api/operator/v2/refunds", a.operatorV2Refunds)
@@ -152,11 +153,6 @@ func (a *API) Register(app core.App) {
 		e.Router.GET("/api/connector/gmessages/status", a.gmessagesStatus)
 		e.Router.POST("/api/connector/gmessages/pair/google", a.gmessagesGooglePair).Bind(apis.BodyLimit(maxGMessagesPairBytes))
 		e.Router.POST("/api/connector/gmessages/reauth/google", a.gmessagesGoogleReauth).Bind(apis.BodyLimit(maxGMessagesPairBytes))
-		e.Router.POST("/api/connector/gmessages/pair/qr", a.gmessagesPair)
-		e.Router.POST("/api/connector/gmessages/pair/qr/refresh", a.gmessagesPairRefresh)
-		// Backward-compatible QR aliases from the first PayGate rebuild.
-		e.Router.POST("/api/connector/gmessages/pair", a.gmessagesPair)
-		e.Router.POST("/api/connector/gmessages/pair/refresh", a.gmessagesPairRefresh)
 		e.Router.POST("/api/connector/gmessages/reconnect", a.gmessagesReconnect)
 		e.Router.DELETE("/api/connector/gmessages/pair", a.gmessagesUnpair)
 
@@ -907,34 +903,6 @@ func (a *API) gmessagesGoogleReauth(e *core.RequestEvent) error {
 		return e.BadRequestError(err.Error(), nil)
 	}
 	return e.JSON(http.StatusOK, a.GMessages.Status())
-}
-
-func (a *API) gmessagesPair(e *core.RequestEvent) error {
-	if !a.dashboardAuth(e) {
-		return e.UnauthorizedError("dashboard authentication is required", nil)
-	}
-	if a.GMessages == nil {
-		return e.BadRequestError("Google Messages connector is unavailable", nil)
-	}
-	qrURL, err := a.GMessages.BeginPair()
-	if err != nil {
-		return e.BadRequestError("failed to start Google Messages pairing", err)
-	}
-	return e.JSON(http.StatusOK, map[string]any{"qrUrl": qrURL, "status": a.GMessages.Status()})
-}
-
-func (a *API) gmessagesPairRefresh(e *core.RequestEvent) error {
-	if !a.dashboardAuth(e) {
-		return e.UnauthorizedError("dashboard authentication is required", nil)
-	}
-	if a.GMessages == nil {
-		return e.BadRequestError("Google Messages connector is unavailable", nil)
-	}
-	qrURL, err := a.GMessages.RefreshPair()
-	if err != nil {
-		return e.BadRequestError("failed to refresh Google Messages pairing", err)
-	}
-	return e.JSON(http.StatusOK, map[string]any{"qrUrl": qrURL, "status": a.GMessages.Status()})
 }
 
 func (a *API) gmessagesReconnect(e *core.RequestEvent) error {

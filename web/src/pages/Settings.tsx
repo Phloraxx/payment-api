@@ -1,8 +1,7 @@
-import QRCode from "qrcode";
 import { useCallback, useEffect, useState } from "react";
 import { Badge, formatDate } from "../components/common";
 import { api } from "../api";
-import type { BackupStatus, Connector, RelayDevice, RelayStatus } from "../types";
+import type { BackupStatus, Connector, EvidenceShadowMetrics, RelayDevice, RelayStatus } from "../types";
 
 type SafeConfig = {
   upiId: string;
@@ -34,7 +33,6 @@ type SafeConfig = {
   connector: Connector;
 };
 
-type QRPairResponse = { qrUrl: string; status: Connector };
 type GooglePairResponse = { emoji: string; accountEmail: string; status: Connector };
 
 const googleMessagesConfigURL = "https://accounts.google.com/AccountChooser?continue=https://messages.google.com/web/config";
@@ -45,29 +43,30 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
   const [cookieData, setCookieData] = useState("");
   const [pairingEmoji, setPairingEmoji] = useState("");
   const [pairingAccount, setPairingAccount] = useState("");
-  const [qrUrl, setQrUrl] = useState("");
-  const [qrImage, setQrImage] = useState("");
   const [busy, setBusy] = useState(false);
   const [backup, setBackup] = useState<BackupStatus | null>(null);
   const [backupBusy, setBackupBusy] = useState(false);
   const [relay, setRelay] = useState<RelayStatus | null>(null);
   const [relayDevices, setRelayDevices] = useState<RelayDevice[]>([]);
   const [relayBusy, setRelayBusy] = useState(false);
+  const [shadow, setShadow] = useState<EvidenceShadowMetrics | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, status, backupStatus, relayStatus, relayDeviceResult] = await Promise.all([
+      const [cfg, status, backupStatus, relayStatus, relayDeviceResult, shadowStatus] = await Promise.all([
         api<SafeConfig>("/api/config"),
         api<Connector>("/api/connector/gmessages/status"),
         api<BackupStatus>("/api/paygate/backups/status"),
         api<RelayStatus>("/api/relay/status"),
         api<{ devices: RelayDevice[] }>("/api/relay/devices"),
+        api<EvidenceShadowMetrics>("/api/operator/v2/evidence-shadow/google-messages?days=14"),
       ]);
       setConfig(cfg);
       setConnector(status);
       setBackup(backupStatus);
       setRelay(relayStatus);
       setRelayDevices(relayDeviceResult.devices);
+      setShadow(shadowStatus);
       if (status.pairingMethod === "google" && status.state === "pairing") {
         setPairingEmoji(status.pairingEmoji ?? "");
         setPairingAccount(status.accountEmail ?? "");
@@ -76,8 +75,6 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
       if (status.paired && !refreshingGoogleAuth) {
         setCookieData("");
         setPairingEmoji("");
-        setQrUrl("");
-        setQrImage("");
       }
     } catch (err) {
       notify(err instanceof Error ? err.message : "Could not load settings.");
@@ -89,25 +86,6 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
     const timer = window.setInterval(() => void refresh(), 3_000);
     return () => window.clearInterval(timer);
   }, [refresh]);
-
-  useEffect(() => {
-    if (!qrUrl) { setQrImage(""); return; }
-    void QRCode.toDataURL(qrUrl, { width: 420, margin: 2, errorCorrectionLevel: "L" }).then(setQrImage).catch(() => setQrImage(""));
-  }, [qrUrl]);
-
-  useEffect(() => {
-    if (!qrUrl || connector?.state !== "pairing" || connector.pairingMethod !== "qr") return;
-    const timer = window.setInterval(async () => {
-      try {
-        const result = await api<QRPairResponse>("/api/connector/gmessages/pair/qr/refresh", { method: "POST" });
-        setQrUrl(result.qrUrl);
-        setConnector(result.status);
-      } catch (err) {
-        notify(err instanceof Error ? err.message : "Could not refresh pairing QR.");
-      }
-    }, 20_000);
-    return () => window.clearInterval(timer);
-  }, [qrUrl, connector?.state, connector?.pairingMethod, notify]);
 
   async function startGooglePairing() {
     if (!cookieData.trim()) {
@@ -153,20 +131,6 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
     }
   }
 
-  async function startQRPairing() {
-    setBusy(true);
-    try {
-      const result = await api<QRPairResponse>("/api/connector/gmessages/pair/qr", { method: "POST" });
-      setQrUrl(result.qrUrl);
-      setConnector(result.status);
-      notify("QR fallback pairing started.");
-    } catch (err) {
-      notify(err instanceof Error ? err.message : "QR pairing could not start.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function reconnect() {
     setBusy(true);
     try {
@@ -183,7 +147,7 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
     setBusy(true);
     try {
       setConnector(await api<Connector>("/api/connector/gmessages/pair", { method: "DELETE" }));
-      setCookieData(""); setPairingEmoji(""); setPairingAccount(""); setQrUrl(""); setQrImage("");
+      setCookieData(""); setPairingEmoji(""); setPairingAccount("");
       notify(pairing ? "Pairing cancelled." : "Google Messages unpaired.");
     } catch (err) {
       notify(err instanceof Error ? err.message : "Unpair failed.");
@@ -245,7 +209,7 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
         <div><p className="eyebrow">GOOGLE MESSAGES</p><h2>{enabled ? displayState : "disabled"}</h2></div>
         <Badge status={connector?.connected ? "connected" : connector?.state ?? "disabled"} />
       </div>
-      <p className="muted">{connector?.lastError || "Read-only SMS connector. Google account + emoji pairing is preferred; QR remains available as a fallback."}</p>
+      <p className="muted">{connector?.lastError || "Read-only SMS connector retained during measured Android shadow parity. Google account + emoji pairing remains available; QR fallback is retired."}</p>
       <dl className="settings compact">
         <div><dt>Paired</dt><dd>{connector?.paired ? "Yes" : "No"}</dd></div>
         <div><dt>Pairing method</dt><dd>{connector?.pairingMethod || "—"}</dd></div>
@@ -270,7 +234,6 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
         <p className="muted">Cookie values are never returned to the browser or written to application logs. PayGate persists them in the restricted session file only after pairing succeeds.</p>
         <div className="actions">
           <button className="primary" disabled={busy || !cookieData.trim()} onClick={() => void startGooglePairing()}>Start Google account pairing</button>
-          <button disabled={busy} onClick={() => void startQRPairing()}>Use QR fallback</button>
         </div>
       </div>}
 
@@ -301,12 +264,31 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
         <p className="muted">Keep Google Messages open and the phone online. This request expires automatically.</p>
       </div>}
 
-      {qrImage && connector?.pairingMethod === "qr" && <div className="pair-panel"><img src={qrImage} alt="Google Messages pairing QR" /><p>Google Messages → Device pairing → Switch to QR pairing → scan this code.</p><p className="muted">The QR refreshes automatically before the token expires.</p></div>}
+
 
       <div className="actions">
         <button disabled={!enabled || !connector?.paired || googleReauth || busy} onClick={() => void reconnect()}>Reconnect</button>
         <button className="danger" disabled={!enabled || (!connector?.paired && !pairing) || busy} onClick={() => void unpair()}>{pairing ? "Cancel pairing" : "Unpair"}</button>
       </div>
+    </section>
+
+    <section className="card">
+      <div className="section-title">
+        <div><p className="eyebrow">GOOGLE MESSAGES EXIT GATE</p><h2>{shadow?.removalReady ? "eligible for manual review" : "shadow measurement"}</h2></div>
+        <Badge status={shadow?.removalReady ? "connected" : "warning"} />
+      </div>
+      <p className="muted">Android Messages is observation-only. This gate never confirms payments or disables libgm automatically.</p>
+      <dl className="settings compact">
+        <div><dt>Measurement window</dt><dd>{shadow ? `${shadow.windowDays} days` : "—"}</dd></div>
+        <div><dt>Exact paired evidence</dt><dd>{shadow ? `${shadow.exactMatches} / ${shadow.libgmComplete} complete libgm` : "—"}</dd></div>
+        <div><dt>Android reference coverage</dt><dd>{shadow ? `${shadow.referenceCoveragePercent.toFixed(2)}%` : "—"}</dd></div>
+        <div><dt>Exact parity</dt><dd>{shadow ? `${shadow.exactParityPercent.toFixed(2)}%` : "—"}</dd></div>
+        <div><dt>Android-only complete</dt><dd>{shadow?.androidOnlyComplete ?? "—"}</dd></div>
+        <div><dt>libgm-only complete</dt><dd>{shadow?.libgmOnlyComplete ?? "—"}</dd></div>
+        <div><dt>Android observed / parseable / complete</dt><dd>{shadow ? `${shadow.androidObserved} / ${shadow.androidParseable} / ${shadow.androidComplete}` : "—"}</dd></div>
+        <div><dt>Gate</dt><dd>{shadow?.removalGate?.replaceAll("_", " ") ?? "collecting"}</dd></div>
+      </dl>
+      <p className="muted">Removal review requires at least 100 complete libgm samples, 100% Android reference coverage, 100% exact parity, and zero libgm-only complete events.</p>
     </section>
 
     <section className="card">

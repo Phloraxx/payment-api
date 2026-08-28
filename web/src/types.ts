@@ -15,6 +15,23 @@ export type Connector = {
 };
 
 
+export type EvidenceShadowMetrics = {
+  windowStart: string;
+  windowDays: number;
+  androidObserved: number;
+  androidParseable: number;
+  androidComplete: number;
+  libgmObserved: number;
+  libgmComplete: number;
+  exactMatches: number;
+  androidOnlyComplete: number;
+  libgmOnlyComplete: number;
+  referenceCoveragePercent: number;
+  exactParityPercent: number;
+  removalReady: boolean;
+  removalGate: string;
+};
+
 export type RelayStatus = {
   ready: boolean;
   enabledDevices: number;

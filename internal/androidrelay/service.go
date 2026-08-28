@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Phloraxx/payment-api/internal/domain"
+	"github.com/Phloraxx/payment-api/internal/evidenceshadow"
 	"github.com/Phloraxx/payment-api/internal/paytmnotification"
 	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/pocketbase/core"
@@ -276,6 +277,15 @@ func (s *Service) Ingest(device *domain.RelayDevice, in EventInput, raw any) (Ev
 			event.Error = "group summary notification"
 			result.Status = "ignored"
 			result.Action = "ignored_group_summary"
+			return repo.Save(event)
+		}
+		if n.PackageName == GoogleMessagesPackage {
+			custom := strings.Join(n.CustomTexts, "\n")
+			shadowText := strings.TrimSpace(strings.Join([]string{n.Title, n.Text, n.BigText, custom, strings.Join(n.TextLines, "\n")}, "\n"))
+			annotation := evidenceshadow.Annotate(event, shadowText)
+			event.ProcessingStatus = "shadow_observed"
+			result.Status = "observed"
+			result.Action = "shadow_" + annotation.ParseStatus
 			return repo.Save(event)
 		}
 		if n.PackageName != PaytmBusinessPackage || s.Paytm == nil {

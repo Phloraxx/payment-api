@@ -7,8 +7,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Phloraxx/payment-api/internal/evidenceshadow"
 	"github.com/Phloraxx/payment-api/internal/operatorview"
 	"github.com/Phloraxx/payment-api/internal/reviews"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/pocketbase/core"
 )
 
@@ -111,6 +113,25 @@ func (a *API) operatorV2Relay(e *core.RequestEvent) error {
 		return e.InternalServerError("failed to load relay status", err)
 	}
 	return e.JSON(http.StatusOK, status)
+}
+
+func (a *API) operatorV2GoogleMessagesShadow(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("operator authentication is required", nil)
+	}
+	days := 14
+	if raw := strings.TrimSpace(e.Request.URL.Query().Get("days")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 30 {
+			return e.BadRequestError("days must be an integer between 1 and 30", nil)
+		}
+		days = parsed
+	}
+	metrics, err := (evidenceshadow.MetricsService{Store: store.NewPocketBase(e.App)}).Current(days)
+	if err != nil {
+		return e.InternalServerError("failed to calculate Google Messages shadow parity", err)
+	}
+	return e.JSON(http.StatusOK, metrics)
 }
 
 func queryLimit(e *core.RequestEvent, fallback int) int {

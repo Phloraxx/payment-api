@@ -8,7 +8,7 @@ This is a strangler rewrite, not a big-bang replacement. Production remains on t
 
 - Merge/fix relay power-health compatibility.
 - Replace webhook exhaustion alert scanning with aggregate condition semantics.
-- Remove/disable unsupported Google Messages QR fallback from operator-facing paths.
+- [done in rewrite branch] Remove unsupported Google Messages QR fallback from operator-facing HTTP/UI paths; retain Google-account pairing/reauth during parity measurement.
 - Add characterization tests for payment allocation, cancellation, late evidence, stale evidence, duplicate RRN/reference, idempotency, refunds and reconciliation.
 - Capture production-like anonymized fixture cases for every evidence source.
 
@@ -28,6 +28,7 @@ Exit: application services can execute through repositories while the live schem
 - Add normalized `Evidence` and source adapter interfaces.
 - Run Kotak SMS, Slice email and Paytm notification fixtures through both v1 and v2 match decision logic.
 - Persist v2 normalized evidence in shadow-only storage or test fixtures first; do not mutate production payment state from v2 yet.
+- For Google Messages, reuse relay/SMS event history for shadow comparison and store only non-raw Android parse metadata plus a hashed bank reference; require the documented strict parity gate before manual libgm removal review.
 - Compare candidate IDs, outcome, paid/late classification and rejection reason.
 - Require exact parity on all invariant cases before enabling v2 writes.
 

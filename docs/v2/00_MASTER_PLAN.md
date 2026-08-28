@@ -60,7 +60,8 @@ All payment evidence sources normalize into one domain `Evidence` model and one 
 - Use one candidate selection algorithm for point-in-time and time-window evidence.
 - Make manual review use the same matcher invariants with an operator-selected candidate.
 - Preserve raw source events separately from normalized evidence and redact them by retention policy.
-- Shadow-test Google Messages Android notification evidence against the server-side libgm connector before any connector removal.
+- Shadow-test Google Messages Android notification evidence against the server-side libgm connector before any connector removal. The Android path is observation-only and stores only non-raw parse metadata plus a hashed reference for correlation.
+- QR pairing is retired from operator-facing HTTP/UI paths during the shadow period; Google-account pairing/reauth remains available until the libgm exit gate is satisfied.
 
 ### C. Durable delivery and alerts
 - Keep the payment outbox concept.
