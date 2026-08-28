@@ -14,7 +14,6 @@ import (
 	"github.com/Phloraxx/payment-api/internal/money"
 	"github.com/Phloraxx/payment-api/internal/store"
 	_ "github.com/Phloraxx/payment-api/migrations"
-	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
 )
 
@@ -107,7 +106,7 @@ func TestPaytmQROnlyCreateResponseEncodesExactAmountWithoutTransactionNote(t *te
 }
 
 func TestCreateGuardedSkipsReadinessGateForIdempotentReplay(t *testing.T) {
-	service, _, _ := paymentTestService(t)
+	service, app, _ := paymentTestService(t)
 	input := CreateInput{AmountRupees: 25, PaymentAccount: "kotak", IdempotencyKey: "guarded-replay"}
 	gateCalls := 0
 	first, replayed, err := service.CreateGuarded(input, func(store.UnitOfWork) error {
@@ -126,7 +125,7 @@ func TestCreateGuardedSkipsReadinessGateForIdempotentReplay(t *testing.T) {
 		t.Fatalf("guarded replay = %+v replayed=%v err=%v", replay, replayed, err)
 	}
 
-	before, err := service.App.CountRecords("payments")
+	before, err := app.CountRecords("payments")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +135,7 @@ func TestCreateGuardedSkipsReadinessGateForIdempotentReplay(t *testing.T) {
 	if err == nil || replayed {
 		t.Fatalf("denied guarded create err=%v replayed=%v", err, replayed)
 	}
-	after, err := service.App.CountRecords("payments")
+	after, err := app.CountRecords("payments")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +168,7 @@ func TestCreateAllocatesAllNinetyNineSlotsAndExhausts(t *testing.T) {
 }
 
 func TestCreateIdempotencyAndExactPaymentMatching(t *testing.T) {
-	service, _, now := paymentTestService(t)
+	service, app, now := paymentTestService(t)
 	first, replayed, err := service.Create(CreateInput{
 		AmountRupees:   100,
 		ExternalID:     "order-1",
@@ -204,7 +203,7 @@ func TestCreateIdempotencyAndExactPaymentMatching(t *testing.T) {
 	}
 
 	// A freshly constructed service still reads the durable record state.
-	restarted := NewService(service.App, service.Config, nil)
+	restarted := NewService(app, service.Config, nil)
 	restarted.Now = func() time.Time { return *now }
 	persisted, err := restarted.Get(first.ID)
 	if err != nil || persisted.Status != domain.StatusPaid || persisted.PayablePaise != first.PayablePaise {
@@ -263,12 +262,7 @@ func TestConcurrentAllocationsRemainUnique(t *testing.T) {
 }
 
 func TestPublicPaymentRedactsEvidence(t *testing.T) {
-	record := core.NewRecord(core.NewBaseCollection("payments"))
-	record.Id = "payment-id"
-	record.Set("requested_amount", 10000)
-	record.Set("payable_amount", 10001)
-	record.Set("status", "paid")
-	payment := FromRecord(record)
+	payment := &domain.Payment{ID: "payment-id", RequestedPaise: 10000, PayablePaise: 10001, Status: domain.StatusPaid}
 	public := PublicPayment(payment)
 	for _, forbidden := range []string{"rrn", "upiId", "payerName", "rawSms"} {
 		if _, ok := public[forbidden]; ok {

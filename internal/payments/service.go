@@ -25,13 +25,11 @@ import (
 const EvidenceTimestampTolerance = 2 * time.Second
 
 type WebhookScheduler interface {
-	Schedule(app core.App, event string, payment *core.Record, at time.Time) error // transitional adapter
 	SchedulePayment(uow store.UnitOfWork, event string, payment *domain.Payment, at time.Time) error
 	Wake()
 }
 
 type Service struct {
-	App      core.App // transitional write adapter; remove after write repositories migrate
 	Store    store.Database
 	Config   config.Config
 	Webhooks WebhookScheduler
@@ -56,7 +54,6 @@ type MatchResult struct {
 
 func NewService(app core.App, cfg config.Config, webhooks WebhookScheduler) *Service {
 	return &Service{
-		App:         app,
 		Store:       store.NewPocketBase(app),
 		Config:      cfg,
 		Webhooks:    webhooks,
@@ -467,31 +464,6 @@ func (s *Service) Stats() (map[string]int64, error) {
 		}
 	}
 	return result, nil
-}
-
-func FromRecord(record *core.Record) *domain.Payment {
-	if record == nil {
-		return nil
-	}
-	return &domain.Payment{
-		ID:                record.Id,
-		Account:           domain.PaymentAccount(record.GetString("payment_account")),
-		RequestedPaise:    int64(record.GetInt("requested_amount")),
-		PayablePaise:      int64(record.GetInt("payable_amount")),
-		Status:            domain.PaymentStatus(record.GetString("status")),
-		CreatedAt:         record.GetDateTime("created_at").Time(),
-		ExpiresAt:         record.GetDateTime("expires_at").Time(),
-		ReuseAfter:        record.GetDateTime("reuse_after").Time(),
-		RRN:               record.GetString("rrn"),
-		UPIId:             record.GetString("upi_id"),
-		PayerName:         record.GetString("payer_name"),
-		EvidenceSource:    record.GetString("evidence_source"),
-		EvidenceReference: record.GetString("evidence_reference"),
-		PaidAt:            record.GetDateTime("paid_at").Time(),
-		ResolvedAt:        record.GetDateTime("resolved_at").Time(),
-		ExternalID:        record.GetString("external_id"),
-		IdempotencyKey:    record.GetString("idempotency_key"),
-	}
 }
 
 func PublicPayment(payment *domain.Payment) map[string]any {

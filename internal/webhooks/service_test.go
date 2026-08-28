@@ -40,6 +40,20 @@ func createWebhookTestPayment(t *testing.T, app *tests.TestApp, cfg config.Confi
 	return payment.ID
 }
 
+func scheduleWebhookTestPayment(t *testing.T, service *Service, app *tests.TestApp, event, paymentID string, at time.Time) {
+	t.Helper()
+	db := store.NewPocketBase(app)
+	if err := db.Write(context.Background(), func(uow store.UnitOfWork) error {
+		payment, err := uow.Payments().Get(paymentID)
+		if err != nil {
+			return err
+		}
+		return service.SchedulePayment(uow, event, payment, at)
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSignIsStableHMAC(t *testing.T) {
 	got := Sign("secret", "123", []byte(`{"ok":true}`))
 	want := "12f14ade5e7e737164d9ae20ea4e070056a3045b2c8f42f5f216008eae4684dd"
@@ -63,12 +77,9 @@ func TestWebhookDeliveryPersistsSuccessAndSignature(t *testing.T) {
 	defer server.Close()
 	cfg := config.Config{PaymentTTL: time.Minute, AmountQuarantine: time.Hour, OutgoingWebhookURL: server.URL, OutgoingWebhookSecret: "secret"}
 	paymentID := createWebhookTestPayment(t, app, cfg, now)
-	payment, _ := app.FindRecordById("payments", paymentID)
 	service := NewService(app, cfg)
 	service.Now = func() time.Time { return now }
-	if err := service.Schedule(app, "payment.paid", payment, now); err != nil {
-		t.Fatal(err)
-	}
+	scheduleWebhookTestPayment(t, service, app, "payment.paid", paymentID, now)
 	processed, err := service.SendPending(context.Background())
 	if err != nil || processed != 1 {
 		t.Fatalf("SendPending() = %d, %v", processed, err)
@@ -139,12 +150,9 @@ func TestWebhookRetryIsDurableAndEventuallySucceeds(t *testing.T) {
 	defer server.Close()
 	cfg := config.Config{PaymentTTL: time.Minute, AmountQuarantine: time.Hour, OutgoingWebhookURL: server.URL, OutgoingWebhookSecret: "secret"}
 	paymentID := createWebhookTestPayment(t, app, cfg, now)
-	payment, _ := app.FindRecordById("payments", paymentID)
 	service := NewService(app, cfg)
 	service.Now = func() time.Time { return now }
-	if err := service.Schedule(app, "payment.paid", payment, now); err != nil {
-		t.Fatal(err)
-	}
+	scheduleWebhookTestPayment(t, service, app, "payment.paid", paymentID, now)
 	if _, err := service.SendPending(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -176,12 +184,9 @@ func TestConcurrentWebhookPassesClaimDeliveryOnce(t *testing.T) {
 	defer server.Close()
 	cfg := config.Config{PaymentTTL: time.Minute, AmountQuarantine: time.Hour, OutgoingWebhookURL: server.URL, OutgoingWebhookSecret: "secret"}
 	paymentID := createWebhookTestPayment(t, app, cfg, now)
-	payment, _ := app.FindRecordById("payments", paymentID)
 	service := NewService(app, cfg)
 	service.Now = func() time.Time { return now }
-	if err := service.Schedule(app, "payment.paid", payment, now); err != nil {
-		t.Fatal(err)
-	}
+	scheduleWebhookTestPayment(t, service, app, "payment.paid", paymentID, now)
 
 	var wg sync.WaitGroup
 	for range 2 {
@@ -209,12 +214,9 @@ func TestWebhookClientDoesNotFollowRedirects(t *testing.T) {
 	defer redirector.Close()
 	cfg := config.Config{PaymentTTL: time.Minute, AmountQuarantine: time.Hour, OutgoingWebhookURL: redirector.URL, OutgoingWebhookSecret: "redirect-secret"}
 	paymentID := createWebhookTestPayment(t, app, cfg, now)
-	payment, _ := app.FindRecordById("payments", paymentID)
 	service := NewService(app, cfg)
 	service.Now = func() time.Time { return now }
-	if err := service.Schedule(app, "payment.paid", payment, now); err != nil {
-		t.Fatal(err)
-	}
+	scheduleWebhookTestPayment(t, service, app, "payment.paid", paymentID, now)
 	if _, err := service.SendPending(context.Background()); err != nil {
 		t.Fatal(err)
 	}
