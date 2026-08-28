@@ -269,11 +269,11 @@ func (s *Service) Match(parsed domain.ParsedSMS) (*MatchResult, error) {
 	}
 	now := s.now()
 	var record *core.Record
-	var action string
+	var outcome domain.MatchOutcome
 	var queued bool
 	err := s.App.RunInTransaction(func(tx core.App) error {
 		var err error
-		record, action, queued, err = s.MatchInApp(tx, parsed, now)
+		record, outcome, queued, err = s.matchBankEvidenceInApp(tx, parsed, now)
 		return err
 	})
 	if err != nil {
@@ -282,105 +282,30 @@ func (s *Service) Match(parsed domain.ParsedSMS) (*MatchResult, error) {
 	if queued {
 		s.WakeWebhooks()
 	}
-	return &MatchResult{Payment: FromRecord(record), Action: action}, nil
+	return &MatchResult{Payment: FromRecord(record), Action: string(outcome)}, nil
 }
 
-// MatchInApp applies exact-amount matching inside the caller's transaction.
-// It returns whether outgoing webhook work was queued so the caller can wake the
-// delivery loop only after the transaction commits.
+// MatchInApp is the backward-compatible bank-evidence adapter. New sources
+// should normalize into domain.Evidence and call MatchEvidenceInApp instead.
 func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time) (*core.Record, string, bool, error) {
-	now = now.UTC()
-	account, _, err := s.paymentAccount(string(parsed.Account))
-	if err != nil {
-		return nil, "not_matchable", false, err
-	}
-	rrn := strings.TrimSpace(parsed.RRN)
-	evidenceAt := parsed.OccurredAt.UTC()
-	if evidenceAt.IsZero() || evidenceAt.After(now) {
-		evidenceAt = now
-	}
-	if rrn == "" || parsed.AmountPaise <= 0 {
-		return nil, "not_matchable", false, domain.New("SMS_NOT_MATCHABLE", "bank SMS requires an exact amount and RRN", http.StatusUnprocessableEntity)
-	}
+	record, outcome, queued, err := s.matchBankEvidenceInApp(tx, parsed, now)
+	return record, string(outcome), queued, err
+}
 
-	existing, err := tx.FindFirstRecordByData("payments", "rrn", rrn)
-	if err == nil {
-		if existing.GetString("payment_account") != account {
-			return nil, "rrn_account_mismatch", false, domain.New("RRN_ACCOUNT_MISMATCH", "the UPI reference was already recorded for a different payment account", http.StatusConflict)
-		}
-		if int64(existing.GetInt("payable_amount")) != parsed.AmountPaise {
-			return nil, "rrn_amount_mismatch", false, domain.New("RRN_AMOUNT_MISMATCH", "the UPI reference was already recorded with a different amount", http.StatusConflict)
-		}
-		return existing, "duplicate_rrn", false, nil
+func (s *Service) matchBankEvidenceInApp(tx core.App, parsed domain.ParsedSMS, now time.Time) (*core.Record, domain.MatchOutcome, bool, error) {
+	if parsed.AmountPaise <= 0 || strings.TrimSpace(parsed.RRN) == "" {
+		return nil, domain.MatchNotMatchable, false, domain.New("SMS_NOT_MATCHABLE", "bank SMS requires an exact amount and RRN", http.StatusUnprocessableEntity)
 	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, "error", false, err
+	source := domain.EvidenceSourceBankSMS
+	if parsed.Account == domain.PaymentAccountSlice {
+		source = domain.EvidenceSourceBankEmail
 	}
-
-	createdBefore := evidenceAt.Add(EvidenceTimestampTolerance)
-
-	// Match by when the bank says the credit occurred, not merely when the SMS
-	// happened to reach PayGate. This prevents an on-time payment from becoming
-	// "late" solely because the bank/phone delivered the SMS after expiry.
-	onTime, err := tx.FindRecordsByFilter(
-		"payments",
-		"payment_account = {:account} && payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
-		"created",
-		2,
-		0,
-		dbx.Params{"account": account, "amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
-	)
-	if err != nil {
-		return nil, "error", false, err
-	}
-	if len(onTime) > 1 {
-		return nil, "ambiguous", false, domain.AmbiguousMatch()
-	}
-	if len(onTime) == 1 {
-		record := onTime[0]
-		applyEvidence(record, parsed, domain.StatusPaid, now, s.Config.AmountQuarantine)
-		if err := tx.Save(record); err != nil {
-			return nil, "error", false, err
-		}
-		if err := s.schedule(tx, "payment.paid", record, now); err != nil {
-			return nil, "error", false, err
-		}
-		return record, "marked_paid", true, nil
-	}
-
-	expired, err := s.ExpireDueInApp(tx, now)
-	if err != nil {
-		return nil, "error", false, err
-	}
-	queued := expired > 0
-
-	late, err := tx.FindRecordsByFilter(
-		"payments",
-		"payment_account = {:account} && payable_amount = {:amount} && (status = 'expired' || status = 'cancelled') && reuse_after > {:now} && created_at <= {:createdBefore}",
-		"-created",
-		2,
-		0,
-		dbx.Params{"account": account, "amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
-	)
-	if err != nil {
-		return nil, "error", queued, err
-	}
-	if len(late) > 1 {
-		return nil, "ambiguous", queued, domain.AmbiguousMatch()
-	}
-	if len(late) == 1 {
-		record := late[0]
-		applyEvidence(record, parsed, domain.StatusLate, now, s.Config.AmountQuarantine)
-		if err := tx.Save(record); err != nil {
-			return nil, "error", queued, err
-		}
-		if err := s.schedule(tx, "payment.late", record, now); err != nil {
-			return nil, "error", queued, err
-		}
-		return record, "marked_late", true, nil
-	}
-
-	return nil, "unmatched", queued, nil
+	return s.MatchEvidenceInApp(tx, domain.Evidence{
+		Account: parsed.Account, AmountPaise: parsed.AmountPaise,
+		OccurredFrom: parsed.OccurredAt, OccurredUntil: parsed.OccurredAt,
+		Reference: strings.TrimSpace(parsed.RRN), ReferenceKind: domain.EvidenceReferenceRRN,
+		Source: source, PayerName: parsed.PayerName, UPIID: parsed.UPIId,
+	}, now)
 }
 
 type NotificationEvidence struct {
@@ -392,118 +317,22 @@ type NotificationEvidence struct {
 	Reference     string
 }
 
-// MatchNotificationInApp matches a trusted Paytm for Business notification by
-// account, exact DDM amount, and notification occurrence time. Unlike bank SMS
-// evidence, Paytm push notifications do not necessarily expose a UPI RRN, so a
-// unique relay evidence reference is used for idempotency instead.
+// MatchNotificationInApp remains the Paytm compatibility adapter while all
+// automatic matching is enforced by MatchEvidenceInApp.
 func (s *Service) MatchNotificationInApp(tx core.App, evidence NotificationEvidence, now time.Time) (*core.Record, string, bool, error) {
-	now = now.UTC()
-	account, _, err := s.paymentAccount(string(evidence.Account))
-	if err != nil {
-		return nil, "not_matchable", false, err
+	if evidence.Account != domain.PaymentAccountPaytm {
+		return nil, string(domain.MatchNotMatchable), false, domain.New("NOTIFICATION_ACCOUNT_INVALID", "notification evidence is only valid for the Paytm account", http.StatusBadRequest)
 	}
-	if account != string(domain.PaymentAccountPaytm) {
-		return nil, "not_matchable", false, domain.New("NOTIFICATION_ACCOUNT_INVALID", "notification evidence is only valid for the Paytm account", http.StatusBadRequest)
+	if evidence.AmountPaise <= 0 || strings.TrimSpace(evidence.Reference) == "" {
+		return nil, string(domain.MatchNotMatchable), false, domain.New("NOTIFICATION_NOT_MATCHABLE", "Paytm notification requires an exact amount and evidence reference", http.StatusUnprocessableEntity)
 	}
-	reference := strings.TrimSpace(evidence.Reference)
-	if evidence.AmountPaise <= 0 || reference == "" {
-		return nil, "not_matchable", false, domain.New("NOTIFICATION_NOT_MATCHABLE", "Paytm notification requires an exact amount and evidence reference", http.StatusUnprocessableEntity)
-	}
-	evidenceAt := evidence.OccurredAt.UTC()
-	evidenceUntil := evidence.OccurredUntil.UTC()
-	if evidenceAt.IsZero() || evidenceAt.After(now) {
-		evidenceAt = now
-		evidenceUntil = now
-	}
-	if evidenceUntil.IsZero() || evidenceUntil.Before(evidenceAt) {
-		evidenceUntil = evidenceAt
-	}
-	if evidenceUntil.After(now) {
-		evidenceUntil = now
-	}
-
-	existing, err := tx.FindFirstRecordByData("payments", "evidence_reference", reference)
-	if err == nil {
-		if existing.GetString("payment_account") != account {
-			return nil, "evidence_account_mismatch", false, domain.New("EVIDENCE_ACCOUNT_MISMATCH", "the notification evidence was already recorded for a different payment account", http.StatusConflict)
-		}
-		if int64(existing.GetInt("payable_amount")) != evidence.AmountPaise {
-			return nil, "evidence_amount_mismatch", false, domain.New("EVIDENCE_AMOUNT_MISMATCH", "the notification evidence was already recorded with a different amount", http.StatusConflict)
-		}
-		return existing, "duplicate_evidence", false, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, "error", false, err
-	}
-
-	createdBefore := evidenceUntil.Add(EvidenceTimestampTolerance)
-	onTime, err := tx.FindRecordsByFilter(
-		"payments",
-		"payment_account = {:account} && payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
-		"created", 2, 0,
-		dbx.Params{"account": account, "amount": evidence.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
-	)
-	if err != nil {
-		return nil, "error", false, err
-	}
-	if len(onTime) > 1 {
-		return nil, "ambiguous", false, domain.AmbiguousMatch()
-	}
-	if len(onTime) == 1 {
-		record := onTime[0]
-		applyNotificationEvidence(record, evidence, domain.StatusPaid, now, s.Config.AmountQuarantine)
-		if err := tx.Save(record); err != nil {
-			return nil, "error", false, err
-		}
-		if err := s.schedule(tx, "payment.paid", record, now); err != nil {
-			return nil, "error", false, err
-		}
-		return record, "marked_paid", true, nil
-	}
-
-	expired, err := s.ExpireDueInApp(tx, now)
-	if err != nil {
-		return nil, "error", false, err
-	}
-	queued := expired > 0
-	late, err := tx.FindRecordsByFilter(
-		"payments",
-		"payment_account = {:account} && payable_amount = {:amount} && (status = 'expired' || status = 'cancelled') && reuse_after > {:now} && created_at <= {:createdBefore}",
-		"-created", 2, 0,
-		dbx.Params{"account": account, "amount": evidence.AmountPaise, "now": filterDate(now), "createdBefore": filterDate(createdBefore)},
-	)
-	if err != nil {
-		return nil, "error", queued, err
-	}
-	if len(late) > 1 {
-		return nil, "ambiguous", queued, domain.AmbiguousMatch()
-	}
-	if len(late) == 1 {
-		record := late[0]
-		applyNotificationEvidence(record, evidence, domain.StatusLate, now, s.Config.AmountQuarantine)
-		if err := tx.Save(record); err != nil {
-			return nil, "error", queued, err
-		}
-		if err := s.schedule(tx, "payment.late", record, now); err != nil {
-			return nil, "error", queued, err
-		}
-		return record, "marked_late", true, nil
-	}
-	return nil, "unmatched", queued, nil
-}
-
-func applyNotificationEvidence(record *core.Record, evidence NotificationEvidence, status domain.PaymentStatus, now time.Time, quarantine time.Duration) {
-	paidAt := evidence.OccurredAt.UTC()
-	if paidAt.IsZero() || paidAt.After(now) {
-		paidAt = now.UTC()
-	}
-	record.Set("status", string(status))
-	record.Set("payer_name", strings.TrimSpace(evidence.PayerName))
-	record.Set("evidence_source", "paytm_notification")
-	record.Set("evidence_reference", strings.TrimSpace(evidence.Reference))
-	record.Set("paid_at", paidAt)
-	record.Set("resolved_at", now.UTC())
-	extendReuseAfter(record, now.UTC().Add(quarantine))
+	record, outcome, queued, err := s.MatchEvidenceInApp(tx, domain.Evidence{
+		Account: evidence.Account, AmountPaise: evidence.AmountPaise,
+		OccurredFrom: evidence.OccurredAt, OccurredUntil: evidence.OccurredUntil,
+		Reference: strings.TrimSpace(evidence.Reference), ReferenceKind: domain.EvidenceReferenceRelay,
+		Source: domain.EvidenceSourcePaytmNotification, PayerName: evidence.PayerName,
+	}, now)
+	return record, string(outcome), queued, err
 }
 
 // ManualMatchInApp explicitly links reviewed bank evidence to one payment. It
