@@ -37,6 +37,8 @@ export type RelayStatus = {
   ready: boolean;
   enabledDevices: number;
   activeDevices: number;
+  legacyGraceDevices: number;
+  powerUnhealthyDevices: number;
   staleAfterSeconds: number;
   lastSeenAt?: string | null;
   lastHeartbeatAt?: string | null;
@@ -60,6 +62,12 @@ export type RelayDevice = {
   heartbeatGraceUntil?: string | null;
   notificationAccess: boolean;
   listenerConnected: boolean;
+  powerHealthReported: boolean;
+  batteryOptimizationExempt: boolean;
+  powerSaveMode: boolean;
+  backgroundRestricted: boolean;
+  foregroundService: boolean;
+  powerHealthy: boolean;
   pendingCount: number;
   failedCount: number;
   lastClientError?: string;
