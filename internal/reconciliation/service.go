@@ -29,9 +29,10 @@ import (
 )
 
 const (
-	MaxFileBytes = 10 << 20
-	MaxRows      = 10_000
-	MaxColumns   = 64
+	MaxFileBytes            = 10 << 20
+	MaxRows                 = 10_000
+	MaxColumns              = 64
+	ReconciliationBatchSize = 250
 )
 
 type Service struct {
@@ -114,15 +115,46 @@ func (s *Service) Import(input ImportInput) (Result, error) {
 
 	result := Result{RunID: run.Id, Status: "completed"}
 	seenRRN := map[string]int{}
-	err = s.App.RunInTransaction(func(tx core.App) error {
+	for start := 0; start < len(rows); start += ReconciliationBatchSize {
+		end := start + ReconciliationBatchSize
+		if end > len(rows) {
+			end = len(rows)
+		}
+		if err := s.persistRowsBatch(run.Id, rows[start:end], seenRRN, now, &result); err != nil {
+			s.failRun(run, err, now)
+			return Result{}, err
+		}
+	}
+	if err := s.completeRun(run.Id, input.Actor, now, result); err != nil {
+		s.failRun(run, err, now)
+		return Result{}, err
+	}
+	if result.ConflictRows > 0 && s.Alerts != nil {
+		_, _, _ = s.Alerts.Open(alerts.Input{
+			Kind: "reconciliation_conflict", Severity: "warning", DedupeKey: "reconciliation:" + run.Id,
+			Message: fmt.Sprintf("Statement reconciliation found %d conflicting rows", result.ConflictRows), Details: result,
+		})
+	}
+	return result, nil
+}
+
+func (s *Service) persistRowsBatch(runID string, rows []statementRow, seenRRN map[string]int, now time.Time, result *Result) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	if len(rows) > ReconciliationBatchSize {
+		return fmt.Errorf("reconciliation batch exceeds %d rows", ReconciliationBatchSize)
+	}
+	delta := Result{}
+	err := s.App.RunInTransaction(func(tx core.App) error {
 		entryCollection, err := tx.FindCollectionByNameOrId("reconciliation_entries")
 		if err != nil {
 			return err
 		}
 		for _, row := range rows {
-			result.TotalRows++
+			delta.TotalRows++
 			entry := core.NewRecord(entryCollection)
-			entry.Set("run", run.Id)
+			entry.Set("run", runID)
 			entry.Set("row_number", row.RowNumber)
 			entry.Set("transaction_time", row.TransactionTime)
 			entry.Set("amount", row.AmountPaise)
@@ -143,15 +175,15 @@ func (s *Service) Import(input ImportInput) (Result, error) {
 
 			switch status {
 			case "matched":
-				result.MatchedRows++
+				delta.MatchedRows++
 			case "unmatched":
-				result.UnmatchedRows++
+				delta.UnmatchedRows++
 			case "duplicate":
-				result.DuplicateRows++
+				delta.DuplicateRows++
 			case "conflict":
-				result.ConflictRows++
+				delta.ConflictRows++
 			case "invalid":
-				result.InvalidRows++
+				delta.InvalidRows++
 			}
 
 			needsReview := status == "conflict" || (status == "unmatched" && (row.RRN != "" || strings.Contains(strings.ToLower(row.Description), "upi")))
@@ -165,12 +197,22 @@ func (s *Service) Import(input ImportInput) (Result, error) {
 					return err
 				}
 				if caseID != "" {
-					result.ReviewCases++
+					delta.ReviewCases++
 				}
 			}
 		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	addResult(result, delta)
+	return nil
+}
 
-		runRecord, err := tx.FindRecordById("reconciliation_runs", run.Id)
+func (s *Service) completeRun(runID string, actor audit.Actor, now time.Time, result Result) error {
+	return s.App.RunInTransaction(func(tx core.App) error {
+		runRecord, err := tx.FindRecordById("reconciliation_runs", runID)
 		if err != nil {
 			return err
 		}
@@ -188,8 +230,8 @@ func (s *Service) Import(input ImportInput) (Result, error) {
 		}
 		if s.Audit != nil {
 			if err := s.Audit.RecordInApp(tx, audit.Entry{
-				Action: "reconciliation.import", Actor: input.Actor,
-				EntityType: "reconciliation_run", EntityID: run.Id,
+				Action: "reconciliation.import", Actor: actor,
+				EntityType: "reconciliation_run", EntityID: runID,
 				Summary: "Imported bank statement for reconciliation", Details: result, OccurredAt: now,
 			}); err != nil {
 				return err
@@ -197,17 +239,19 @@ func (s *Service) Import(input ImportInput) (Result, error) {
 		}
 		return nil
 	})
-	if err != nil {
-		s.failRun(run, err, now)
-		return Result{}, err
+}
+
+func addResult(target *Result, delta Result) {
+	if target == nil {
+		return
 	}
-	if result.ConflictRows > 0 && s.Alerts != nil {
-		_, _, _ = s.Alerts.Open(alerts.Input{
-			Kind: "reconciliation_conflict", Severity: "warning", DedupeKey: "reconciliation:" + run.Id,
-			Message: fmt.Sprintf("Statement reconciliation found %d conflicting rows", result.ConflictRows), Details: result,
-		})
-	}
-	return result, nil
+	target.TotalRows += delta.TotalRows
+	target.MatchedRows += delta.MatchedRows
+	target.UnmatchedRows += delta.UnmatchedRows
+	target.DuplicateRows += delta.DuplicateRows
+	target.ConflictRows += delta.ConflictRows
+	target.InvalidRows += delta.InvalidRows
+	target.ReviewCases += delta.ReviewCases
 }
 
 func (s *Service) createRun(input ImportInput, hash string, now time.Time) (*core.Record, error) {

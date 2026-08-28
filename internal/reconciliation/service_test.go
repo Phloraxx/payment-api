@@ -126,6 +126,45 @@ func TestImportIgnoresDebitRowsAndDetectsDuplicateReference(t *testing.T) {
 	}
 }
 
+func TestImportPersistsLargeStatementInBatchesAndTracksDuplicateAcrossBatches(t *testing.T) {
+	service, _, app, _, actor := reconciliationTestService(t)
+	var csv strings.Builder
+	csv.WriteString("Date,Credit,Narration,RRN\n")
+	for i := 1; i <= ReconciliationBatchSize*2+1; i++ {
+		rrn := fmt.Sprintf("%012d", i)
+		if i == ReconciliationBatchSize+1 {
+			rrn = "000000000001" // duplicate row 1, but in the next transaction batch
+		}
+		fmt.Fprintf(&csv, "01/08/2026,10.01,UPI credit,%s\n", rrn)
+	}
+	result, err := service.Import(ImportInput{Filename: "large.csv", Data: []byte(csv.String()), Actor: actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRows := ReconciliationBatchSize*2 + 1
+	if result.TotalRows != wantRows || result.DuplicateRows != 1 || result.UnmatchedRows != wantRows-1 {
+		t.Fatalf("result=%+v", result)
+	}
+	entries, err := app.FindAllRecords("reconciliation_entries")
+	if err != nil || len(entries) != wantRows {
+		t.Fatalf("entries=%d err=%v", len(entries), err)
+	}
+	runs, err := app.FindAllRecords("reconciliation_runs")
+	if err != nil || len(runs) != 1 || runs[0].GetString("status") != "completed" || runs[0].GetInt("total_rows") != wantRows {
+		t.Fatalf("runs=%d status=%v total=%v err=%v", len(runs), func() string {
+			if len(runs) == 0 {
+				return ""
+			}
+			return runs[0].GetString("status")
+		}(), func() int {
+			if len(runs) == 0 {
+				return 0
+			}
+			return runs[0].GetInt("total_rows")
+		}(), err)
+	}
+}
+
 func TestImportRejectsSameFileHashAfterCompletedRun(t *testing.T) {
 	service, _, _, _, actor := reconciliationTestService(t)
 	data := []byte("Date,Credit,Narration,RRN\n01/08/2026,10.01,UPI credit,123456789012\n")
