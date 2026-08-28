@@ -14,13 +14,13 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Phloraxx/payment-api/internal/deliveryqueue"
 	"github.com/Phloraxx/payment-api/internal/gmessages"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/webhooks"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/security"
-	"github.com/pocketbase/pocketbase/tools/types"
 )
 
 const maxNotificationAttempts = 6
@@ -62,6 +62,21 @@ func (s *Service) ConfigureWebhook(url, secret string) {
 
 func (s *Service) NotificationsEnabled() bool {
 	return s != nil && s.WebhookURL != "" && s.WebhookSecret != ""
+}
+
+func (s *Service) notificationQueue() deliveryqueue.Queue {
+	return deliveryqueue.Queue{
+		App: s.App, Collection: "alerts", MaxAttempts: maxNotificationAttempts,
+		Fields: deliveryqueue.Fields{
+			Status: "notification_status", Attempts: "notification_attempts",
+			NextAttemptAt: "notification_next_attempt_at", LockedAt: "notification_locked_at",
+			LastAttemptAt: "notification_last_attempt_at", DeliveredAt: "notification_delivered_at",
+			LastError: "notification_last_error",
+		},
+		RetryDelays: []time.Duration{time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour, 6 * time.Hour},
+		StaleAfter:  2 * time.Minute, ExhaustedAfter: 365 * 24 * time.Hour, ErrorMax: 4096,
+		StaleMessage: "recovered stale operator alert delivery lease after restart",
+	}
 }
 
 func (s *Service) Open(input Input) (string, bool, error) {
@@ -228,15 +243,11 @@ func (s *Service) SendPending(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 	now := s.now()
-	if err := s.recoverStaleNotifications(now); err != nil {
+	queue := s.notificationQueue()
+	if err := queue.RecoverStale(now, 50); err != nil {
 		return 0, err
 	}
-	records, err := s.App.FindRecordsByFilter(
-		"alerts",
-		"(notification_status = 'pending' || notification_status = 'failed') && notification_next_attempt_at <= {:now}",
-		"notification_next_attempt_at,created", 50, 0,
-		dbx.Params{"now": filterDate(now)},
-	)
+	records, err := queue.Due(now, 50)
 	if err != nil {
 		return 0, err
 	}
@@ -245,7 +256,7 @@ func (s *Service) SendPending(ctx context.Context) (int, error) {
 		if err := ctx.Err(); err != nil {
 			return processed, err
 		}
-		claimed, err := s.claimNotification(record.Id, now)
+		claimed, err := queue.Claim(record.Id, now)
 		if err != nil {
 			s.logger().Warn("failed to claim operator alert delivery", "alertId", record.Id, "error", err)
 			continue
@@ -269,33 +280,6 @@ func (s *Service) queueNotification(record *core.Record, now time.Time) {
 	record.Set("notification_last_attempt_at", "")
 	record.Set("notification_delivered_at", "")
 	record.Set("notification_last_error", "")
-}
-
-func (s *Service) claimNotification(id string, now time.Time) (*core.Record, error) {
-	var claimed *core.Record
-	err := s.App.RunInTransaction(func(tx core.App) error {
-		record, err := tx.FindRecordById("alerts", id)
-		if err != nil {
-			return err
-		}
-		status := record.GetString("notification_status")
-		if status != "pending" && status != "failed" {
-			return nil
-		}
-		if next := record.GetDateTime("notification_next_attempt_at").Time(); !next.IsZero() && next.After(now) {
-			return nil
-		}
-		record.Set("notification_status", "sending")
-		record.Set("notification_locked_at", now)
-		record.Set("notification_last_attempt_at", now)
-		record.Set("notification_attempts", record.GetInt("notification_attempts")+1)
-		if err := tx.Save(record); err != nil {
-			return err
-		}
-		claimed = record.Clone()
-		return nil
-	})
-	return claimed, err
 }
 
 func (s *Service) deliverNotification(ctx context.Context, record *core.Record) {
@@ -345,65 +329,10 @@ func (s *Service) deliverNotification(ctx context.Context, record *core.Record) 
 }
 
 func (s *Service) finishNotification(id, eventID string, statusCode int, deliveryErr error) error {
-	now := s.now()
-	return s.App.RunInTransaction(func(tx core.App) error {
-		record, err := tx.FindRecordById("alerts", id)
-		if err != nil {
-			return err
-		}
-		if record.GetString("notification_event_id") != eventID || record.GetString("notification_status") != "sending" {
-			return nil // a newer open/resolved notification superseded this attempt
-		}
-		record.Set("notification_locked_at", "")
-		if deliveryErr == nil {
-			record.Set("notification_status", "delivered")
-			record.Set("notification_delivered_at", now)
-			record.Set("notification_last_error", "")
-			return tx.Save(record)
-		}
-		attempts := record.GetInt("notification_attempts")
-		record.Set("notification_last_error", truncate(deliveryErr.Error(), 4096))
-		if attempts >= maxNotificationAttempts {
-			record.Set("notification_status", "exhausted")
-			record.Set("notification_next_attempt_at", now.Add(365*24*time.Hour))
-		} else {
-			record.Set("notification_status", "failed")
-			record.Set("notification_next_attempt_at", now.Add(notificationRetryDelay(attempts)))
-		}
-		return tx.Save(record)
+	return s.notificationQueue().Finish(id, s.now(), statusCode, deliveryErr, func(record *core.Record) bool {
+		return record.GetString("notification_event_id") == eventID &&
+			record.GetString("notification_status") == "sending"
 	})
-}
-
-func (s *Service) recoverStaleNotifications(now time.Time) error {
-	records, err := s.App.FindRecordsByFilter(
-		"alerts", "notification_status = 'sending' && notification_locked_at < {:stale}",
-		"notification_locked_at", 50, 0, dbx.Params{"stale": filterDate(now.Add(-2 * time.Minute))},
-	)
-	if err != nil {
-		return err
-	}
-	for _, record := range records {
-		record.Set("notification_status", "failed")
-		record.Set("notification_locked_at", "")
-		record.Set("notification_next_attempt_at", now)
-		record.Set("notification_last_error", "recovered stale operator alert delivery lease after restart")
-		if err := s.App.Save(record); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func notificationRetryDelay(attempt int) time.Duration {
-	delays := []time.Duration{time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour, 6 * time.Hour}
-	index := attempt - 1
-	if index < 0 {
-		index = 0
-	}
-	if index >= len(delays) {
-		return delays[len(delays)-1]
-	}
-	return delays[index]
 }
 
 func (s *Service) CheckConnector(status gmessages.Status) error {
@@ -602,11 +531,4 @@ func truncate(value string, max int) string {
 		return value
 	}
 	return value[:max]
-}
-func filterDate(t time.Time) string {
-	value, err := types.ParseDateTime(t.UTC())
-	if err != nil {
-		return t.UTC().Format(time.RFC3339Nano)
-	}
-	return value.String()
 }
