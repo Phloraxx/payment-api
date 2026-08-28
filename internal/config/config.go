@@ -263,6 +263,25 @@ func (c Config) ValidateServe() error {
 	if defaultPaymentAccount == "" {
 		defaultPaymentAccount = "kotak"
 	}
+	validators := []func() error{
+		func() error { return c.validateCore(defaultPaymentAccount) },
+		c.validateRelay,
+		func() error { return c.validatePaymentPolicy(defaultPaymentAccount) },
+		c.validateEmailEvidence,
+		c.validateOutgoingWebhook,
+		c.validateOperations,
+		c.validateRazorpay,
+		c.validateBackups,
+	}
+	for _, validate := range validators {
+		if err := validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (c Config) validateCore(defaultPaymentAccount string) error {
 	if !c.TestMode {
 		var missing []string
 		if c.KotakUPIID == "" && c.UPIID == "" {
@@ -287,6 +306,10 @@ func (c Config) ValidateServe() error {
 	if defaultPaymentAccount != "kotak" && defaultPaymentAccount != "slice" && defaultPaymentAccount != "paytm" {
 		return errors.New("PAYMENT_DEFAULT_ACCOUNT must be kotak, slice, or paytm")
 	}
+	return nil
+}
+
+func (c Config) validateRelay() error {
 	if strings.TrimSpace(c.PaytmNotificationWebhookSecret) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
 		return fmt.Errorf("PAYTM_NOTIFICATION_WEBHOOK_SECRET must be at least %d characters when configured", minPrimarySecretLength)
 	}
@@ -308,6 +331,10 @@ func (c Config) ValidateServe() error {
 	if strings.TrimSpace(c.PaytmUPIID) == "" && strings.TrimSpace(c.PaytmQRPayload) != "" && len(c.PaytmNotificationWebhookSecret) < minPrimarySecretLength {
 		return errors.New("PAYTM_NOTIFICATION_WEBHOOK_SECRET is required when legacy PAYTM_QR_PAYLOAD is the active Paytm flow")
 	}
+	return nil
+}
+
+func (c Config) validatePaymentPolicy(defaultPaymentAccount string) error {
 	if _, ok := c.PaymentAccount(defaultPaymentAccount); !ok && !c.TestMode {
 		return fmt.Errorf("%s payment account configuration is required for PAYMENT_DEFAULT_ACCOUNT", strings.ToUpper(defaultPaymentAccount))
 	}
@@ -328,29 +355,43 @@ func (c Config) ValidateServe() error {
 			return fmt.Errorf("WEBHOOK_SECRET must be at least %d characters when LEGACY_SMS_WEBHOOK_ENABLED=true", minPrimarySecretLength)
 		}
 	}
-	if c.EmailEvidenceEnabled {
-		if len(c.EmailWebhookSecret) < minPrimarySecretLength {
-			return fmt.Errorf("PAYMENT_EMAIL_WEBHOOK_SECRET must be at least %d characters when PAYMENT_EMAIL_ENABLED=true", minPrimarySecretLength)
-		}
-		address, err := mail.ParseAddress(c.EmailAllowedSender)
-		if err != nil || !strings.EqualFold(address.Address, c.EmailAllowedSender) || !strings.Contains(address.Address, "@") {
-			return errors.New("PAYMENT_EMAIL_ALLOWED_SENDER must be one exact email address")
-		}
-		if c.EmailAuthServID == "" {
-			return errors.New("PAYMENT_EMAIL_AUTH_SERV_ID is required when PAYMENT_EMAIL_ENABLED=true")
-		}
-		if c.EmailSignatureTolerance <= 0 {
-			return errors.New("PAYMENT_EMAIL_SIGNATURE_TOLERANCE must be positive")
-		}
+	return nil
+}
+
+func (c Config) validateEmailEvidence() error {
+	if !c.EmailEvidenceEnabled {
+		return nil
 	}
-	if c.OutgoingWebhookURL != "" {
-		if err := validateHTTPURL("OUTGOING_WEBHOOK_URL", c.OutgoingWebhookURL); err != nil {
-			return err
-		}
-		if len(c.OutgoingWebhookSecret) < minPrimarySecretLength {
-			return fmt.Errorf("OUTGOING_WEBHOOK_SECRET must be at least %d characters when OUTGOING_WEBHOOK_URL is configured", minPrimarySecretLength)
-		}
+	if len(c.EmailWebhookSecret) < minPrimarySecretLength {
+		return fmt.Errorf("PAYMENT_EMAIL_WEBHOOK_SECRET must be at least %d characters when PAYMENT_EMAIL_ENABLED=true", minPrimarySecretLength)
 	}
+	address, err := mail.ParseAddress(c.EmailAllowedSender)
+	if err != nil || !strings.EqualFold(address.Address, c.EmailAllowedSender) || !strings.Contains(address.Address, "@") {
+		return errors.New("PAYMENT_EMAIL_ALLOWED_SENDER must be one exact email address")
+	}
+	if c.EmailAuthServID == "" {
+		return errors.New("PAYMENT_EMAIL_AUTH_SERV_ID is required when PAYMENT_EMAIL_ENABLED=true")
+	}
+	if c.EmailSignatureTolerance <= 0 {
+		return errors.New("PAYMENT_EMAIL_SIGNATURE_TOLERANCE must be positive")
+	}
+	return nil
+}
+
+func (c Config) validateOutgoingWebhook() error {
+	if c.OutgoingWebhookURL == "" {
+		return nil
+	}
+	if err := validateHTTPURL("OUTGOING_WEBHOOK_URL", c.OutgoingWebhookURL); err != nil {
+		return err
+	}
+	if len(c.OutgoingWebhookSecret) < minPrimarySecretLength {
+		return fmt.Errorf("OUTGOING_WEBHOOK_SECRET must be at least %d characters when OUTGOING_WEBHOOK_URL is configured", minPrimarySecretLength)
+	}
+	return nil
+}
+
+func (c Config) validateOperations() error {
 	if c.StatementTimezone == "" {
 		return errors.New("STATEMENT_TIMEZONE is required")
 	}
@@ -374,6 +415,10 @@ func (c Config) ValidateServe() error {
 			return fmt.Errorf("OPERATOR_ALERT_WEBHOOK_SECRET must be at least %d characters", minPrimarySecretLength)
 		}
 	}
+	return nil
+}
+
+func (c Config) validateRazorpay() error {
 	if c.RazorpayTestEnabled {
 		if !strings.HasPrefix(c.RazorpayTestKeyID, "rzp_test_") {
 			return errors.New("RAZORPAY_TEST_KEY_ID must be a Test Mode key beginning with rzp_test_")
@@ -402,15 +447,17 @@ func (c Config) ValidateServe() error {
 			return errors.New("RAZORPAY_LIVE_DISPLAY_NAME must be between 1 and 128 characters")
 		}
 	}
-	if c.BackupS3Enabled {
-		if c.BackupS3Bucket == "" || c.BackupS3Region == "" || c.BackupS3Endpoint == "" || c.BackupS3AccessKey == "" || c.BackupS3Secret == "" {
-			return errors.New("all PAYGATE_BACKUP_S3_* values are required when S3 backup storage is enabled")
-		}
-		if err := validateHTTPURL("PAYGATE_BACKUP_S3_ENDPOINT", c.BackupS3Endpoint); err != nil {
-			return err
-		}
-	}
 	return nil
+}
+
+func (c Config) validateBackups() error {
+	if !c.BackupS3Enabled {
+		return nil
+	}
+	if c.BackupS3Bucket == "" || c.BackupS3Region == "" || c.BackupS3Endpoint == "" || c.BackupS3AccessKey == "" || c.BackupS3Secret == "" {
+		return errors.New("all PAYGATE_BACKUP_S3_* values are required when S3 backup storage is enabled")
+	}
+	return validateHTTPURL("PAYGATE_BACKUP_S3_ENDPOINT", c.BackupS3Endpoint)
 }
 
 func (c Config) PaymentAccount(id string) (PaymentAccount, bool) {
