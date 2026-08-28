@@ -21,6 +21,7 @@ type UnitOfWork interface {
 	EmailEvents() EmailEventRepository
 	ReconciliationEntries() ReconciliationEntryRepository
 	Audit() AuditRepository
+	Refunds() RefundRepository
 	NotificationEvents() NotificationEventRepository
 	Reviews() ReviewRepository
 	Relay() RelayRepository
@@ -75,6 +76,15 @@ type ReconciliationEntryRepository interface {
 
 type AuditRepository interface {
 	Record(event domain.AuditEvent) error
+}
+
+type RefundRepository interface {
+	Get(id string) (*domain.Refund, error)
+	FindByIdempotencyKey(key string) (*domain.Refund, error)
+	FindByReference(reference string) (*domain.Refund, error)
+	ReservedAmount(paymentID string) (int64, error)
+	Create(refund *domain.Refund) error
+	Save(refund *domain.Refund) error
 }
 
 type NotificationEventRepository interface {

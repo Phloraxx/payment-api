@@ -830,17 +830,21 @@ func (a *API) restoreDrill(e *core.RequestEvent) error {
 	return e.JSON(http.StatusOK, result)
 }
 
-func refundResponse(record *core.Record) map[string]any {
-	if record == nil {
+func refundResponse(refund *domain.Refund) map[string]any {
+	if refund == nil {
 		return nil
 	}
+	requestedAt, completedAt := "", ""
+	if !refund.RequestedAt.IsZero() {
+		requestedAt = refund.RequestedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !refund.CompletedAt.IsZero() {
+		completedAt = refund.CompletedAt.UTC().Format(time.RFC3339Nano)
+	}
 	return map[string]any{
-		"id": record.Id, "paymentId": record.GetString("payment"),
-		"amountPaise": record.GetInt("amount"), "status": record.GetString("status"),
-		"reason": record.GetString("reason"), "reference": record.GetString("reference"),
-		"externalId":  record.GetString("external_id"),
-		"requestedAt": record.GetDateTime("requested_at").String(),
-		"completedAt": record.GetDateTime("completed_at").String(),
+		"id": refund.ID, "paymentId": refund.PaymentID, "amountPaise": refund.AmountPaise,
+		"status": refund.Status, "reason": refund.Reason, "reference": refund.Reference,
+		"externalId": refund.ExternalID, "requestedAt": requestedAt, "completedAt": completedAt,
 	}
 }
 

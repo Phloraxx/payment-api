@@ -26,3 +26,18 @@ type ReconciliationEntry struct {
 	Notes           string
 	RawRow          any
 }
+
+type Refund struct {
+	ID             string
+	PaymentID      string
+	AmountPaise    int64
+	Status         string
+	Reason         string
+	Reference      string
+	ExternalID     string
+	IdempotencyKey string
+	Metadata       any
+	RequestedBy    string
+	RequestedAt    time.Time
+	CompletedAt    time.Time
+}

@@ -20,6 +20,7 @@ type pocketBaseSMSEvents struct{ app core.App }
 type pocketBaseEmailEvents struct{ app core.App }
 type pocketBaseReconciliationEntries struct{ app core.App }
 type pocketBaseAudit struct{ app core.App }
+type pocketBaseRefunds struct{ app core.App }
 type pocketBaseNotificationEvents struct{ app core.App }
 type pocketBaseReviews struct{ app core.App }
 type pocketBaseRelay struct{ app core.App }
@@ -47,7 +48,8 @@ func (u *pocketBaseUnit) EmailEvents() EmailEventRepository {
 func (u *pocketBaseUnit) ReconciliationEntries() ReconciliationEntryRepository {
 	return &pocketBaseReconciliationEntries{app: u.app}
 }
-func (u *pocketBaseUnit) Audit() AuditRepository { return &pocketBaseAudit{app: u.app} }
+func (u *pocketBaseUnit) Audit() AuditRepository    { return &pocketBaseAudit{app: u.app} }
+func (u *pocketBaseUnit) Refunds() RefundRepository { return &pocketBaseRefunds{app: u.app} }
 func (u *pocketBaseUnit) NotificationEvents() NotificationEventRepository {
 	return &pocketBaseNotificationEvents{app: u.app}
 }
@@ -405,6 +407,88 @@ func reconciliationEntryFromRecord(record *core.Record) *domain.ReconciliationEn
 		return nil
 	}
 	return &domain.ReconciliationEntry{ID: record.Id, RunID: record.GetString("run"), RowNumber: record.GetInt("row_number"), TransactionTime: record.GetDateTime("transaction_time").Time(), AmountPaise: int64(record.GetInt("amount")), RRN: record.GetString("rrn"), Description: record.GetString("description"), Status: record.GetString("status"), PaymentID: record.GetString("payment"), Notes: record.GetString("notes"), RawRow: record.Get("raw_row")}
+}
+
+func (r *pocketBaseRefunds) Get(id string) (*domain.Refund, error) {
+	record, err := r.app.FindRecordById("refunds", id)
+	if err != nil {
+		return nil, err
+	}
+	return refundFromRecord(record), nil
+}
+
+func (r *pocketBaseRefunds) FindByIdempotencyKey(key string) (*domain.Refund, error) {
+	record, err := r.app.FindFirstRecordByData("refunds", "idempotency_key", key)
+	if err != nil {
+		return nil, err
+	}
+	return refundFromRecord(record), nil
+}
+
+func (r *pocketBaseRefunds) FindByReference(reference string) (*domain.Refund, error) {
+	record, err := r.app.FindFirstRecordByData("refunds", "reference", reference)
+	if err != nil {
+		return nil, err
+	}
+	return refundFromRecord(record), nil
+}
+
+func (r *pocketBaseRefunds) ReservedAmount(paymentID string) (int64, error) {
+	records, err := r.app.FindRecordsByFilter("refunds", "payment = {:payment} && status != 'cancelled' && status != 'failed'", "created", 0, 0, dbx.Params{"payment": paymentID})
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	for _, record := range records {
+		total += int64(record.GetInt("amount"))
+	}
+	return total, nil
+}
+
+func (r *pocketBaseRefunds) Create(refund *domain.Refund) error {
+	collection, err := r.app.FindCollectionByNameOrId("refunds")
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	applyRefundRecord(record, refund)
+	if err := r.app.Save(record); err != nil {
+		return err
+	}
+	refund.ID = record.Id
+	return nil
+}
+
+func (r *pocketBaseRefunds) Save(refund *domain.Refund) error {
+	record, err := r.app.FindRecordById("refunds", refund.ID)
+	if err != nil {
+		return err
+	}
+	applyRefundRecord(record, refund)
+	return r.app.Save(record)
+}
+
+func applyRefundRecord(record *core.Record, refund *domain.Refund) {
+	record.Set("payment", refund.PaymentID)
+	record.Set("amount", refund.AmountPaise)
+	record.Set("status", refund.Status)
+	record.Set("reason", refund.Reason)
+	record.Set("reference", refund.Reference)
+	record.Set("external_id", refund.ExternalID)
+	record.Set("idempotency_key", refund.IdempotencyKey)
+	if refund.Metadata != nil {
+		record.Set("metadata", refund.Metadata)
+	}
+	record.Set("requested_by", refund.RequestedBy)
+	record.Set("requested_at", refund.RequestedAt)
+	record.Set("completed_at", refund.CompletedAt)
+}
+
+func refundFromRecord(record *core.Record) *domain.Refund {
+	if record == nil {
+		return nil
+	}
+	return &domain.Refund{ID: record.Id, PaymentID: record.GetString("payment"), AmountPaise: int64(record.GetInt("amount")), Status: record.GetString("status"), Reason: record.GetString("reason"), Reference: record.GetString("reference"), ExternalID: record.GetString("external_id"), IdempotencyKey: record.GetString("idempotency_key"), Metadata: record.Get("metadata"), RequestedBy: record.GetString("requested_by"), RequestedAt: record.GetDateTime("requested_at").Time(), CompletedAt: record.GetDateTime("completed_at").Time()}
 }
 
 func (r *pocketBaseAudit) Record(event domain.AuditEvent) error {

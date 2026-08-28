@@ -94,6 +94,37 @@ func (s *Service) SchedulePayment(uow store.UnitOfWork, event string, payment *d
 	})
 }
 
+func (s *Service) ScheduleRefundPayment(uow store.UnitOfWork, event string, payment *domain.Payment, refund *domain.Refund, at time.Time) error {
+	if payment == nil || refund == nil {
+		return errors.New("payment and refund are required for refund webhook scheduling")
+	}
+	if !s.Enabled() {
+		return nil
+	}
+	eventID := "evt_" + security.RandomString(24)
+	paidAt, requestedAt, completedAt := "", "", ""
+	if !payment.PaidAt.IsZero() {
+		paidAt = payment.PaidAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !refund.RequestedAt.IsZero() {
+		requestedAt = refund.RequestedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !refund.CompletedAt.IsZero() {
+		completedAt = refund.CompletedAt.UTC().Format(time.RFC3339Nano)
+	}
+	body, err := json.Marshal(map[string]any{
+		"id": eventID, "type": event, "createdAt": at.UTC().Format(time.RFC3339Nano),
+		"data": map[string]any{
+			"payment": map[string]any{"id": payment.ID, "paymentAccount": payment.Account, "requestedAmountPaise": payment.RequestedPaise, "payableAmountPaise": payment.PayablePaise, "status": payment.Status, "rrn": payment.RRN, "upiId": payment.UPIId, "payerName": payment.PayerName, "paidAt": paidAt, "externalId": payment.ExternalID},
+			"refund":  map[string]any{"id": refund.ID, "amountPaise": refund.AmountPaise, "status": refund.Status, "reason": refund.Reason, "reference": refund.Reference, "externalId": refund.ExternalID, "requestedAt": requestedAt, "completedAt": completedAt},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal webhook payload: %w", err)
+	}
+	return uow.Outbox().Enqueue(store.OutboxDelivery{EventID: eventID, Event: event, PaymentID: payment.ID, RefundID: refund.ID, URL: s.Config.OutgoingWebhookURL, Body: string(body), CreatedAt: at.UTC()})
+}
+
 func (s *Service) Schedule(app core.App, event string, payment *core.Record, at time.Time) error {
 	if payment == nil {
 		return errors.New("payment is required for webhook scheduling")
