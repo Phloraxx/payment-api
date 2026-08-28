@@ -255,3 +255,29 @@ func TestValidateServeAndroidRelayEnrollmentIsExplicit(t *testing.T) {
 		t.Fatalf("stored pairing secret must be inert when enrollment is disabled: %v", err)
 	}
 }
+
+func TestCheckoutOriginsAreOptInAndStrict(t *testing.T) {
+	base := Config{
+		TestMode: true, PaymentTTL: time.Minute, AmountQuarantine: time.Hour,
+		StatementTimezone: "Asia/Kolkata", BackupMaxKeep: 1,
+	}
+	if err := base.ValidateServe(); err != nil {
+		t.Fatalf("checkout-disabled config rejected: %v", err)
+	}
+	base.CheckoutAllowedOrigins = []string{"http://payment.example.com"}
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "PAYGATE_CHECKOUT_ORIGINS") {
+		t.Fatalf("non-https checkout origin accepted: %v", err)
+	}
+	base.CheckoutAllowedOrigins = []string{"https://payment.example.com/path"}
+	if err := base.ValidateServe(); err == nil {
+		t.Fatal("checkout origin with path was accepted")
+	}
+	base.CheckoutAllowedOrigins = []string{"https://payment.example.com", "https://payment.example.com"}
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("duplicate checkout origin accepted: %v", err)
+	}
+	base.CheckoutAllowedOrigins = []string{"https://payment.example.com", "https://pay.ieeesahrdaya.com"}
+	if err := base.ValidateServe(); err != nil {
+		t.Fatalf("valid checkout origins rejected: %v", err)
+	}
+}

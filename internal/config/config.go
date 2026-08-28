@@ -47,6 +47,7 @@ type Config struct {
 	GMessagesSessionPath           string
 	TestMode                       bool
 	RateLimitsEnabled              bool
+	CheckoutAllowedOrigins         []string
 	RetentionEnabled               bool
 	SMSRawRetention                time.Duration
 	EmailRawRetention              time.Duration
@@ -221,6 +222,7 @@ func Load() (Config, error) {
 		GMessagesEnabled:               gmessagesEnabled,
 		TestMode:                       testMode,
 		RateLimitsEnabled:              rateLimitsEnabled,
+		CheckoutAllowedOrigins:         parseOriginList(os.Getenv("PAYGATE_CHECKOUT_ORIGINS")),
 		RetentionEnabled:               retentionEnabled,
 		SMSRawRetention:                smsRawRetention,
 		EmailRawRetention:              emailRawRetention,
@@ -269,6 +271,7 @@ func (c Config) ValidateServe() error {
 		func() error { return c.validatePaymentPolicy(defaultPaymentAccount) },
 		c.validateEmailEvidence,
 		c.validateOutgoingWebhook,
+		c.validateCheckout,
 		c.validateOperations,
 		c.validateRazorpay,
 		c.validateBackups,
@@ -391,6 +394,21 @@ func (c Config) validateOutgoingWebhook() error {
 	return nil
 }
 
+func (c Config) validateCheckout() error {
+	seen := map[string]struct{}{}
+	for _, origin := range c.CheckoutAllowedOrigins {
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("PAYGATE_CHECKOUT_ORIGINS entries must be https origins without path, query, credentials or fragment: %q", origin)
+		}
+		if _, ok := seen[origin]; ok {
+			return fmt.Errorf("PAYGATE_CHECKOUT_ORIGINS contains duplicate origin %q", origin)
+		}
+		seen[origin] = struct{}{}
+	}
+	return nil
+}
+
 func (c Config) validateOperations() error {
 	if c.StatementTimezone == "" {
 		return errors.New("STATEMENT_TIMEZONE is required")
@@ -506,6 +524,18 @@ func validateHTTPURL(name, value string) error {
 		return fmt.Errorf("%s must be an absolute http(s) URL", name)
 	}
 	return nil
+}
+
+func parseOriginList(raw string) []string {
+	parts := strings.Split(raw, ",")
+	result := make([]string, 0, len(parts))
+	for _, part := range parts {
+		value := strings.TrimSpace(strings.TrimRight(part, "/"))
+		if value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func env(name, fallback string) string {

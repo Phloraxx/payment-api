@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/alerts"
@@ -68,6 +69,8 @@ type API struct {
 	Backups            *backups.Service
 	RazorpayTest       *razorpaytest.Service
 	RazorpayLive       *razorpaylive.Service
+	checkoutMu         sync.Mutex
+	checkoutLimits     *checkoutLimiterSet
 }
 
 func New(cfg config.Config, paymentService *payments.Service, smsService *sms.Service, manager *gmessages.Manager) *API {
@@ -85,6 +88,10 @@ func (a *API) Register(app core.App) {
 			return event.String(http.StatusOK, "User-agent: *\nContent-Signal: search=no, ai-input=no, ai-train=no, use=immediate\nDisallow:\n")
 		})
 		e.Router.POST("/api/payments", a.createPayment).Bind(apis.BodyLimit(maxPaymentRequestBytes))
+		e.Router.OPTIONS("/api/checkout/v2/{path...}", a.checkoutPreflight)
+		e.Router.GET("/api/checkout/v2/payment-accounts", a.checkoutPaymentAccounts)
+		e.Router.POST("/api/checkout/v2/payments", a.checkoutCreatePayment).Bind(apis.BodyLimit(maxPaymentRequestBytes))
+		e.Router.GET("/api/checkout/v2/payments/{id}", a.checkoutGetPayment)
 		e.Router.GET("/api/payment-accounts", a.paymentAccounts)
 		e.Router.GET("/api/payments/{id}", a.getPayment)
 		e.Router.POST("/api/payments/{id}/cancel", a.cancelPayment)
