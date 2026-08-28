@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { pb } from "../pb";
+import { login } from "../api";
 
 export function Login() {
   const [email, setEmail] = useState("");
@@ -12,7 +12,7 @@ export function Login() {
     setBusy(true);
     setError("");
     try {
-      await pb.collection("users").authWithPassword(email.trim(), password);
+      await login(email, password);
     } catch {
       setError("Login failed. Check the operator credentials.");
     } finally {

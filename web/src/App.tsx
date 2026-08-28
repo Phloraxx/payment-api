@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { pb } from "./pb";
+import { auth, refreshAuth } from "./api";
 import type { Page } from "./types";
 import { Dashboard } from "./pages/Dashboard";
 import { Login } from "./pages/Login";
@@ -17,15 +17,15 @@ function pageFromHash(): Page {
 }
 
 export function App() {
-  const [loggedIn, setLoggedIn] = useState(pb.authStore.isValid);
+  const [loggedIn, setLoggedIn] = useState(auth.isValid);
   const [page, setPage] = useState<Page>(pageFromHash());
   const [notice, setNotice] = useState("");
 
-  useEffect(() => pb.authStore.onChange(() => setLoggedIn(pb.authStore.isValid)), []);
+  useEffect(() => auth.subscribe(() => setLoggedIn(auth.isValid)), []);
   useEffect(() => {
-    if (!pb.authStore.token) return;
+    if (!auth.token) return;
     const refreshAuth = async () => {
-      try { await pb.collection("users").authRefresh(); } catch { pb.authStore.clear(); }
+      try { await refreshAuth(); } catch { auth.clear(); }
     };
     void refreshAuth();
     const timer = window.setInterval(() => void refreshAuth(), 10 * 60_000);
@@ -56,8 +56,8 @@ export function App() {
       <p className="muted">Operator console</p>
       <nav>{pages.map((item) => <button className={page === item ? "nav active" : "nav"} key={item} onClick={() => navigate(item)}>{label(item)}</button>)}</nav>
       <div className="sidebar-bottom">
-        <span className="operator">{pb.authStore.record?.email}</span>
-        <button className="signout" onClick={() => pb.authStore.clear()}>Sign out</button>
+        <span className="operator">{auth.email}</span>
+        <button className="signout" onClick={() => auth.clear()}>Sign out</button>
       </div>
     </aside>
     <main>

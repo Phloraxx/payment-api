@@ -1,7 +1,7 @@
 import QRCode from "qrcode";
 import { useCallback, useEffect, useState } from "react";
 import { Badge, formatDate } from "../components/common";
-import { api } from "../pb";
+import { api } from "../api";
 import type { BackupStatus, Connector, RelayDevice, RelayStatus } from "../types";
 
 type SafeConfig = {
