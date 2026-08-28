@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { auth, refreshAuth } from "./api";
+import { auth, refreshAuth as refreshOperatorAuth } from "./api";
 import type { Page } from "./types";
 import { Dashboard } from "./pages/Dashboard";
 import { Login } from "./pages/Login";
@@ -9,7 +9,12 @@ import { AlertsPage, ReconciliationPage, RefundsPage, ReviewsPage } from "./page
 import { Settings } from "./pages/Settings";
 import { RazorpayTestPage } from "./pages/RazorpayTest";
 
-const pages: Page[] = ["dashboard", "payments", "reviews", "reconciliation", "sms", "email", "alerts", "refunds", "webhooks", "audit", "razorpay_test", "settings"];
+const navGroups: Array<{ label: string; pages: Page[] }> = [
+  { label: "Operate", pages: ["dashboard", "payments", "reviews", "refunds", "reconciliation"] },
+  { label: "Evidence", pages: ["sms", "email", "razorpay_test"] },
+  { label: "System", pages: ["alerts", "webhooks", "audit", "settings"] },
+];
+const pages: Page[] = navGroups.flatMap((group) => group.pages);
 
 function pageFromHash(): Page {
   const value = window.location.hash.replace(/^#\/?/, "") as Page;
@@ -24,11 +29,11 @@ export function App() {
   useEffect(() => auth.subscribe(() => setLoggedIn(auth.isValid)), []);
   useEffect(() => {
     if (!auth.token) return;
-    const refreshAuth = async () => {
-      try { await refreshAuth(); } catch { auth.clear(); }
+    const refreshSession = async () => {
+      try { await refreshOperatorAuth(); } catch { auth.clear(); }
     };
-    void refreshAuth();
-    const timer = window.setInterval(() => void refreshAuth(), 10 * 60_000);
+    void refreshSession();
+    const timer = window.setInterval(() => void refreshSession(), 10 * 60_000);
     return () => window.clearInterval(timer);
   }, [loggedIn]);
   useEffect(() => {
@@ -54,7 +59,7 @@ export function App() {
     <aside>
       <div className="brand">PAY<span>GATE</span></div>
       <p className="muted">Operator console</p>
-      <nav>{pages.map((item) => <button className={page === item ? "nav active" : "nav"} key={item} onClick={() => navigate(item)}>{label(item)}</button>)}</nav>
+      <nav>{navGroups.map((group) => <div key={group.label}><p className="nav-group-label">{group.label}</p>{group.pages.map((item) => <button className={page === item ? "nav active" : "nav"} key={item} onClick={() => navigate(item)}>{label(item)}</button>)}</div>)}</nav>
       <div className="sidebar-bottom">
         <span className="operator">{auth.email}</span>
         <button className="signout" onClick={() => auth.clear()}>Sign out</button>
