@@ -1,12 +1,13 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/domain"
-	"github.com/pocketbase/pocketbase/core"
+	"github.com/Phloraxx/payment-api/internal/store"
 )
 
 type paymentAccountOption struct {
@@ -69,7 +70,7 @@ func (a *API) paymentAccountReady(account config.PaymentAccount) (bool, string, 
 	return true, "", nil
 }
 
-func (a *API) paymentAccountReadyInApp(app core.App, account config.PaymentAccount) (bool, string, error) {
+func (a *API) paymentAccountReadyUoW(uow store.UnitOfWork, account config.PaymentAccount) (bool, string, error) {
 	if account.ID == "slice" {
 		if a.Config.EmailEvidenceEnabled && a.Email != nil {
 			return true, "", nil
@@ -88,7 +89,7 @@ func (a *API) paymentAccountReadyInApp(app core.App, account config.PaymentAccou
 	if a.AndroidRelay == nil {
 		return false, "Paytm is temporarily unavailable. Choose another payment account.", nil
 	}
-	ready, err := a.AndroidRelay.ReadyInApp(app, a.Config.AndroidRelayStaleAfter)
+	ready, err := a.AndroidRelay.ReadyUoW(uow, a.Config.AndroidRelayStaleAfter)
 	if err != nil {
 		return false, "", err
 	}
@@ -99,8 +100,10 @@ func (a *API) paymentAccountReadyInApp(app core.App, account config.PaymentAccou
 }
 
 func (a *API) ensurePaymentAccountReady(requested string) error {
-	if a.Payments != nil {
-		return a.ensurePaymentAccountReadyInApp(a.Payments.App, requested)
+	if a.Payments != nil && a.Payments.Store != nil {
+		return a.Payments.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+			return a.ensurePaymentAccountReadyUoW(uow, requested)
+		})
 	}
 	accountID := strings.ToLower(strings.TrimSpace(requested))
 	if accountID == "" {
@@ -126,7 +129,7 @@ func (a *API) ensurePaymentAccountReady(requested string) error {
 	return nil
 }
 
-func (a *API) ensurePaymentAccountReadyInApp(app core.App, requested string) error {
+func (a *API) ensurePaymentAccountReadyUoW(uow store.UnitOfWork, requested string) error {
 	accountID := strings.ToLower(strings.TrimSpace(requested))
 	if accountID == "" {
 		accountID = strings.ToLower(strings.TrimSpace(a.Config.DefaultPaymentAccount))
@@ -138,7 +141,7 @@ func (a *API) ensurePaymentAccountReadyInApp(app core.App, requested string) err
 	if !ok {
 		return nil // payments.Service returns the canonical invalid/disabled-account error.
 	}
-	ready, reason, err := a.paymentAccountReadyInApp(app, account)
+	ready, reason, err := a.paymentAccountReadyUoW(uow, account)
 	if err != nil {
 		return domain.New("PAYMENT_ACCOUNT_UNAVAILABLE", "payment verification is temporarily unavailable", http.StatusServiceUnavailable)
 	}

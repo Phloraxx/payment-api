@@ -32,6 +32,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/refunds"
 	"github.com/Phloraxx/payment-api/internal/reviews"
 	"github.com/Phloraxx/payment-api/internal/sms"
+	"github.com/Phloraxx/payment-api/internal/store"
 	appweb "github.com/Phloraxx/payment-api/internal/web"
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
@@ -299,8 +300,8 @@ func (a *API) createPayment(e *core.RequestEvent) error {
 		ExternalID:     strings.TrimSpace(body.ExternalID),
 		Metadata:       metadata,
 		IdempotencyKey: strings.TrimSpace(e.Request.Header.Get("Idempotency-Key")),
-	}, func(tx core.App) error {
-		return a.ensurePaymentAccountReadyInApp(tx, body.PaymentAccount)
+	}, func(uow store.UnitOfWork) error {
+		return a.ensurePaymentAccountReadyUoW(uow, body.PaymentAccount)
 	})
 	if err != nil {
 		return writeDomainError(e, err)

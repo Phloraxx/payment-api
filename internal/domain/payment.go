@@ -35,6 +35,7 @@ type Payment struct {
 	RequestedPaise    int64
 	PayablePaise      int64
 	Status            PaymentStatus
+	CreatedAt         time.Time
 	ExpiresAt         time.Time
 	ReuseAfter        time.Time
 	RRN               string
@@ -46,4 +47,5 @@ type Payment struct {
 	ResolvedAt        time.Time
 	ExternalID        string
 	IdempotencyKey    string
+	Metadata          any
 }

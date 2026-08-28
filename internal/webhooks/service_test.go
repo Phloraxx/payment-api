@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/store"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/tests"
 )
@@ -80,6 +82,45 @@ func TestWebhookDeliveryPersistsSuccessAndSignature(t *testing.T) {
 	records, _ := app.FindAllRecords("webhook_deliveries")
 	if len(records) != 1 || records[0].GetString("status") != "delivered" || records[0].GetInt("attempts") != 1 {
 		t.Fatalf("delivery record = %+v", records)
+	}
+}
+
+func TestTypedPaymentScheduleUsesUnitOfWorkOutbox(t *testing.T) {
+	app := webhookTestApp(t)
+	now := time.Date(2026, 8, 28, 10, 0, 0, 0, time.UTC)
+	cfg := config.Config{PaymentTTL: time.Minute, AmountQuarantine: time.Hour, OutgoingWebhookURL: "https://example.invalid/paygate", OutgoingWebhookSecret: "typed-secret"}
+	paymentService := payments.NewService(app, cfg, nil)
+	paymentService.Now = func() time.Time { return now }
+	paymentService.SuffixStart = func() (int64, error) { return 1, nil }
+	payment, _, err := paymentService.Create(payments.CreateInput{AmountRupees: 100, ExternalID: "typed-uow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payment.Status = "cancelled"
+	payment.ResolvedAt = now
+	service := NewService(app, cfg)
+	db := store.NewPocketBase(app)
+	if err := db.Write(context.Background(), func(uow store.UnitOfWork) error {
+		if err := uow.Payments().Save(payment); err != nil {
+			return err
+		}
+		return service.SchedulePayment(uow, "payment.cancelled", payment, now)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	records, err := app.FindAllRecords("webhook_deliveries")
+	if err != nil || len(records) != 1 {
+		t.Fatalf("deliveries=%d err=%v", len(records), err)
+	}
+	record := records[0]
+	if record.GetString("event") != "payment.cancelled" || record.GetString("payment") != payment.ID || record.GetString("status") != "pending" {
+		t.Fatalf("delivery event=%s payment=%s status=%s", record.GetString("event"), record.GetString("payment"), record.GetString("status"))
+	}
+	body := record.GetString("body")
+	for _, want := range []string{`"externalId":"typed-uow"`, `"status":"cancelled"`, `"payableAmountPaise":10001`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("typed webhook body missing %s: %s", want, body)
+		}
 	}
 }
 

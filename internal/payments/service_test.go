@@ -11,6 +11,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/money"
+	"github.com/Phloraxx/payment-api/internal/store"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
@@ -108,7 +109,7 @@ func TestCreateGuardedSkipsReadinessGateForIdempotentReplay(t *testing.T) {
 	service, _, _ := paymentTestService(t)
 	input := CreateInput{AmountRupees: 25, PaymentAccount: "kotak", IdempotencyKey: "guarded-replay"}
 	gateCalls := 0
-	first, replayed, err := service.CreateGuarded(input, func(core.App) error {
+	first, replayed, err := service.CreateGuarded(input, func(store.UnitOfWork) error {
 		gateCalls++
 		return nil
 	})
@@ -116,7 +117,7 @@ func TestCreateGuardedSkipsReadinessGateForIdempotentReplay(t *testing.T) {
 		t.Fatalf("first guarded create = %+v replayed=%v calls=%d err=%v", first, replayed, gateCalls, err)
 	}
 
-	replay, replayed, err := service.CreateGuarded(input, func(core.App) error {
+	replay, replayed, err := service.CreateGuarded(input, func(store.UnitOfWork) error {
 		t.Fatal("readiness gate must not run for an exact idempotency replay")
 		return errors.New("unreachable")
 	})
@@ -128,7 +129,7 @@ func TestCreateGuardedSkipsReadinessGateForIdempotentReplay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, replayed, err = service.CreateGuarded(CreateInput{AmountRupees: 26, IdempotencyKey: "guarded-denied"}, func(core.App) error {
+	_, replayed, err = service.CreateGuarded(CreateInput{AmountRupees: 26, IdempotencyKey: "guarded-denied"}, func(store.UnitOfWork) error {
 		return domain.New("PAYMENT_ACCOUNT_UNAVAILABLE", "verification unavailable", 503)
 	})
 	if err == nil || replayed {

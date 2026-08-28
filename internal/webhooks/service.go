@@ -17,6 +17,8 @@ import (
 
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/deliveryqueue"
+	"github.com/Phloraxx/payment-api/internal/domain"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/security"
 )
@@ -60,6 +62,36 @@ func (s *Service) queue() deliveryqueue.Queue {
 
 func (s *Service) Enabled() bool {
 	return s != nil && strings.TrimSpace(s.Config.OutgoingWebhookURL) != "" && s.Config.OutgoingWebhookSecret != ""
+}
+
+func (s *Service) SchedulePayment(uow store.UnitOfWork, event string, payment *domain.Payment, at time.Time) error {
+	if payment == nil {
+		return errors.New("payment is required for webhook scheduling")
+	}
+	if !s.Enabled() {
+		return nil
+	}
+	eventID := "evt_" + security.RandomString(24)
+	paidAt := ""
+	if !payment.PaidAt.IsZero() {
+		paidAt = payment.PaidAt.UTC().Format(time.RFC3339Nano)
+	}
+	body, err := json.Marshal(map[string]any{
+		"id": eventID, "type": event, "createdAt": at.UTC().Format(time.RFC3339Nano),
+		"data": map[string]any{"payment": map[string]any{
+			"id": payment.ID, "paymentAccount": payment.Account,
+			"requestedAmountPaise": payment.RequestedPaise, "payableAmountPaise": payment.PayablePaise,
+			"status": payment.Status, "rrn": payment.RRN, "upiId": payment.UPIId,
+			"payerName": payment.PayerName, "paidAt": paidAt, "externalId": payment.ExternalID,
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal webhook payload: %w", err)
+	}
+	return uow.Outbox().Enqueue(store.OutboxDelivery{
+		EventID: eventID, Event: event, PaymentID: payment.ID,
+		URL: s.Config.OutgoingWebhookURL, Body: string(body), CreatedAt: at.UTC(),
+	})
 }
 
 func (s *Service) Schedule(app core.App, event string, payment *core.Record, at time.Time) error {
@@ -263,11 +295,4 @@ func (s *Service) logger() *slog.Logger {
 		return slog.Default()
 	}
 	return s.Logger
-}
-
-func truncate(value string, max int) string {
-	if len(value) <= max {
-		return value
-	}
-	return value[:max]
 }

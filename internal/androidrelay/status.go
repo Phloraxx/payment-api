@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/domain"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/types"
@@ -133,31 +134,28 @@ func (s *Service) Heartbeat(device *core.Record, in HeartbeatInput) (HeartbeatRe
 }
 
 func (s *Service) Ready(staleAfter time.Duration) (bool, error) {
-	return s.ReadyInApp(s.App, staleAfter)
+	return s.ReadyUoW(store.NewPocketBaseUnit(s.App), staleAfter)
 }
 
-func (s *Service) ReadyInApp(app core.App, staleAfter time.Duration) (bool, error) {
+func (s *Service) ReadyUoW(uow store.UnitOfWork, staleAfter time.Duration) (bool, error) {
 	staleAfter = normalizeStaleAfter(staleAfter)
 	now := s.now()
-	cutoff := now.Add(-staleAfter)
-	devices, err := app.FindRecordsByFilter("relay_devices", "enabled = true", "-last_seen_at", 100, 0)
+	devices, err := uow.Relay().EnabledDevices(100)
 	if err != nil {
 		return false, err
 	}
 	for _, device := range devices {
-		heartbeat := device.GetDateTime("last_heartbeat_at").Time()
-		if heartbeat.IsZero() {
-			graceUntil := device.GetDateTime("heartbeat_grace_until").Time()
-			if !graceUntil.IsZero() && now.Before(graceUntil) {
-				return true, nil
-			}
-			continue
-		}
-		if relayDeviceCurrentReady(device, cutoff) {
+		if device.Ready(now, staleAfter) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// ReadyInApp is a migration adapter for callers already inside a PocketBase
+// transaction. Readiness policy itself is typed and persistence-agnostic.
+func (s *Service) ReadyInApp(app core.App, staleAfter time.Duration) (bool, error) {
+	return s.ReadyUoW(store.NewPocketBaseUnit(app), staleAfter)
 }
 
 func (s *Service) Status(staleAfter time.Duration) (Status, error) {
