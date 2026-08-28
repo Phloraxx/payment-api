@@ -1,6 +1,7 @@
 package androidrelay
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,6 +19,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/paytmnotification"
+	"github.com/Phloraxx/payment-api/internal/store"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/tests"
 )
@@ -35,6 +37,19 @@ func testKey(t *testing.T) (*ecdsa.PrivateKey, string, string) {
 	block := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
 	sum := sha256.Sum256(der)
 	return priv, hex.EncodeToString(sum[:]), string(block)
+}
+
+func typedRelayDevice(t *testing.T, service *Service, recordID string) *domain.RelayDevice {
+	t.Helper()
+	var device *domain.RelayDevice
+	if err := service.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		var err error
+		device, err = uow.Relay().Get(recordID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return device
 }
 
 func TestEnrollVerifyAndIngestPaytmRemoteViewEvidence(t *testing.T) {
@@ -129,7 +144,7 @@ func TestRelayObservesGPayWithoutMatching(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.Ingest(device, EventInput{SchemaVersion: 1, EventID: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", Kind: "notification", Notification: Notification{PackageName: GPayPersonalPackage, Title: "You received money"}}, nil)
+	result, err := service.Ingest(typedRelayDevice(t, service, device.Id), EventInput{SchemaVersion: 1, EventID: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", Kind: "notification", Notification: Notification{PackageName: GPayPersonalPackage, Title: "You received money"}}, nil)
 	if err != nil || result.Status != "observed" || result.Action != "observed_only" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -152,7 +167,7 @@ func TestRelayIgnoresNotificationThatPredatesEnrollment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.Ingest(device, EventInput{
+	result, err := service.Ingest(typedRelayDevice(t, service, device.Id), EventInput{
 		SchemaVersion: 1,
 		EventID:       "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 		Kind:          "notification",

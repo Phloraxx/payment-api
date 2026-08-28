@@ -50,7 +50,7 @@ func TestRelayStatusAndHeartbeatTrackReadiness(t *testing.T) {
 		t.Fatalf("legacy heartbeat grace should be ready: %+v", status)
 	}
 
-	if _, err := service.Heartbeat(device, HeartbeatInput{SchemaVersion: 1, AppVersion: "0.3.0", NotificationAccess: false}); err != nil {
+	if _, err := service.Heartbeat(typedRelayDevice(t, service, device.Id), HeartbeatInput{SchemaVersion: 1, AppVersion: "0.3.0", NotificationAccess: false}); err != nil {
 		t.Fatal(err)
 	}
 	status, _ = service.Status(time.Hour)
@@ -58,7 +58,7 @@ func TestRelayStatusAndHeartbeatTrackReadiness(t *testing.T) {
 		t.Fatalf("heartbeat without notification access must make relay unavailable: %+v", status)
 	}
 
-	if _, err := service.Heartbeat(device, HeartbeatInput{SchemaVersion: 1, AppVersion: "0.3.0", NotificationAccess: true, ListenerConnected: true, PendingCount: 2, FailedCount: 1, LastSuccessfulDeliveryAtMs: now.Add(-time.Minute).UnixMilli()}); err != nil {
+	if _, err := service.Heartbeat(typedRelayDevice(t, service, device.Id), HeartbeatInput{SchemaVersion: 1, AppVersion: "0.3.0", NotificationAccess: true, ListenerConnected: true, PendingCount: 2, FailedCount: 1, LastSuccessfulDeliveryAtMs: now.Add(-time.Minute).UnixMilli()}); err != nil {
 		t.Fatal(err)
 	}
 	status, _ = service.Status(time.Hour)
@@ -176,7 +176,7 @@ func TestRelayDeviceStateChangeClearsLegacyGrace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !disabled.GetDateTime("heartbeat_grace_until").Time().IsZero() {
+	if !disabled.HeartbeatGraceUntil.IsZero() {
 		t.Fatal("disabling a device must clear legacy heartbeat grace")
 	}
 	if _, err := service.SetEnabled(device.Id, true); err != nil {
@@ -209,7 +209,7 @@ func TestHeartbeatRejectsFutureDeliveryTimestamp(t *testing.T) {
 	if err := app.Save(device); err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Heartbeat(device, HeartbeatInput{SchemaVersion: 1, LastSuccessfulDeliveryAtMs: now.Add(6 * time.Minute).UnixMilli()})
+	_, err = service.Heartbeat(typedRelayDevice(t, service, device.Id), HeartbeatInput{SchemaVersion: 1, LastSuccessfulDeliveryAtMs: now.Add(6 * time.Minute).UnixMilli()})
 	if err == nil {
 		t.Fatal("expected future delivery timestamp to be rejected")
 	}
@@ -264,7 +264,7 @@ func TestV031PowerHealthGatesReadinessButAllowsPowerSaver(t *testing.T) {
 
 	heartbeat := func(exempt, saver, restricted, foreground bool) {
 		t.Helper()
-		if _, err := service.Heartbeat(device, HeartbeatInput{
+		if _, err := service.Heartbeat(typedRelayDevice(t, service, device.Id), HeartbeatInput{
 			SchemaVersion:             1,
 			AppVersion:                "0.3.1",
 			NotificationAccess:        true,

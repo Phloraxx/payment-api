@@ -25,6 +25,7 @@ type pocketBaseRefunds struct{ app core.App }
 type pocketBaseNotificationEvents struct{ app core.App }
 type pocketBaseReviews struct{ app core.App }
 type pocketBaseRelay struct{ app core.App }
+type pocketBaseRelayEvents struct{ app core.App }
 type pocketBaseOutbox struct{ app core.App }
 
 func NewPocketBase(app core.App) Database { return &pocketBaseDatabase{app: app} }
@@ -59,7 +60,10 @@ func (u *pocketBaseUnit) NotificationEvents() NotificationEventRepository {
 }
 func (u *pocketBaseUnit) Reviews() ReviewRepository { return &pocketBaseReviews{app: u.app} }
 func (u *pocketBaseUnit) Relay() RelayRepository    { return &pocketBaseRelay{app: u.app} }
-func (u *pocketBaseUnit) Outbox() OutboxRepository  { return &pocketBaseOutbox{app: u.app} }
+func (u *pocketBaseUnit) RelayEvents() RelayEventRepository {
+	return &pocketBaseRelayEvents{app: u.app}
+}
+func (u *pocketBaseUnit) Outbox() OutboxRepository { return &pocketBaseOutbox{app: u.app} }
 
 func (r *pocketBasePayments) Get(id string) (*domain.Payment, error) {
 	record, err := r.app.FindRecordById("payments", id)
@@ -833,4 +837,208 @@ func storeDate(t time.Time) string {
 		return t.UTC().Format(time.RFC3339Nano)
 	}
 	return value.String()
+}
+
+func (r *pocketBaseRelay) Get(id string) (*domain.RelayDevice, error) {
+	record, err := r.app.FindRecordById("relay_devices", id)
+	if err != nil {
+		return nil, err
+	}
+	return relayDeviceFromRecord(record), nil
+}
+
+func (r *pocketBaseRelay) FindByDeviceID(deviceID string) (*domain.RelayDevice, error) {
+	record, err := r.app.FindFirstRecordByFilter("relay_devices", "device_id = {:id}", dbx.Params{"id": deviceID})
+	if err != nil {
+		return nil, err
+	}
+	return relayDeviceFromRecord(record), nil
+}
+
+func (r *pocketBaseRelay) Create(device *domain.RelayDevice) error {
+	collection, err := r.app.FindCollectionByNameOrId("relay_devices")
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	writeRelayDevice(record, device)
+	if err := r.app.Save(record); err != nil {
+		return err
+	}
+	device.ID = record.Id
+	device.CreatedAt = record.GetDateTime("created").Time()
+	return nil
+}
+
+func (r *pocketBaseRelay) Save(device *domain.RelayDevice) error {
+	record, err := r.app.FindRecordById("relay_devices", device.ID)
+	if err != nil {
+		return err
+	}
+	writeRelayDevice(record, device)
+	return r.app.Save(record)
+}
+
+func (r *pocketBaseRelay) All(limit int) ([]*domain.RelayDevice, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	records, err := r.app.FindRecordsByFilter("relay_devices", "", "-last_seen_at,-created", limit, 0)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]*domain.RelayDevice, 0, len(records))
+	for _, record := range records {
+		result = append(result, relayDeviceFromRecord(record))
+	}
+	return result, nil
+}
+
+func writeRelayDevice(record *core.Record, device *domain.RelayDevice) {
+	record.Set("device_id", device.DeviceID)
+	record.Set("name", device.Name)
+	record.Set("public_key_pem", device.PublicKeyPEM)
+	record.Set("enabled", device.Enabled)
+	record.Set("app_version", device.AppVersion)
+	record.Set("android_version", device.AndroidVersion)
+	record.Set("device_model", device.DeviceModel)
+	record.Set("enrolled_at", device.EnrolledAt)
+	record.Set("last_seen_at", device.LastSeenAt)
+	record.Set("last_heartbeat_at", device.LastHeartbeatAt)
+	record.Set("heartbeat_grace_until", device.HeartbeatGraceUntil)
+	record.Set("notification_access", device.NotificationAccess)
+	record.Set("listener_connected", device.ListenerConnected)
+	record.Set("power_health_reported", device.PowerHealthReported)
+	record.Set("battery_optimization_exempt", device.BatteryOptimizationExempt)
+	record.Set("power_save_mode", device.PowerSaveMode)
+	record.Set("background_restricted", device.BackgroundRestricted)
+	record.Set("foreground_service_active", device.ForegroundServiceActive)
+	record.Set("pending_count", device.PendingCount)
+	record.Set("failed_count", device.FailedCount)
+	record.Set("last_client_error", device.LastClientError)
+	record.Set("last_client_delivery_at", device.LastClientDeliveryAt)
+}
+
+func relayDeviceFromRecord(record *core.Record) *domain.RelayDevice {
+	if record == nil {
+		return nil
+	}
+	return &domain.RelayDevice{
+		ID: record.Id, DeviceID: record.GetString("device_id"), Name: record.GetString("name"), PublicKeyPEM: record.GetString("public_key_pem"), Enabled: record.GetBool("enabled"),
+		AppVersion: record.GetString("app_version"), AndroidVersion: record.GetString("android_version"), DeviceModel: record.GetString("device_model"),
+		EnrolledAt: record.GetDateTime("enrolled_at").Time(), LastSeenAt: record.GetDateTime("last_seen_at").Time(), LastHeartbeatAt: record.GetDateTime("last_heartbeat_at").Time(), HeartbeatGraceUntil: record.GetDateTime("heartbeat_grace_until").Time(),
+		NotificationAccess: record.GetBool("notification_access"), ListenerConnected: record.GetBool("listener_connected"), PowerHealthReported: record.GetBool("power_health_reported"), BatteryOptimizationExempt: record.GetBool("battery_optimization_exempt"), PowerSaveMode: record.GetBool("power_save_mode"), BackgroundRestricted: record.GetBool("background_restricted"), ForegroundServiceActive: record.GetBool("foreground_service_active"),
+		PendingCount: record.GetInt("pending_count"), FailedCount: record.GetInt("failed_count"), LastClientError: record.GetString("last_client_error"), LastClientDeliveryAt: record.GetDateTime("last_client_delivery_at").Time(), CreatedAt: record.GetDateTime("created").Time(),
+	}
+}
+
+func (r *pocketBaseRelayEvents) FindByDeviceEvent(deviceRecordID, eventID string) (*domain.RelayEvent, error) {
+	record, err := r.app.FindFirstRecordByFilter("relay_events", "device = {:device} && event_id = {:event}", dbx.Params{"device": deviceRecordID, "event": eventID})
+	if err != nil {
+		return nil, err
+	}
+	return relayEventFromRecord(record), nil
+}
+
+func (r *pocketBaseRelayEvents) Create(event *domain.RelayEvent) error {
+	collection, err := r.app.FindCollectionByNameOrId("relay_events")
+	if err != nil {
+		return err
+	}
+	record := core.NewRecord(collection)
+	writeRelayEvent(record, event)
+	if err := r.app.Save(record); err != nil {
+		return err
+	}
+	event.ID = record.Id
+	event.CreatedAt = record.GetDateTime("created").Time()
+	return nil
+}
+
+func (r *pocketBaseRelayEvents) Save(event *domain.RelayEvent) error {
+	record, err := r.app.FindRecordById("relay_events", event.ID)
+	if err != nil {
+		return err
+	}
+	writeRelayEvent(record, event)
+	return r.app.Save(record)
+}
+
+func (r *pocketBaseRelayEvents) Latest(deviceRecordID string) (*domain.RelayEvent, error) {
+	filter, params := "", dbx.Params{}
+	if deviceRecordID != "" {
+		filter, params = "device = {:device}", dbx.Params{"device": deviceRecordID}
+	}
+	records, err := r.app.FindRecordsByFilter("relay_events", filter, "-created", 1, 0, params)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return relayEventFromRecord(records[0]), nil
+}
+
+func (r *pocketBaseRelayEvents) LatestMatched(deviceRecordID string) (*domain.RelayEvent, error) {
+	filter := "matched_payment != ''"
+	params := dbx.Params{}
+	if deviceRecordID != "" {
+		filter = "device = {:device} && matched_payment != ''"
+		params = dbx.Params{"device": deviceRecordID}
+	}
+	records, err := r.app.FindRecordsByFilter("relay_events", filter, "-created", 1, 0, params)
+	if err != nil {
+		return nil, err
+	}
+	if len(records) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return relayEventFromRecord(records[0]), nil
+}
+
+func (r *pocketBaseRelayEvents) CountErrorsSince(deviceRecordID string, since time.Time) (int64, error) {
+	if deviceRecordID == "" {
+		return r.app.CountRecords("relay_events", dbx.NewExp("processing_status = 'error' AND created >= {:cutoff}", dbx.Params{"cutoff": storeDate(since)}))
+	}
+	return r.app.CountRecords("relay_events", dbx.NewExp("device = {:device} AND processing_status = 'error' AND created >= {:cutoff}", dbx.Params{"device": deviceRecordID, "cutoff": storeDate(since)}))
+}
+
+func writeRelayEvent(record *core.Record, event *domain.RelayEvent) {
+	record.Set("device", event.DeviceRecordID)
+	record.Set("event_id", event.EventID)
+	record.Set("kind", event.Kind)
+	record.Set("app_package", event.AppPackage)
+	record.Set("app_name", event.AppName)
+	record.Set("notification_key", event.NotificationKey)
+	record.Set("notification_id", event.NotificationID)
+	record.Set("notification_tag", event.NotificationTag)
+	record.Set("group_key", event.GroupKey)
+	record.Set("is_group_summary", event.IsGroupSummary)
+	record.Set("post_time", event.PostTime)
+	record.Set("notification_when", event.NotificationWhen)
+	record.Set("captured_at", event.CapturedAt)
+	record.Set("channel_id", event.ChannelID)
+	record.Set("category", event.Category)
+	record.Set("title", event.Title)
+	record.Set("body", event.Body)
+	record.Set("big_text", event.BigText)
+	record.Set("sub_text", event.SubText)
+	record.Set("summary_text", event.SummaryText)
+	record.Set("text_lines", event.TextLines)
+	record.Set("custom_texts", event.CustomTexts)
+	record.Set("processing_status", event.ProcessingStatus)
+	record.Set("downstream_event_id", event.DownstreamEventID)
+	record.Set("matched_payment", event.MatchedPaymentID)
+	record.Set("provider_result", event.ProviderResult)
+	record.Set("error", event.Error)
+	if event.RawPayload != nil {
+		record.Set("raw_payload", event.RawPayload)
+	}
+}
+
+func relayEventFromRecord(record *core.Record) *domain.RelayEvent {
+	if record == nil {
+		return nil
+	}
+	return &domain.RelayEvent{ID: record.Id, DeviceRecordID: record.GetString("device"), EventID: record.GetString("event_id"), Kind: record.GetString("kind"), AppPackage: record.GetString("app_package"), AppName: record.GetString("app_name"), NotificationKey: record.GetString("notification_key"), NotificationID: record.GetInt("notification_id"), NotificationTag: record.GetString("notification_tag"), GroupKey: record.GetString("group_key"), IsGroupSummary: record.GetBool("is_group_summary"), PostTime: record.GetDateTime("post_time").Time(), NotificationWhen: record.GetDateTime("notification_when").Time(), CapturedAt: record.GetDateTime("captured_at").Time(), ChannelID: record.GetString("channel_id"), Category: record.GetString("category"), Title: record.GetString("title"), Body: record.GetString("body"), BigText: record.GetString("big_text"), SubText: record.GetString("sub_text"), SummaryText: record.GetString("summary_text"), TextLines: stringSlice(record.Get("text_lines")), CustomTexts: stringSlice(record.Get("custom_texts")), ProcessingStatus: record.GetString("processing_status"), DownstreamEventID: record.GetString("downstream_event_id"), MatchedPaymentID: record.GetString("matched_payment"), ProviderResult: record.Get("provider_result"), Error: record.GetString("error"), RawPayload: record.Get("raw_payload"), CreatedAt: record.GetDateTime("created").Time()}
 }

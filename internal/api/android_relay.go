@@ -120,9 +120,9 @@ func (a *API) setRelayDeviceEnabled(e *core.RequestEvent) error {
 	if body.Enabled == nil {
 		return e.BadRequestError("enabled must be true or false", nil)
 	}
-	var record *core.Record
-	err := e.App.RunInTransaction(func(tx core.App) error {
-		updated, updateErr := a.AndroidRelay.SetEnabledInApp(tx, e.Request.PathValue("id"), *body.Enabled)
+	var device *domain.RelayDevice
+	err := a.AndroidRelay.Store.Write(e.Request.Context(), func(uow store.UnitOfWork) error {
+		updated, updateErr := a.AndroidRelay.SetEnabledUoW(uow, e.Request.PathValue("id"), *body.Enabled)
 		if updateErr != nil {
 			return updateErr
 		}
@@ -130,13 +130,10 @@ func (a *API) setRelayDeviceEnabled(e *core.RequestEvent) error {
 		if auditService == nil {
 			auditService = audit.NewService(e.App)
 		}
-		if auditErr := auditService.RecordUoW(store.NewPocketBaseUnit(tx), audit.Entry{
-			Action: "relay_device.enabled_changed", Actor: a.actor(e), EntityType: "relay_device", EntityID: updated.Id,
-			Summary: "Android relay device enabled state changed", Details: map[string]any{"enabled": *body.Enabled, "deviceName": updated.GetString("name")},
-		}); auditErr != nil {
+		if auditErr := auditService.RecordUoW(uow, audit.Entry{Action: "relay_device.enabled_changed", Actor: a.actor(e), EntityType: "relay_device", EntityID: updated.ID, Summary: "Android relay device enabled state changed", Details: map[string]any{"enabled": *body.Enabled, "deviceName": updated.Name}}); auditErr != nil {
 			return auditErr
 		}
-		record = updated
+		device = updated
 		return nil
 	})
 	if err != nil {
@@ -145,10 +142,10 @@ func (a *API) setRelayDeviceEnabled(e *core.RequestEvent) error {
 		}
 		return e.InternalServerError("failed to update relay device", err)
 	}
-	return e.JSON(http.StatusOK, map[string]any{"id": record.Id, "enabled": record.GetBool("enabled")})
+	return e.JSON(http.StatusOK, map[string]any{"id": device.ID, "enabled": device.Enabled})
 }
 
-func (a *API) verifyAndroidRelayRequest(e *core.RequestEvent) (*core.Record, []byte, error) {
+func (a *API) verifyAndroidRelayRequest(e *core.RequestEvent) (*domain.RelayDevice, []byte, error) {
 	if a.AndroidRelay == nil {
 		return nil, nil, e.NotFoundError("route not found", nil)
 	}

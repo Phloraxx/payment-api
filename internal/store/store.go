@@ -26,6 +26,7 @@ type UnitOfWork interface {
 	NotificationEvents() NotificationEventRepository
 	Reviews() ReviewRepository
 	Relay() RelayRepository
+	RelayEvents() RelayEventRepository
 	Outbox() OutboxRepository
 }
 
@@ -113,7 +114,21 @@ type ReviewRepository interface {
 }
 
 type RelayRepository interface {
+	Get(id string) (*domain.RelayDevice, error)
+	FindByDeviceID(deviceID string) (*domain.RelayDevice, error)
+	Create(device *domain.RelayDevice) error
+	Save(device *domain.RelayDevice) error
+	All(limit int) ([]*domain.RelayDevice, error)
 	EnabledDevices(limit int) ([]domain.RelayDeviceHealth, error)
+}
+
+type RelayEventRepository interface {
+	FindByDeviceEvent(deviceRecordID, eventID string) (*domain.RelayEvent, error)
+	Create(event *domain.RelayEvent) error
+	Save(event *domain.RelayEvent) error
+	Latest(deviceRecordID string) (*domain.RelayEvent, error)
+	LatestMatched(deviceRecordID string) (*domain.RelayEvent, error)
+	CountErrorsSince(deviceRecordID string, since time.Time) (int64, error)
 }
 
 type OutboxDelivery struct {
