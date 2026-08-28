@@ -22,6 +22,19 @@ All of the following must be true before merging/deploying:
 - The production-copy alert test proves legacy webhook alerts aggregate without replay.
 - Production health is green before cutover.
 
+## Environment normalization
+
+Before Phase A, normalize names in the deployment source of truth without printing or rotating existing values:
+- copy `UPI_ID` to `KOTAK_UPI_ID`, then retire `UPI_ID`;
+- copy `UPI_PAYEE_NAME` to `KOTAK_UPI_PAYEE_NAME`, then retire `UPI_PAYEE_NAME`;
+- retain `PAYMENT_TTL` and retire the older `TICKET_TTL_MINUTES` fallback;
+- because `LEGACY_SMS_WEBHOOK_ENABLED=false`, retire the unused `WEBHOOK_SECRET` after confirming `/api/webhook` remains 404;
+- remove stale Appwrite variables, `COOKIE_SECRET`, `ONE_TIME_CODE`, `PUBLIC_BASE_URL`, and `RP_ID`;
+- retain active PayGate API, SMS/email evidence, Android relay, outgoing webhook, Slice, Paytm, Google Messages, persistence, payment TTL/quarantine, and rate-limit settings;
+- leave orchestrator-level `HOST`/`PORT` unchanged for the first cutover even though the PayGate binary does not consume them directly.
+
+A non-printing config dry-run must pass after normalization. `PAYGATE_CHECKOUT_ORIGINS` stays unset in Phase A. In Phase B set it only to `https://payment.mulearnscet.in,https://pay.ieeesahrdaya.com`.
+
 ## Phase A — API compatibility deployment
 
 1. Create a fresh production backup and verify its archive checksum.
