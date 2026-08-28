@@ -1,6 +1,8 @@
 package retention
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -165,5 +167,91 @@ func TestRunProcessesMoreThanOneRetentionBatch(t *testing.T) {
 	}
 	if remaining != 0 {
 		t.Fatalf("unredacted=%d", remaining)
+	}
+}
+
+func TestRetentionRedactsPaytmAndRelayRawEvidence(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+
+	devices, _ := app.FindCollectionByNameOrId("relay_devices")
+	device := core.NewRecord(devices)
+	device.Set("device_id", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
+	device.Set("name", "Phone")
+	device.Set("public_key_pem", "test-key")
+	device.Set("enabled", true)
+	if err := app.Save(device); err != nil {
+		t.Fatal(err)
+	}
+
+	notifications, _ := app.FindCollectionByNameOrId("notification_events")
+	n := core.NewRecord(notifications)
+	n.Set("source", "android_relay")
+	n.Set("source_event_id", "retention-paytm")
+	n.Set("app_package", "com.paytm.business")
+	n.Set("title", "Payment Received")
+	n.Set("body", "₹1.23 Received from Test User")
+	n.Set("big_text", "private raw detail")
+	n.Set("notification_time", time.Now().UTC())
+	n.Set("payment_account", "paytm")
+	n.Set("amount", 123)
+	n.Set("payer_name", "Test User")
+	n.Set("processing_status", "unmatched")
+	n.Set("raw_payload", map[string]any{"private": "value"})
+	if err := app.Save(n); err != nil {
+		t.Fatal(err)
+	}
+
+	relays, _ := app.FindCollectionByNameOrId("relay_events")
+	r := core.NewRecord(relays)
+	r.Set("device", device.Id)
+	r.Set("event_id", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+	r.Set("kind", "notification")
+	r.Set("app_package", "com.paytm.business")
+	r.Set("title", "Payment Received")
+	r.Set("body", "private body")
+	r.Set("custom_texts", []string{"₹1.23 Received from Test User"})
+	r.Set("processing_status", "forwarded")
+	r.Set("raw_payload", map[string]any{"private": "value"})
+	if err := app.Save(r); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{
+		RetentionEnabled:              true,
+		SMSRawRetention:               365 * 24 * time.Hour,
+		EmailRawRetention:             365 * 24 * time.Hour,
+		ReconciliationRawRetention:    365 * 24 * time.Hour,
+		AuditRetention:                365 * 24 * time.Hour,
+		PaytmNotificationRawRetention: 24 * time.Hour,
+		RelayRawRetention:             24 * time.Hour,
+	}
+	service := NewService(app, cfg)
+	service.Now = func() time.Time { return time.Now().UTC().Add(48 * time.Hour) }
+	result, err := service.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PaytmNotificationsRedacted != 1 || result.RelayEventsRedacted != 1 {
+		t.Fatalf("retention result = %+v", result)
+	}
+
+	storedN, _ := app.FindRecordById("notification_events", n.Id)
+	if storedN.GetString("body") != redactedMarker || storedN.GetString("payer_name") != "" || strings.Contains(fmt.Sprint(storedN.Get("raw_payload")), "private") || storedN.GetDateTime("raw_redacted_at").Time().IsZero() {
+		t.Fatalf("notification raw evidence not redacted: %+v", storedN)
+	}
+	if storedN.GetInt("amount") != 123 || storedN.GetString("processing_status") != "unmatched" {
+		t.Fatalf("notification matching metadata must remain: amount=%d status=%s", storedN.GetInt("amount"), storedN.GetString("processing_status"))
+	}
+
+	storedR, _ := app.FindRecordById("relay_events", r.Id)
+	if storedR.GetString("body") != redactedMarker || strings.Contains(fmt.Sprint(storedR.Get("raw_payload")), "private") || storedR.GetDateTime("raw_redacted_at").Time().IsZero() {
+		t.Fatalf("relay raw evidence not redacted: %+v", storedR)
+	}
+	if storedR.GetString("processing_status") != "forwarded" || storedR.GetString("event_id") == "" {
+		t.Fatalf("relay audit metadata must remain")
 	}
 }

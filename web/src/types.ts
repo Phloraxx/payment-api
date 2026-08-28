@@ -32,6 +32,45 @@ export type Connector = {
   lastError?: string;
 };
 
+
+export type RelayStatus = {
+  ready: boolean;
+  enabledDevices: number;
+  activeDevices: number;
+  staleAfterSeconds: number;
+  lastSeenAt?: string | null;
+  lastHeartbeatAt?: string | null;
+  lastEventAt?: string | null;
+  lastMatchedAt?: string | null;
+  recentErrorCount: number;
+  pendingQueueCount: number;
+  failedQueueCount: number;
+};
+
+export type RelayDevice = {
+  id: string;
+  deviceId: string;
+  name: string;
+  enabled: boolean;
+  appVersion: string;
+  androidVersion: string;
+  deviceModel: string;
+  lastSeenAt?: string | null;
+  lastHeartbeatAt?: string | null;
+  heartbeatGraceUntil?: string | null;
+  notificationAccess: boolean;
+  listenerConnected: boolean;
+  pendingCount: number;
+  failedCount: number;
+  lastClientError?: string;
+  lastDeliveryAt?: string | null;
+  lastEventAt?: string | null;
+  lastMatchedAt?: string | null;
+  lastMatchedPaymentId?: string;
+  recentErrorCount: number;
+  active: boolean;
+};
+
 export type CapacityPool = {
   requestedAmountPaise: number;
   requestedAmount: string;
@@ -64,6 +103,7 @@ export type BackupStatus = {
 export type DashboardData = {
   stats: Record<string, number>;
   connector: Connector;
+  relay?: RelayStatus;
   capacity?: CapacitySnapshot;
   openReviewCount?: number;
   openAlertCount?: number;
@@ -83,7 +123,7 @@ export type PaymentCreateResponse = {
   expiresAt: string;
   paidAt: string | null;
   externalId: string;
-  paymentFlow: "upi_intent" | "merchant_qr";
+  paymentFlow: "upi_intent" | "merchant_qr" | "qr_only";
   upiUri?: string;
   qrPayload?: string;
 };

@@ -17,6 +17,8 @@ const (
 type Result struct {
 	SMSEventsRedacted             int `json:"smsEventsRedacted"`
 	EmailEventsRedacted           int `json:"emailEventsRedacted"`
+	PaytmNotificationsRedacted    int `json:"paytmNotificationsRedacted"`
+	RelayEventsRedacted           int `json:"relayEventsRedacted"`
 	ReconciliationEntriesRedacted int `json:"reconciliationEntriesRedacted"`
 	AuditEventsDeleted            int `json:"auditEventsDeleted"`
 }
@@ -54,6 +56,26 @@ func (s *Service) Run() (Result, error) {
 			return result, err
 		}
 		result.EmailEventsRedacted += count
+		if count < retentionBatchSize {
+			break
+		}
+	}
+	for {
+		count, err := s.redactPaytmNotificationBatch(now.Add(-retentionDuration(s.Config.PaytmNotificationRawRetention, 30*24*time.Hour)))
+		if err != nil {
+			return result, err
+		}
+		result.PaytmNotificationsRedacted += count
+		if count < retentionBatchSize {
+			break
+		}
+	}
+	for {
+		count, err := s.redactRelayBatch(now.Add(-retentionDuration(s.Config.RelayRawRetention, 30*24*time.Hour)))
+		if err != nil {
+			return result, err
+		}
+		result.RelayEventsRedacted += count
 		if count < retentionBatchSize {
 			break
 		}
@@ -141,6 +163,63 @@ func (s *Service) redactSMSBatch(cutoff time.Time) (int, error) {
 	return count, err
 }
 
+func (s *Service) redactPaytmNotificationBatch(cutoff time.Time) (int, error) {
+	count := 0
+	err := s.App.RunInTransaction(func(tx core.App) error {
+		records, err := tx.FindRecordsByFilter(
+			"notification_events", "created < {:cutoff} && raw_redacted_at = ''", "created", retentionBatchSize, 0,
+			dbx.Params{"cutoff": filterDate(cutoff)},
+		)
+		if err != nil {
+			return err
+		}
+		for _, record := range records {
+			record.Set("title", redactedMarker)
+			record.Set("body", redactedMarker)
+			record.Set("big_text", redactedMarker)
+			record.Set("payer_name", "")
+			record.Set("raw_payload", nil)
+			record.Set("raw_redacted_at", s.now())
+			if err := tx.Save(record); err != nil {
+				return err
+			}
+		}
+		count = len(records)
+		return nil
+	})
+	return count, err
+}
+
+func (s *Service) redactRelayBatch(cutoff time.Time) (int, error) {
+	count := 0
+	err := s.App.RunInTransaction(func(tx core.App) error {
+		records, err := tx.FindRecordsByFilter(
+			"relay_events", "created < {:cutoff} && raw_redacted_at = ''", "created", retentionBatchSize, 0,
+			dbx.Params{"cutoff": filterDate(cutoff)},
+		)
+		if err != nil {
+			return err
+		}
+		for _, record := range records {
+			record.Set("title", redactedMarker)
+			record.Set("body", redactedMarker)
+			record.Set("big_text", redactedMarker)
+			record.Set("sub_text", "")
+			record.Set("summary_text", "")
+			record.Set("text_lines", nil)
+			record.Set("custom_texts", nil)
+			record.Set("raw_payload", nil)
+			record.Set("raw_redacted_at", s.now())
+			if err := tx.Save(record); err != nil {
+				return err
+			}
+		}
+		count = len(records)
+		return nil
+	})
+	return count, err
+}
+
 func (s *Service) redactReconciliationBatch(cutoff time.Time) (int, error) {
 	count := 0
 	err := s.App.RunInTransaction(func(tx core.App) error {
@@ -200,4 +279,11 @@ func filterDate(t time.Time) string {
 		return t.UTC().Format(time.RFC3339Nano)
 	}
 	return value.String()
+}
+
+func retentionDuration(value, fallback time.Duration) time.Duration {
+	if value <= 0 {
+		return fallback
+	}
+	return value
 }

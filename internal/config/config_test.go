@@ -117,6 +117,9 @@ func TestLoadDefaultsEmailEvidenceOff(t *testing.T) {
 	if cfg.EmailSignatureTolerance != 5*time.Minute || cfg.EmailRawRetention != 90*24*time.Hour {
 		t.Fatalf("email durations = tolerance %s retention %s", cfg.EmailSignatureTolerance, cfg.EmailRawRetention)
 	}
+	if cfg.AndroidRelayStaleAfter != time.Hour || cfg.PaytmNotificationRawRetention != 30*24*time.Hour || cfg.RelayRawRetention != 30*24*time.Hour {
+		t.Fatalf("relay defaults = stale %s paytm retention %s relay retention %s", cfg.AndroidRelayStaleAfter, cfg.PaytmNotificationRawRetention, cfg.RelayRawRetention)
+	}
 }
 
 func TestValidateServeEmailEvidenceRequiresStrongExactConfiguration(t *testing.T) {
@@ -217,6 +220,11 @@ func TestPaytmAccountSupportsDynamicQROnlyFlowAndLegacyStaticQR(t *testing.T) {
 	if err := base.ValidateServe(); err != nil {
 		t.Fatalf("valid Paytm UPI configuration rejected: %v", err)
 	}
+	modernWithStaleLegacyQR := base
+	modernWithStaleLegacyQR.PaytmQRPayload = "old-static-qr-that-is-no-longer-used"
+	if err := modernWithStaleLegacyQR.ValidateServe(); err != nil {
+		t.Fatalf("modern Paytm UPI flow must ignore an unused legacy QR payload: %v", err)
+	}
 
 	legacy := base
 	legacy.PaytmUPIID = ""
@@ -229,5 +237,21 @@ func TestPaytmAccountSupportsDynamicQROnlyFlowAndLegacyStaticQR(t *testing.T) {
 	account, ok = legacy.PaymentAccount("paytm")
 	if !ok || account.Flow != "merchant_qr" || account.QRPayload != legacy.PaytmQRPayload {
 		t.Fatalf("legacy Paytm account = %+v ok=%v", account, ok)
+	}
+}
+
+func TestValidateServeAndroidRelayEnrollmentIsExplicit(t *testing.T) {
+	base := Config{TestMode: true, PaymentTTL: time.Minute, AmountQuarantine: time.Hour, StatementTimezone: "Asia/Kolkata"}
+	base.AndroidRelayEnrollmentEnabled = true
+	if err := base.ValidateServe(); err == nil || !strings.Contains(err.Error(), "ANDROID_RELAY_PAIRING_SECRET") {
+		t.Fatalf("enabled enrollment without secret error = %v", err)
+	}
+	base.AndroidRelayPairingSecret = "android-relay-pairing-secret-long-enough"
+	if err := base.ValidateServe(); err != nil {
+		t.Fatalf("explicit relay enrollment config rejected: %v", err)
+	}
+	base.AndroidRelayEnrollmentEnabled = false
+	if err := base.ValidateServe(); err != nil {
+		t.Fatalf("stored pairing secret must be inert when enrollment is disabled: %v", err)
 	}
 }

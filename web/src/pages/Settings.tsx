@@ -2,13 +2,13 @@ import QRCode from "qrcode";
 import { useCallback, useEffect, useState } from "react";
 import { Badge, formatDate } from "../components/common";
 import { api } from "../pb";
-import type { BackupStatus, Connector } from "../types";
+import type { BackupStatus, Connector, RelayDevice, RelayStatus } from "../types";
 
 type SafeConfig = {
   upiId: string;
   upiPayeeName: string;
   defaultPaymentAccount: "kotak" | "slice" | "paytm";
-  paymentAccounts: Array<{ id: "kotak" | "slice" | "paytm"; label: string; verification: "sms" | "email" | "notification" }>;
+  paymentAccounts: Array<{ id: "kotak" | "slice" | "paytm"; label: string; verification: "sms" | "email" | "notification"; flow: "upi_intent" | "qr_only" | "merchant_qr"; ready: boolean; unavailableReason?: string }>;
   paymentTtlSeconds: number;
   quarantineSeconds: number;
   webhookConfigured: boolean;
@@ -21,6 +21,10 @@ type SafeConfig = {
   emailRawRetentionSeconds: number;
   reconciliationRawRetentionSeconds: number;
   auditRetentionSeconds: number;
+  paytmNotificationRawRetentionSeconds: number;
+  relayRawRetentionSeconds: number;
+  androidRelayEnrollmentEnabled: boolean;
+  androidRelayStaleAfterSeconds: number;
   backupEnabled: boolean;
   backupCron: string;
   backupMaxKeep: number;
@@ -46,17 +50,24 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
   const [busy, setBusy] = useState(false);
   const [backup, setBackup] = useState<BackupStatus | null>(null);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [relay, setRelay] = useState<RelayStatus | null>(null);
+  const [relayDevices, setRelayDevices] = useState<RelayDevice[]>([]);
+  const [relayBusy, setRelayBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
-      const [cfg, status, backupStatus] = await Promise.all([
+      const [cfg, status, backupStatus, relayStatus, relayDeviceResult] = await Promise.all([
         api<SafeConfig>("/api/config"),
         api<Connector>("/api/connector/gmessages/status"),
         api<BackupStatus>("/api/paygate/backups/status"),
+        api<RelayStatus>("/api/relay/status"),
+        api<{ devices: RelayDevice[] }>("/api/relay/devices"),
       ]);
       setConfig(cfg);
       setConnector(status);
       setBackup(backupStatus);
+      setRelay(relayStatus);
+      setRelayDevices(relayDeviceResult.devices);
       if (status.pairingMethod === "google" && status.state === "pairing") {
         setPairingEmoji(status.pairingEmoji ?? "");
         setPairingAccount(status.accountEmail ?? "");
@@ -179,6 +190,20 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
     } finally { setBusy(false); }
   }
 
+  async function setRelayEnabled(device: RelayDevice, enabled: boolean) {
+    if (!window.confirm(`${enabled ? "Enable" : "Disable"} relay device ${device.name}?`)) return;
+    setRelayBusy(true);
+    try {
+      await api<{ id: string; enabled: boolean }>(`/api/relay/devices/${encodeURIComponent(device.id)}/enabled`, {
+        method: "POST",
+        body: JSON.stringify({ enabled }),
+      });
+      notify(`Relay device ${enabled ? "enabled" : "disabled"}.`);
+      await refresh();
+    } catch (err) { notify(err instanceof Error ? err.message : "Relay device update failed."); }
+    finally { setRelayBusy(false); }
+  }
+
   async function createBackup() {
     setBackupBusy(true);
     try {
@@ -285,10 +310,39 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
     </section>
 
     <section className="card">
+      <div className="section-title">
+        <div><p className="eyebrow">ANDROID RELAY</p><h2>{relay?.ready ? "ready" : "unavailable"}</h2></div>
+        <Badge status={relay?.ready ? "connected" : "warning"} />
+      </div>
+      <p className="muted">Paytm QR checkouts fail closed when no recently active relay device is available.</p>
+      <dl className="settings compact">
+        <div><dt>Active devices</dt><dd>{relay ? `${relay.activeDevices} / ${relay.enabledDevices}` : "—"}</dd></div>
+        <div><dt>Last heartbeat</dt><dd>{formatDate(relay?.lastHeartbeatAt ?? undefined)}</dd></div>
+        <div><dt>Last relay event</dt><dd>{formatDate(relay?.lastEventAt ?? undefined)}</dd></div>
+        <div><dt>Last matched payment</dt><dd>{formatDate(relay?.lastMatchedAt ?? undefined)}</dd></div>
+        <div><dt>Errors (24h)</dt><dd>{relay?.recentErrorCount ?? 0}</dd></div>
+        <div><dt>Device queues</dt><dd>{relay ? `${relay.pendingQueueCount} pending · ${relay.failedQueueCount} failed` : "—"}</dd></div>
+        <div><dt>Stale after</dt><dd>{relay ? `${Math.round(relay.staleAfterSeconds / 60)} min` : "—"}</dd></div>
+      </dl>
+      {!relayDevices.length ? <p className="empty">No relay devices enrolled.</p> : <div className="capacity-list">
+        {relayDevices.map((device) => <div className="capacity-row" key={device.id}>
+          <div>
+            <strong>{device.name}</strong>
+            <small>{device.deviceModel || "Android"} · app {device.appVersion || "unknown"} · fingerprint {device.deviceId ? `${device.deviceId.slice(0, 12)}…` : "unknown"}</small>
+            <small>Last seen {formatDate(device.lastSeenAt ?? undefined)} · phone delivered {formatDate(device.lastDeliveryAt ?? undefined)} · last event {formatDate(device.lastEventAt ?? undefined)} · last match {formatDate(device.lastMatchedAt ?? undefined)}{!device.lastHeartbeatAt && device.heartbeatGraceUntil ? ` · legacy heartbeat grace until ${formatDate(device.heartbeatGraceUntil)}` : ""}</small>
+            <small>Notifications {device.notificationAccess ? "allowed" : device.lastHeartbeatAt ? "blocked" : "not reported"} · listener {device.listenerConnected ? "connected" : device.lastHeartbeatAt ? "disconnected" : "not reported"} · queue {device.pendingCount} pending / {device.failedCount} failed · {device.recentErrorCount} server errors/24h{device.lastClientError ? ` · ${device.lastClientError}` : ""}</small>
+          </div>
+          <Badge status={device.active ? "connected" : device.enabled ? "warning" : "disabled"} />
+          <button className={device.enabled ? "danger" : ""} disabled={relayBusy} onClick={() => void setRelayEnabled(device, !device.enabled)}>{device.enabled ? "Disable" : "Enable"}</button>
+        </div>)}
+      </div>}
+    </section>
+
+    <section className="card">
       <p className="eyebrow">SAFE CONFIGURATION</p>
       {config ? <dl className="settings">
         <div><dt>Default account</dt><dd>{config.defaultPaymentAccount}</dd></div>
-        <div><dt>Enabled UPI accounts</dt><dd>{config.paymentAccounts.map((account) => `${account.label} (${account.verification})`).join(" · ")}</dd></div>
+        <div><dt>Enabled UPI accounts</dt><dd>{config.paymentAccounts.map((account) => `${account.label} (${account.verification}${account.ready ? "" : ", unavailable"})`).join(" · ")}</dd></div>
         <div><dt>Legacy Kotak UPI ID</dt><dd>{config.upiId}</dd></div>
         <div><dt>Payee name</dt><dd>{config.upiPayeeName}</dd></div>
         <div><dt>Payment TTL</dt><dd>{config.paymentTtlSeconds}s</dd></div>
@@ -297,10 +351,11 @@ export function Settings({ notify }: { notify: (value: string) => void }) {
         <div><dt>API rate limits</dt><dd>{config.rateLimitsEnabled ? "Enabled" : "Disabled"}</dd></div>
         <div><dt>Legacy /api/webhook</dt><dd>{config.legacySMSWebhookEnabled ? "Enabled (migration only)" : "Disabled"}</dd></div>
         <div><dt>Payment email evidence</dt><dd>{config.emailEvidenceEnabled ? `Enabled · ${config.emailAllowedSender}` : "Disabled"}</dd></div>
-        <div><dt>Evidence retention</dt><dd>{config.retentionEnabled ? `SMS ${Math.round(config.smsRawRetentionSeconds / 86400)}d · email ${Math.round(config.emailRawRetentionSeconds / 86400)}d · statements ${Math.round(config.reconciliationRawRetentionSeconds / 86400)}d · audit ${Math.round(config.auditRetentionSeconds / 86400)}d` : "Disabled"}</dd></div>
+        <div><dt>Evidence retention</dt><dd>{config.retentionEnabled ? `SMS ${Math.round(config.smsRawRetentionSeconds / 86400)}d · email ${Math.round(config.emailRawRetentionSeconds / 86400)}d · Paytm ${Math.round(config.paytmNotificationRawRetentionSeconds / 86400)}d · relay ${Math.round(config.relayRawRetentionSeconds / 86400)}d · statements ${Math.round(config.reconciliationRawRetentionSeconds / 86400)}d · audit ${Math.round(config.auditRetentionSeconds / 86400)}d` : "Disabled"}</dd></div>
         <div><dt>Backup schedule</dt><dd>{config.backupEnabled ? `${config.backupCron} · keep ${config.backupMaxKeep}` : "Disabled"}</dd></div>
         <div><dt>Backup storage</dt><dd>{config.backupOffsite ? "S3-compatible offsite" : "Local persistent volume"}</dd></div>
         <div><dt>Operator alert webhook</dt><dd>{config.operatorAlertWebhookConfigured ? "Configured with signed retries" : "Dashboard only"}</dd></div>
+        <div><dt>Relay enrollment</dt><dd>{config.androidRelayEnrollmentEnabled ? "OPEN — pair only intentionally" : "Closed"}</dd></div>
         <div><dt>Statement timezone</dt><dd>{config.statementTimezone || "Asia/Kolkata"}</dd></div>
       </dl> : <p className="empty">Loading configuration…</p>}
     </section>

@@ -4,11 +4,14 @@ This runbook covers evidence review, statement reconciliation, alerts, refunds, 
 
 ## 1. Daily operator checks
 
-1. Open the dashboard and confirm Google Messages is `connected` and the phone is responsive.
-2. Confirm **Open reviews** and **Open alerts** are zero, or inspect every item.
-3. Check fingerprint capacity. Investigate warning pools at 70% and critical pools at 95%.
-4. Confirm the latest backup exists. Archive verification runs daily; failures create a critical alert.
-5. Review exhausted outgoing payment/refund webhooks.
+Enrollment must remain disabled (`ANDROID_RELAY_ENROLLMENT_ENABLED=false`) except during a deliberate Android device-pairing window.
+
+1. Open the dashboard and confirm Google Messages is `connected` when that rail is enabled.
+2. Confirm **Android Relay** is `ready` when Paytm is enabled: at least one active device, recent heartbeat, notification access allowed, listener connected, and no failed queue that needs investigation.
+3. Confirm **Open reviews** and **Open alerts** are zero, or inspect every item.
+4. Check fingerprint capacity. Investigate warning pools at 70% and critical pools at 95%.
+5. Confirm the latest backup exists. Archive verification runs daily; failures create a critical alert.
+6. Review exhausted outgoing payment/refund webhooks.
 
 An optional signed operator-alert webhook can push open/resolved operational alerts to an external monitoring or notification system. Configure `OPERATOR_ALERT_WEBHOOK_URL` and `OPERATOR_ALERT_WEBHOOK_SECRET` together. Notifications are durable, deduplicated and retried; repeated health checks do not send repeated notifications for the same open alert.
 
@@ -180,6 +183,7 @@ Before relying on PayGate for real orders, run controlled payments over several 
 - outgoing webhook failure/retry;
 - statement reconciliation and manual review;
 - real Slice email delivery, DKIM/DMARC pass, replay rejection, duplicate Message-ID, and rejection of any attempt to match Slice email evidence to Kotak or Kotak SMS evidence to Slice;
+- Paytm Relay heartbeat loss, revoked Notification Access, listener disconnect/reconnect, device disable/re-enable, app update with old active notifications still in the shade, and offline queue catch-up;
 - partial refund and completed refund reference.
 
 Record payer action time, bank transaction time, SMS arrival time, ingestion time and final verification time. Do not reduce quarantine until the worst observed delay is understood.
@@ -195,3 +199,6 @@ A release is production-ready only when:
 - liveness/readiness, auth rejection, payment create, SMS match, review, reconciliation, refund, backup and restore-drill flows pass;
 - the temporary container is recreated on the same volume and state persists;
 - the current production volume is backed up and verified before schema cutover.
+
+
+During the v0.2 → v0.3 rollout, an existing **enabled** relay device receives a bounded 48-hour heartbeat grace only if it had validated signed traffic within the preceding 24 hours. Disabled or long-idle devices and new enrollments receive no grace. The first signed heartbeat immediately switches the device to normal permission/listener/staleness readiness checks, and any operator enable/disable state change permanently clears migration grace for that device.

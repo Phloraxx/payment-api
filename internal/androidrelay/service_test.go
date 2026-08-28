@@ -134,3 +134,73 @@ func TestRelayObservesGPayWithoutMatching(t *testing.T) {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
+
+func TestRelayIgnoresNotificationThatPredatesEnrollment(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Cleanup)
+	now := time.Date(2026, 8, 28, 2, 0, 0, 0, time.UTC)
+	service := NewService(app, nil)
+	service.Now = func() time.Time { return now }
+	_, deviceID, publicPEM := testKey(t)
+	if _, err := service.Enroll(EnrollmentInput{DeviceID: deviceID, Name: "Phone", PublicKeyPEM: publicPEM}); err != nil {
+		t.Fatal(err)
+	}
+	device, err := app.FindFirstRecordByFilter("relay_devices", "device_id={:id}", map[string]any{"id": deviceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.Ingest(device, EventInput{
+		SchemaVersion: 1,
+		EventID:       "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+		Kind:          "notification",
+		CapturedAtMs:  now.UnixMilli(),
+		Notification: Notification{
+			PackageName: GPayPersonalPackage,
+			PostTimeMs:  now.Add(-10 * time.Minute).UnixMilli(),
+			WhenMs:      now.Add(-10 * time.Minute).UnixMilli(),
+			Title:       "Old active notification",
+		},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "ignored" || result.Action != "ignored_pre_enrollment" {
+		t.Fatalf("old notification result=%+v", result)
+	}
+}
+
+func TestVerifyAloneDoesNotRefreshRelayReadiness(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Cleanup)
+	now := time.Date(2026, 8, 28, 3, 0, 0, 0, time.UTC)
+	service := NewService(app, nil)
+	service.Now = func() time.Time { return now }
+	priv, deviceID, publicPEM := testKey(t)
+	if _, err := service.Enroll(EnrollmentInput{DeviceID: deviceID, Name: "Phone", PublicKeyPEM: publicPEM}); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"schemaVersion":999}`)
+	ts := strconv.FormatInt(now.UnixMilli(), 10)
+	canonical := CanonicalRequest(http.MethodPost, "/api/relay/v1/events", ts, body)
+	digest := sha256.Sum256([]byte(canonical))
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Verify(deviceID, ts, base64.StdEncoding.EncodeToString(sig), http.MethodPost, "/api/relay/v1/events", body); err != nil {
+		t.Fatal(err)
+	}
+	device, err := app.FindFirstRecordByFilter("relay_devices", "device_id={:id}", map[string]any{"id": deviceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !device.GetDateTime("last_seen_at").Time().IsZero() {
+		t.Fatalf("signature verification alone refreshed last_seen_at: %s", device.GetDateTime("last_seen_at"))
+	}
+}

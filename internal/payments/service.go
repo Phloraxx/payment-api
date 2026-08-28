@@ -62,7 +62,16 @@ func NewService(app core.App, cfg config.Config, webhooks WebhookScheduler) *Ser
 	}
 }
 
+type CreateGate func(core.App) error
+
 func (s *Service) Create(input CreateInput) (*domain.Payment, bool, error) {
+	return s.CreateGuarded(input, nil)
+}
+
+// CreateGuarded preserves idempotency semantics while allowing callers to
+// fail closed before allocating a new payment. The gate runs inside the same
+// database transaction only after an idempotency replay has been ruled out.
+func (s *Service) CreateGuarded(input CreateInput, gate CreateGate) (*domain.Payment, bool, error) {
 	requested, err := money.RupeesToPaise(input.AmountRupees)
 	if err != nil {
 		return nil, false, domain.InvalidAmount()
@@ -110,6 +119,12 @@ func (s *Service) Create(input CreateInput) (*domain.Payment, bool, error) {
 			}
 			if !errors.Is(findErr, sql.ErrNoRows) {
 				return findErr
+			}
+		}
+
+		if gate != nil {
+			if err := gate(tx); err != nil {
+				return err
 			}
 		}
 

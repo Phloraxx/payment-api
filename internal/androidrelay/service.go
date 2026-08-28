@@ -133,7 +133,9 @@ func (s *Service) Enroll(in EnrollmentInput) (EnrollmentResult, error) {
 			existing.Set("app_version", trimMax(in.AppVersion, 64))
 			existing.Set("android_version", trimMax(in.AndroidVersion, 64))
 			existing.Set("device_model", trimMax(in.DeviceModel, 255))
-			existing.Set("last_seen_at", now)
+			if existing.GetDateTime("enrolled_at").Time().IsZero() {
+				existing.Set("enrolled_at", now)
+			}
 			enabled = existing.GetBool("enabled")
 			return tx.Save(existing)
 		}
@@ -152,7 +154,7 @@ func (s *Service) Enroll(in EnrollmentInput) (EnrollmentResult, error) {
 		r.Set("app_version", trimMax(in.AppVersion, 64))
 		r.Set("android_version", trimMax(in.AndroidVersion, 64))
 		r.Set("device_model", trimMax(in.DeviceModel, 255))
-		r.Set("last_seen_at", now)
+		r.Set("enrolled_at", now)
 		enabled = true
 		return tx.Save(r)
 	})
@@ -195,10 +197,6 @@ func (s *Service) Verify(deviceID, timestamp, signature, method, path string, bo
 	if !ecdsa.VerifyASN1(pub, digest[:], sig) {
 		return nil, domain.New("INVALID_RELAY_SIGNATURE", "invalid relay signature", 401)
 	}
-	device.Set("last_seen_at", now)
-	if err := s.App.Save(device); err != nil {
-		return nil, err
-	}
 	return device, nil
 }
 
@@ -229,6 +227,16 @@ func (s *Service) Ingest(device *core.Record, in EventInput, raw any) (EventResu
 	capturedAt := millisTime(in.CapturedAtMs, now, now)
 	postTime := millisTime(n.PostTimeMs, capturedAt, now)
 	whenTime := millisTime(n.WhenMs, postTime, now)
+	enrolledAt := device.GetDateTime("enrolled_at").Time()
+	if enrolledAt.IsZero() {
+		enrolledAt = device.GetDateTime("created").Time()
+	}
+	// Only validated, allowlisted relay traffic refreshes readiness. Signature
+	// verification alone must not make a malformed request look healthy.
+	device.Set("last_seen_at", now)
+	if err := s.App.Save(device); err != nil {
+		return EventResult{}, err
+	}
 	var result EventResult
 	var queued bool
 	err := s.App.RunInTransaction(func(tx core.App) error {
@@ -277,6 +285,13 @@ func (s *Service) Ingest(device *core.Record, in EventInput, raw any) (EventResu
 			return err
 		}
 		result.EventID = event.Id
+		if !enrolledAt.IsZero() && postTime.Before(enrolledAt.Add(-2*time.Minute)) {
+			event.Set("processing_status", "ignored")
+			event.Set("error", "notification predates relay enrollment")
+			result.Status = "ignored"
+			result.Action = "ignored_pre_enrollment"
+			return tx.Save(event)
+		}
 		if n.IsGroupSummary {
 			event.Set("processing_status", "ignored")
 			event.Set("error", "group summary notification")
@@ -296,7 +311,8 @@ func (s *Service) Ingest(device *core.Record, in EventInput, raw any) (EventResu
 			SourceEventID: "android:" + device.GetString("device_id") + ":" + in.EventID,
 			AppPackage:    n.PackageName, AppName: n.AppName,
 			Title: n.Title, Body: strings.TrimSpace(strings.Join([]string{n.Text, custom, strings.Join(n.TextLines, "\n")}, "\n")),
-			BigText: n.BigText, Channel: n.ChannelID, NotificationTime: whenTime, RawPayload: raw,
+			BigText: n.BigText, Channel: n.ChannelID, NotificationTime: whenTime,
+			RawPayload: map[string]any{"relayEventId": in.EventID, "deviceId": device.GetString("device_id")},
 		})
 		if err != nil {
 			event.Set("processing_status", "error")

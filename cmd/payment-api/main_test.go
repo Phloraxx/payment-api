@@ -16,19 +16,19 @@ func TestMergeManagedRateLimitRulesIsIdempotentAndPreservesCustomRules(t *testin
 	}
 	first := mergeManagedRateLimitRules(initial)
 	second := mergeManagedRateLimitRules(first)
-	if len(first) != 10 || len(second) != 10 {
+	if len(first) != 11 || len(second) != 11 {
 		t.Fatalf("lengths first=%d second=%d", len(first), len(second))
 	}
 	counts := map[string]int{}
 	for _, rule := range second {
 		counts[rule.Label]++
 	}
-	for _, label := range []string{"POST /api/events/sms", "POST /api/events/paytm-notification", "POST /api/relay/v1/enroll", "POST /api/relay/v1/events", "POST /api/events/email", "POST /api/webhook", "POST /api/payments", "POST /api/razorpay/test/orders", "POST /api/razorpay/test/webhook", "custom"} {
+	for _, label := range []string{"POST /api/events/sms", "POST /api/events/paytm-notification", "POST /api/relay/v1/enroll", "POST /api/relay/v1/events", "POST /api/relay/v1/heartbeat", "POST /api/events/email", "POST /api/webhook", "POST /api/payments", "POST /api/razorpay/test/orders", "POST /api/razorpay/test/webhook", "custom"} {
 		if counts[label] != 1 {
 			t.Fatalf("label %s count=%d", label, counts[label])
 		}
 	}
-	if second[0].MaxRequests != 60 || second[6].MaxRequests != 120 {
+	if second[0].MaxRequests != 60 || second[7].MaxRequests != 120 {
 		t.Fatalf("managed rules not restored: %+v", second)
 	}
 }
