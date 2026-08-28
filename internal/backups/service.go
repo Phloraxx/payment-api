@@ -216,37 +216,51 @@ func (s *Service) RestoreDrill(ctx context.Context) (RestoreDrillResult, error) 
 		return RestoreDrillResult{}, fmt.Errorf("extract backup: %w", err)
 	}
 	result := RestoreDrillResult{BackupName: files[0].Name}
-	err = filepath.WalkDir(destination, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".db") {
-			return nil
-		}
-		relative, _ := filepath.Rel(destination, path)
-		result.DatabaseFiles = append(result.DatabaseFiles, relative)
-		database, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
-		if err != nil {
-			return fmt.Errorf("open restored database %s: %w", relative, err)
-		}
-		defer database.Close()
-		var check string
-		if err := database.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&check); err != nil {
-			return fmt.Errorf("integrity check %s: %w", relative, err)
-		}
-		if !strings.EqualFold(strings.TrimSpace(check), "ok") {
-			return fmt.Errorf("integrity check %s returned %q", relative, check)
-		}
-		result.IntegrityChecked++
-		return nil
-	})
+	filesChecked, err := validateRestoredDatabases(ctx, destination)
 	if err != nil {
 		return RestoreDrillResult{}, err
 	}
+	result.DatabaseFiles = filesChecked
+	result.IntegrityChecked = len(filesChecked)
 	if result.IntegrityChecked == 0 {
 		return RestoreDrillResult{}, errors.New("restored archive contains no SQLite database")
 	}
 	return result, nil
+}
+
+func validateRestoredDatabases(ctx context.Context, destination string) ([]string, error) {
+	entries, err := os.ReadDir(destination)
+	if err != nil {
+		return nil, err
+	}
+	files := make([]string, 0, 2)
+	for _, entry := range entries {
+		// A PocketBase restore boots only the root database files. Nested .db files
+		// are retained forensic/safety snapshots (for example quarantine/) and
+		// must not make an otherwise restorable backup fail its drill.
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".db") {
+			continue
+		}
+		path := filepath.Join(destination, entry.Name())
+		database, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+		if err != nil {
+			return nil, fmt.Errorf("open restored database %s: %w", entry.Name(), err)
+		}
+		var check string
+		queryErr := database.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&check)
+		closeErr := database.Close()
+		if queryErr != nil {
+			return nil, fmt.Errorf("integrity check %s: %w", entry.Name(), queryErr)
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+		if !strings.EqualFold(strings.TrimSpace(check), "ok") {
+			return nil, fmt.Errorf("integrity check %s returned %q", entry.Name(), check)
+		}
+		files = append(files, entry.Name())
+	}
+	return files, nil
 }
 
 func (s *Service) download(ctx context.Context, name string) (string, func(), error) {
