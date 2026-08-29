@@ -46,7 +46,7 @@ const (
 	maxEmailRequestBytes                  int64 = ((paymentemail.MaxRawBytes + 2) / 3 * 4) + (128 << 10)
 	maxGMessagesPairBytes                 int64 = 128 << 10
 	maxReviewRequestBytes                 int64 = 16 << 10
-	maxOperatorPaymentProfileRequestBytes int64 = 2 << 20
+	maxOperatorPaymentProfileRequestBytes int64 = 512 << 10
 	maxRefundRequestBytes                 int64 = (1 << 20) + (64 << 10)
 	maxStatementRequestBytes              int64 = reconciliation.MaxFileBytes + (1 << 20)
 	maxRazorpayTestRequestBytes           int64 = 1 << 20

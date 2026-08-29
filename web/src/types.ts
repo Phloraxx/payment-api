@@ -137,7 +137,7 @@ export type OperatorPaymentDetail = OperatorPaymentSummary & {
   description?: string;
   adminNote?: string;
   tags: string[];
-  metadata: Record<string, unknown>;
+  metadata: unknown;
   customFields: Record<string, unknown>;
   payerName?: string;
   upiId?: string;
