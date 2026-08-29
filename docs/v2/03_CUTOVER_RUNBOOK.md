@@ -21,7 +21,7 @@ All of the following must be true before merging/deploying:
 - `scripts/v2-production-copy-acceptance.sh` passes against a fresh restored production backup.
 - The production-copy alert test proves legacy webhook alerts aggregate without replay.
 - Production health is green before cutover.
-- `./scripts/v2-host-preflight.sh disabled` passes from the deployment host.
+- `./scripts/v2-host-preflight.sh disabled` passes from the deployment host. The service image must be pinned; `:latest` is rejected.
 
 ## Environment normalization
 
@@ -40,10 +40,10 @@ A non-printing config dry-run must pass again after normalization. `PAYGATE_CHEC
 
 1. Create a fresh production backup and verify its archive checksum.
 2. Run the non-destructive restore drill.
-3. Record the current API image/task identity and verify the persistent volume mount.
+3. Record the current API image/task identity and verify the persistent volume mount. Keep the preserved pre-v2 image tag for rollback.
 4. Keep `PAYGATE_CHECKOUT_ORIGINS` unset/empty for the first API deployment.
 5. Keep Android relay enrollment closed.
-6. Deploy the v2 API with one replica and stop-first semantics.
+6. Build/tag the v2 API with an immutable release identifier (prefer the commit SHA, for example `main-payment-17aqux:v2-<sha>`), then deploy that exact image with one replica and stop-first semantics. Never deploy production from `:latest`. Set `PAYGATE_EXPECTED_IMAGE` to that exact image when running host preflight.
 7. Allow schema migrations to complete against the existing persistent volume.
 8. Verify `/api/health` and `/api/paygate/health` immediately.
 9. Verify Google Messages remains paired/connected and the Android relay remains ready.
@@ -71,7 +71,7 @@ After the API compatibility soak is clean:
 ## Phase C — Static customer frontend
 
 1. Retain the existing frontend image/task metadata for rollback.
-2. Deploy the v2 static Nginx image.
+2. Deploy the v2 static Nginx image from an immutable release tag/digest, not `:latest`.
 3. Verify `/api/health` on the frontend container and SPA deep-link routing.
 4. Verify CSP, HSTS, frame, referrer, content-type and asset-cache headers.
 5. Verify both customer domains render the same static build.

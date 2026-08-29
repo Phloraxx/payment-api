@@ -4,6 +4,7 @@ set -euo pipefail
 SERVICE="${PAYGATE_SERVICE:-main-payment-17aqux}"
 API_ORIGIN="${PAYGATE_ORIGIN:-https://pay.mulearnscet.in}"
 BACKUP_DIR="${PAYGATE_BACKUP_DIR:-/home/drvij/paygate-backups/daily}"
+EXPECTED_IMAGE="${PAYGATE_EXPECTED_IMAGE:-}"
 CHECKOUT="${1:-disabled}"
 ALLOWED_ORIGIN="${2:-https://payment.mulearnscet.in}"
 
@@ -25,14 +26,21 @@ qr_code="$(code -X POST "$API_ORIGIN/api/connector/gmessages/pair/qr")"
 [[ "$qr_code" == "401" || "$qr_code" == "404" ]] || fail "unexpected QR route status: $qr_code"
 
 service_json="$(docker service inspect "$SERVICE")"
-python3 - "$service_json" <<'PY'
+python3 - "$service_json" "$EXPECTED_IMAGE" <<'PY'
 import json,sys
 svc=json.loads(sys.argv[1])[0]
+expected=sys.argv[2].strip()
 mode=svc['Spec'].get('Mode',{}).get('Replicated',{})
 assert mode.get('Replicas') == 1, mode
-mounts=svc['Spec']['TaskTemplate']['ContainerSpec'].get('Mounts',[])
+container=svc['Spec']['TaskTemplate']['ContainerSpec']
+mounts=container.get('Mounts',[])
 assert any(m.get('Type')=='volume' and m.get('Target')=='/app/pb_data' for m in mounts), mounts
+image=container.get('Image','').strip()
+assert image and not image.endswith(':latest'), f'unpinned production image: {image}'
+if expected:
+    assert image == expected, f'production image {image!r} != expected {expected!r}'
 print('service_shape=single_replica_persistent_volume')
+print('service_image=pinned')
 PY
 
 case "$CHECKOUT" in
