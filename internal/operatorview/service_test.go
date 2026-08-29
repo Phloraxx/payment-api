@@ -99,6 +99,11 @@ func TestPaymentQuerySupportsSearchFiltersPagingAndTypedDetail(t *testing.T) {
 			payment.RRN = item.rrn
 			payment.UPIId = strings.ToLower(strings.Fields(item.customer)[0]) + "@upi"
 			payment.EvidenceReference = "evidence:" + item.external
+			if item.external == "ORDER-GAMMA" {
+				payment.PayerName = "Treasurer Alias"
+				payment.Description = "Hardware security workshop registration"
+				payment.AdminNote = "Priority reconciliation contact"
+			}
 			payment.Tags = []string{"seed", item.external}
 			payment.CustomFields = map[string]any{"batch": "S7"}
 			if err := tx.Payments().Save(payment); err != nil {
@@ -121,12 +126,21 @@ func TestPaymentQuerySupportsSearchFiltersPagingAndTypedDetail(t *testing.T) {
 	if page.Total != 1 || len(page.Payments) != 1 || page.Payments[0].ID != targetID || page.Payments[0].DisplayName != "Buildathon" {
 		t.Fatalf("search page=%+v", page)
 	}
+	for _, query := range []string{"Treasurer Alias", "Hardware security", "Priority reconciliation"} {
+		page, err = view.QueryPayments(operatorview.PaymentQuery{Query: query, Limit: 25})
+		if err != nil || page.Total != 1 || len(page.Payments) != 1 || page.Payments[0].ID != targetID {
+			t.Fatalf("expanded search %q page=%+v err=%v", query, page, err)
+		}
+	}
 	page, err = view.QueryPayments(operatorview.PaymentQuery{Sort: "oldest", Limit: 1, Offset: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if page.Total != 3 || page.Limit != 1 || page.Offset != 1 || len(page.Payments) != 1 || page.Payments[0].ExternalID != "ORDER-BETA" {
 		t.Fatalf("paged=%+v", page)
+	}
+	if _, err := view.QueryPayments(operatorview.PaymentQuery{Sort: "status", Limit: 25}); err != nil {
+		t.Fatalf("status sort: %v", err)
 	}
 	if _, err := view.QueryPayments(operatorview.PaymentQuery{Sort: "drop table"}); err == nil {
 		t.Fatal("expected invalid sort")

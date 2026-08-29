@@ -3,6 +3,8 @@ package operatoradmin
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/mail"
@@ -62,6 +64,7 @@ func (s *Service) UpdatePayment(ctx context.Context, input UpdatePaymentInput) (
 		if err != nil {
 			return err
 		}
+		before := profileAuditSnapshot(payment)
 		changed := applyProfile(payment, normalized)
 		if len(changed) == 0 {
 			updated = payment
@@ -70,12 +73,13 @@ func (s *Service) UpdatePayment(ctx context.Context, input UpdatePaymentInput) (
 		if err := tx.Payments().Save(payment); err != nil {
 			return err
 		}
+		after := profileAuditSnapshot(payment)
 		auditService := audit.Service{Now: s.Now}
 		if err := auditService.RecordUoW(tx, audit.Entry{
 			Action: "payment.profile.updated", Actor: normalized.Actor,
 			EntityType: "payment", EntityID: payment.ID,
 			Summary: "Updated payment business details",
-			Details: map[string]any{"fields": changed}, OccurredAt: now,
+			Details: map[string]any{"fields": changed, "before": before, "after": after}, OccurredAt: now,
 		}); err != nil {
 			return err
 		}
@@ -163,6 +167,38 @@ func applyProfile(payment *domain.Payment, input UpdatePaymentInput) []string {
 		changed = append(changed, "customFields")
 	}
 	return changed
+}
+
+type profileSnapshot struct {
+	DisplayName        string   `json:"displayName,omitempty"`
+	CustomerName       string   `json:"customerName,omitempty"`
+	CustomerEmail      string   `json:"customerEmail,omitempty"`
+	CustomerPhone      string   `json:"customerPhone,omitempty"`
+	Description        string   `json:"description,omitempty"`
+	AdminNote          string   `json:"adminNote,omitempty"`
+	Tags               []string `json:"tags,omitempty"`
+	CustomFieldsDigest string   `json:"customFieldsDigest,omitempty"`
+}
+
+func profileAuditSnapshot(payment *domain.Payment) profileSnapshot {
+	if payment == nil {
+		return profileSnapshot{}
+	}
+	return profileSnapshot{
+		DisplayName: payment.DisplayName, CustomerName: payment.CustomerName,
+		CustomerEmail: payment.CustomerEmail, CustomerPhone: payment.CustomerPhone,
+		Description: payment.Description, AdminNote: payment.AdminNote,
+		Tags: append([]string(nil), payment.Tags...), CustomFieldsDigest: jsonDigest(payment.CustomFields),
+	}
+}
+
+func jsonDigest(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil || len(encoded) == 0 || bytes.Equal(encoded, []byte("null")) {
+		return ""
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:])
 }
 
 func sameStrings(left, right []string) bool {

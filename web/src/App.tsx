@@ -5,12 +5,13 @@ import { Dashboard } from "./pages/Dashboard";
 import { Health } from "./pages/Health";
 import { Login } from "./pages/Login";
 import { Payments } from "./pages/Payments";
+import { More } from "./pages/More";
 import { AuditEvents, EmailEvents, SMSEvents, WebhookDeliveries } from "./pages/Records";
 import { AlertsPage, ReconciliationPage, RefundsPage, ReviewsPage } from "./pages/Operations";
 import { Settings } from "./pages/Settings";
 import { RazorpayTestPage } from "./pages/RazorpayTest";
 
-const primaryPages: Page[] = ["dashboard", "payments", "reviews", "health"];
+const primaryPages: Page[] = ["dashboard", "payments", "reviews", "health", "more"];
 const advancedPages: Page[] = ["reconciliation", "refunds", "sms", "email", "razorpay_test", "alerts", "webhooks", "audit", "settings"];
 const pages = [...primaryPages, ...advancedPages];
 
@@ -19,6 +20,7 @@ const pageMeta: Record<Page, { label: string; eyebrow: string; description: stri
   payments: { label: "Payments", eyebrow: "Money flow", description: "Find, create and manage every payment." },
   reviews: { label: "Action", eyebrow: "Needs a person", description: "Only the cases PayGate cannot decide safely." },
   health: { label: "Health", eyebrow: "System status", description: "The few things that must stay healthy for PayGate to work." },
+  more: { label: "More", eyebrow: "Advanced", description: "Investigation, recovery and low-frequency operator tools." },
   reconciliation: { label: "Reconciliation", eyebrow: "Advanced", description: "Compare bank statements without changing payment truth automatically." },
   refunds: { label: "Refunds", eyebrow: "Advanced", description: "Record and audit manual refund workflows." },
   sms: { label: "SMS evidence", eyebrow: "Advanced", description: "Raw operational SMS records." },
@@ -63,6 +65,7 @@ export function App() {
 
   const meta = useMemo(() => pageMeta[page], [page]);
   if (!loggedIn) return <Login />;
+  const primaryActive: Page = advancedPages.includes(page) ? "more" : page;
 
   function navigate(next: Page) {
     window.location.hash = `/${next}`;
@@ -75,14 +78,10 @@ export function App() {
         <span className="brand-mark">PG</span><span><strong>PayGate</strong><small>Operator</small></span>
       </button>
       <nav className="primary-nav" aria-label="Primary navigation">
-        {primaryPages.map((item, index) => <button className={page === item ? "nav-item active" : "nav-item"} key={item} onClick={() => navigate(item)}>
+        {primaryPages.map((item, index) => <button className={primaryActive === item ? "nav-item active" : "nav-item"} key={item} onClick={() => navigate(item)}>
           <span className="nav-index">0{index + 1}</span><span>{pageMeta[item].label}</span>{item === "reviews" && <span className="nav-signal" />}
         </button>)}
       </nav>
-      <details className="advanced-nav" open={advancedPages.includes(page)}>
-        <summary>Advanced</summary>
-        <div>{advancedPages.map((item) => <button className={page === item ? "advanced-item active" : "advanced-item"} key={item} onClick={() => navigate(item)}>{pageMeta[item].label}</button>)}</div>
-      </details>
       <div className="sidebar-account">
         <span className="account-avatar">{(auth.email || "O").slice(0, 1).toUpperCase()}</span>
         <span className="account-copy"><strong>{auth.email || "Operator"}</strong><small>Administrator</small></span>
@@ -101,6 +100,7 @@ export function App() {
         {page === "payments" && <Payments notify={setNotice} />}
         {page === "reviews" && <ReviewsPage notify={setNotice} />}
         {page === "health" && <Health />}
+        {page === "more" && <More />}
         {page === "reconciliation" && <ReconciliationPage notify={setNotice} />}
         {page === "refunds" && <RefundsPage notify={setNotice} />}
         {page === "sms" && <SMSEvents />}

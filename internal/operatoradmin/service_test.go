@@ -2,7 +2,9 @@ package operatoradmin_test
 
 import (
 	"context"
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/store"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/tests"
+	"github.com/pocketbase/pocketbase/tools/types"
 )
 
 func TestUpdatePaymentChangesProfileButPreservesFinancialTruthAndAudits(t *testing.T) {
@@ -81,6 +84,21 @@ func TestUpdatePaymentChangesProfileButPreservesFinancialTruthAndAudits(t *testi
 	if len(audits) != 1 || audits[0].GetString("action") != "payment.profile.updated" || audits[0].GetString("actor_email") != "admin@example.com" {
 		t.Fatalf("audit=%v", audits)
 	}
+	details := decodeJSONMap(t, audits[0].Get("details"))
+	beforeAudit, ok := details["before"].(map[string]any)
+	if !ok {
+		t.Fatalf("audit before=%T %#v", details["before"], details["before"])
+	}
+	afterAudit, ok := details["after"].(map[string]any)
+	if !ok || afterAudit["displayName"] != "Workshop registration" || beforeAudit["displayName"] != nil {
+		t.Fatalf("audit snapshots before=%#v after=%#v", beforeAudit, afterAudit)
+	}
+	encoded, _ := json.Marshal(details)
+	for _, protected := range []string{"externalId", "metadata", "123456789012", "payer@upi"} {
+		if strings.Contains(string(encoded), protected) {
+			t.Fatalf("audit leaked protected creation/evidence field %q: %s", protected, encoded)
+		}
+	}
 }
 
 func TestUpdatePaymentNoOpDoesNotCreateAudit(t *testing.T) {
@@ -149,4 +167,28 @@ func assertFinancialTruthEqual(t *testing.T, before, after *domain.Payment) {
 		before.ExternalID != after.ExternalID || !reflect.DeepEqual(before.Metadata, after.Metadata) {
 		t.Fatalf("financial truth changed\nbefore=%+v\nafter=%+v", before, after)
 	}
+}
+
+func decodeJSONMap(t *testing.T, value any) map[string]any {
+	t.Helper()
+	var raw []byte
+	switch item := value.(type) {
+	case types.JSONRaw:
+		raw = []byte(item)
+	case []byte:
+		raw = item
+	case string:
+		raw = []byte(item)
+	default:
+		var err error
+		raw, err = json.Marshal(item)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode JSON field %T: %v (%q)", value, err, raw)
+	}
+	return out
 }

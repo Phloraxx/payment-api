@@ -220,7 +220,7 @@ func paymentQueryFilter(input PaymentQuery) (string, dbx.Params, error) {
 		params["account"] = account
 	}
 	if query != "" {
-		parts = append(parts, "(id ~ {:query} || external_id ~ {:query} || display_name ~ {:query} || customer_name ~ {:query} || customer_email ~ {:query} || customer_phone ~ {:query} || rrn ~ {:query} || upi_id ~ {:query} || evidence_reference ~ {:query})")
+		parts = append(parts, "(id ~ {:query} || external_id ~ {:query} || display_name ~ {:query} || customer_name ~ {:query} || customer_email ~ {:query} || customer_phone ~ {:query} || payer_name ~ {:query} || rrn ~ {:query} || upi_id ~ {:query} || evidence_reference ~ {:query} || description ~ {:query} || admin_note ~ {:query})")
 		params["query"] = query
 	}
 	return strings.Join(parts, " && "), params, nil
@@ -236,6 +236,8 @@ func paymentQuerySort(value string) (string, error) {
 		return "payable_amount,created_at", nil
 	case "amount_desc":
 		return "-payable_amount,-created_at", nil
+	case "status":
+		return "status,-created_at", nil
 	default:
 		return "", invalidPaymentQuery("invalid payment sort")
 	}

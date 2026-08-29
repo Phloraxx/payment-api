@@ -14,12 +14,13 @@ The primary operator navigation is:
 2. **Payments** — search, create, inspect and manage every payment.
 3. **Action** — fail-closed cases that require a human decision.
 4. **Health** — verification rails, recovery readiness and open operational alerts.
+5. **More** — a grouped advanced-tools hub for investigation, recovery and infrastructure work.
 
-Advanced tools remain available for reconciliation, refunds, raw SMS/email evidence, Razorpay test mode, alert history, webhook delivery diagnostics, audit history and low-frequency settings.
+Reconciliation, refunds, raw SMS/email evidence, Razorpay test mode, alert history, webhook delivery diagnostics, audit history and low-frequency settings live behind More instead of crowding daily navigation. The More route remains available on mobile, so advanced tools are not accidentally desktop-only.
 
 ## Payment management contract
 
-Operators can search across payment ID, external/order ID, display name, customer details, RRN/UTR, UPI ID and evidence reference. Search values are bound parameters in a fixed PocketBase filter expression; user input is never concatenated into the filter grammar.
+Operators can search across payment ID, external/order ID, display name, customer details, captured payer name, RRN/UTR, UPI ID, evidence reference, description and private admin note. Search values are bound parameters in a fixed PocketBase filter expression; user input is never concatenated into the filter grammar.
 The payment list supports validated status/account filters, a sort whitelist, total counts and bounded pagination. Summary rows expose business context but not sensitive matching evidence; evidence is shown only in the authenticated payment detail surface.
 
 Editable operator-owned fields are limited to:
@@ -31,7 +32,7 @@ Editable operator-owned fields are limited to:
 - tags
 - custom fields
 
-Every effective profile change is saved and audited in the same database transaction. The audit record stores the names of changed fields, not customer values. Saving an unchanged form is a no-op and does not create audit noise.
+Every effective profile change is saved and audited in the same database transaction. The audit record stores the changed-field list plus before/after snapshots of the editable profile. Custom JSON is represented by a digest rather than duplicated into audit storage, and protected creation/evidence fields are never copied into this profile audit. Saving an unchanged form is a no-op and does not create audit noise.
 
 ## Immutable payment truth
 
@@ -71,4 +72,4 @@ Production rollout remains separate from source acceptance. Use a pinned immutab
 
 ## Recovery reconciliation
 
-When the original Oracle v3 worktree becomes available, compare it against this branch file-by-file. Prefer tested invariant-preserving behavior over unverified recovered code. Any additional original changes must pass the same acceptance gates before being carried forward.
+The original Oracle v3 worktree was recovered and compared file-by-file from the same `a89845b7` base. The detailed disposition is recorded in `01_ORACLE_RECONCILIATION.md`. Prefer tested invariant-preserving behavior over recovered code where the two disagree.

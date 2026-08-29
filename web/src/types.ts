@@ -1,4 +1,4 @@
-export type Page = "dashboard" | "payments" | "reviews" | "health" | "reconciliation" | "sms" | "email" | "alerts" | "refunds" | "webhooks" | "audit" | "razorpay_test" | "settings";
+export type Page = "dashboard" | "payments" | "reviews" | "health" | "more" | "reconciliation" | "sms" | "email" | "alerts" | "refunds" | "webhooks" | "audit" | "razorpay_test" | "settings";
 
 export type Connector = {
   enabled: boolean;

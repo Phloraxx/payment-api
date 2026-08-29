@@ -380,7 +380,7 @@ a { color: inherit; }
 .detail-row { display: grid; grid-template-columns: minmax(110px,.7fr) minmax(0,1.3fr); gap: 14px; padding: 7px 0; border-top: 1px solid rgba(23,24,20,.06); }
 .detail-row:first-child { border-top: 0; }
 .detail-row dt { color: var(--pg-muted); font-size: 9px; }
-.detail-row dd { margin: 0; text-align: right; font-size: 9px; font-weight: 650; overflow-wrap: anywhere; }
+.detail-row dd { margin: 0; display: flex; justify-content: flex-end; align-items: center; gap: 8px; text-align: right; font-size: 9px; font-weight: 650; overflow-wrap: anywhere; }
 .detail-row code { font-size: 8px; }
 .detail-paragraph { margin: 10px 0 0; padding-top: 10px; border-top: 1px solid var(--pg-line); color: #6d7069; font-size: 9px; line-height: 1.6; }
 .tag-row { display: flex; flex-wrap: wrap; gap: 6px; }
@@ -467,6 +467,21 @@ td small { color: var(--pg-muted); }
 .login-card .brand { color: var(--pg-ink); }
 .login-card .brand span { color: #8a9f39; }
 
+.copy-button { border: 0; border-radius: 999px; padding: 4px 7px; background: #eef0e9; color: #65685f; font-size: 8px; font-weight: 800; cursor: pointer; }
+.copy-button:hover { background: #e2e5db; color: var(--pg-ink); }
+.more-layout { display: grid; gap: 26px; max-width: 980px; }
+.more-intro { max-width: 720px; padding: 34px 0 8px; }
+.more-intro > span, .tool-group > h3 { color: #92968c; font-size: 9px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
+.more-intro h2 { margin: 10px 0 12px; max-width: 12ch; font-size: clamp(38px, 5vw, 60px); line-height: .93; letter-spacing: -.055em; }
+.more-intro p { max-width: 620px; margin: 0; color: var(--pg-muted); font-size: 12px; line-height: 1.65; }
+.tool-group { display: grid; gap: 12px; }
+.tool-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
+.tool-card { min-height: 142px; display: flex; justify-content: space-between; gap: 22px; padding: 22px; border: 1px solid var(--pg-line); border-radius: 18px; background: rgba(255,255,255,.55); color: var(--pg-ink); text-decoration: none; transition: transform .16s ease, border-color .16s ease, background .16s ease; }
+.tool-card:hover { transform: translateY(-2px); border-color: #c6cabc; background: #fff; }
+.tool-card strong { font-size: 14px; }
+.tool-card p { margin: 8px 0 0; color: var(--pg-muted); font-size: 10px; line-height: 1.5; }
+.tool-card > span { font-size: 18px; }
+
 @media (max-width: 1100px) {
   .app-shell { grid-template-columns: 214px minmax(0,1fr); }
   .overview-grid { grid-template-columns: 1fr; }
@@ -477,7 +492,7 @@ td small { color: var(--pg-muted); }
   .app-sidebar { width: 100%; height: auto; position: static; padding: 12px 14px; border-right: 0; border-bottom: 1px solid var(--pg-line); }
   .brand-lockup { padding: 3px 4px 10px; }
   .brand-mark { width: 34px; height: 34px; }
-  .primary-nav { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 5px; margin: 0; }
+  .primary-nav { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 5px; margin: 0; }
   .nav-item { min-height: 39px; display: flex; justify-content: center; padding: 0 8px; font-size: 10px; }
   .nav-index, .nav-signal { display: none; }
   .advanced-nav, .sidebar-account { display: none; }
@@ -492,6 +507,7 @@ td small { color: var(--pg-muted); }
   .overview-hero h2 { font-size: 45px; }
   .metric-row { grid-template-columns: 1fr 1fr; }
   .overview-grid, .health-split { grid-template-columns: 1fr; }
+  .tool-grid { grid-template-columns: 1fr 1fr; }
   .payments-toolbar { grid-template-columns: 1fr auto; }
   .payment-search { grid-column: 1 / -1; order: 2; }
   .payments-toolbar > .primary-action { grid-column: 2; grid-row: 1; }
@@ -523,7 +539,8 @@ td small { color: var(--pg-muted); }
   .modal.drawer { width: 100vw; padding: 18px 17px 28px; }
   .modal.drawer .section-title { top: -18px; }
   .detail-row { grid-template-columns: 1fr; gap: 4px; }
-  .detail-row dd { text-align: left; }
+  .detail-row dd { justify-content: flex-start; text-align: left; }
+  .tool-grid { grid-template-columns: 1fr; }
   .editor-footer { align-items: stretch; flex-direction: column; }
   .editor-footer .primary-action { width: 100%; }
   .recent-payment { grid-template-columns: 35px minmax(0,1fr); }
