@@ -320,3 +320,43 @@ func TestV031PowerHealthGatesReadinessButAllowsPowerSaver(t *testing.T) {
 }
 
 func boolPointer(value bool) *bool { return &value }
+
+func TestPowerTelemetryCutoverGraceCountsDeviceActive(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+	now := time.Date(2026, 8, 29, 13, 30, 0, 0, time.UTC)
+	service := NewService(app, nil)
+	service.Now = func() time.Time { return now }
+	collection, _ := app.FindCollectionByNameOrId("relay_devices")
+	device := core.NewRecord(collection)
+	device.Set("device_id", "abababababababababababababababababababababababababababababababab")
+	device.Set("name", "Cutover phone")
+	device.Set("public_key_pem", "test-key")
+	device.Set("enabled", true)
+	device.Set("app_version", "0.3.1")
+	device.Set("last_seen_at", now.Add(-time.Minute))
+	device.Set("last_heartbeat_at", now.Add(-time.Minute))
+	device.Set("heartbeat_grace_until", now.Add(2*time.Hour))
+	device.Set("notification_access", true)
+	device.Set("listener_connected", true)
+	if err := app.Save(device); err != nil {
+		t.Fatal(err)
+	}
+	status, err := service.Status(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Ready || status.ActiveDevices != 1 || status.LegacyGraceDevices != 1 || status.PowerUnhealthyDevices != 1 {
+		t.Fatalf("cutover grace status = %+v", status)
+	}
+	devices, err := service.Devices(time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devices) != 1 || !devices[0].Active || devices[0].PowerHealthy {
+		t.Fatalf("cutover grace device = %+v", devices)
+	}
+}

@@ -188,7 +188,7 @@ func (s *Service) Status(staleAfter time.Duration) (Status, error) {
 				status.LastHeartbeatAt = timeValue(device.LastHeartbeatAt)
 			}
 			health := device.Health()
-			if health.LegacyGraceActive(now) {
+			if health.LegacyGraceActive(now) || health.PowerTelemetryGraceActive(now, staleAfter) {
 				status.ActiveDevices++
 				status.LegacyGraceDevices++
 			} else if health.CurrentReady(now, staleAfter) {

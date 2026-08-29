@@ -42,3 +42,23 @@ func TestRelayDeviceHealthGraceAndStaleness(t *testing.T) {
 		t.Fatal("stale relay must not be ready")
 	}
 }
+
+func TestRelayDeviceHealthPowerTelemetryCutoverGrace(t *testing.T) {
+	now := time.Date(2026, 8, 29, 13, 30, 0, 0, time.UTC)
+	health := RelayDeviceHealth{
+		Enabled: true, AppVersion: "0.3.1", LastHeartbeatAt: now.Add(-time.Minute),
+		LastSeenAt: now.Add(-time.Minute), HeartbeatGraceUntil: now.Add(2 * time.Hour),
+		NotificationAccess: true, ListenerConnected: true,
+	}
+	if !health.Ready(now, time.Hour) {
+		t.Fatal("fresh pre-power-telemetry heartbeat should receive bounded cutover grace")
+	}
+	health.NotificationAccess = false
+	if health.Ready(now, time.Hour) {
+		t.Fatal("cutover grace must still require notification access")
+	}
+	health.NotificationAccess = true
+	if health.Ready(now.Add(2*time.Hour+time.Second), time.Hour) {
+		t.Fatal("expired power telemetry grace must fail closed")
+	}
+}

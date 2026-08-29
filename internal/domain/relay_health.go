@@ -23,6 +23,24 @@ type RelayDeviceHealth struct {
 func (h RelayDeviceHealth) LegacyGraceActive(now time.Time) bool {
 	return h.Enabled && h.LastHeartbeatAt.IsZero() && !h.HeartbeatGraceUntil.IsZero() && now.Before(h.HeartbeatGraceUntil)
 }
+
+// PowerTelemetryGraceActive bridges a server upgrade where the previous API
+// accepted signed heartbeats but did not persist the newer power-health fields.
+// It is deliberately bounded by heartbeat_grace_until and still requires a
+// fresh heartbeat plus working notification-listener access.
+func (h RelayDeviceHealth) PowerTelemetryGraceActive(now time.Time, staleAfter time.Duration) bool {
+	if !h.Enabled || h.PowerHealthReported || h.LastHeartbeatAt.IsZero() || h.HeartbeatGraceUntil.IsZero() || !now.Before(h.HeartbeatGraceUntil) {
+		return false
+	}
+	if staleAfter <= 0 {
+		staleAfter = time.Hour
+	}
+	if h.LastSeenAt.IsZero() || h.LastSeenAt.Before(now.Add(-staleAfter)) {
+		return false
+	}
+	return h.NotificationAccess && h.ListenerConnected
+}
+
 func (h RelayDeviceHealth) PowerReady() bool {
 	if !relayPowerHealthRequired(h.AppVersion) {
 		return true
@@ -44,7 +62,7 @@ func (h RelayDeviceHealth) CurrentReady(now time.Time, staleAfter time.Duration)
 }
 
 func (h RelayDeviceHealth) Ready(now time.Time, staleAfter time.Duration) bool {
-	return h.LegacyGraceActive(now) || h.CurrentReady(now, staleAfter)
+	return h.LegacyGraceActive(now) || h.PowerTelemetryGraceActive(now, staleAfter) || h.CurrentReady(now, staleAfter)
 }
 func relayPowerHealthRequired(version string) bool {
 	version = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(version), "v"))
