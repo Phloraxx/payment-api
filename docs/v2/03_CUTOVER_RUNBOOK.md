@@ -22,6 +22,7 @@ All of the following must be true before merging/deploying:
 - The production-copy alert test proves legacy webhook alerts aggregate without replay.
 - Production health is green before cutover.
 - `./scripts/v2-host-preflight.sh disabled` passes from the deployment host. The service image must be pinned; `:latest` is rejected.
+- Dokploy `autoDeploy` is disabled for both the API and customer frontend before merging v2 PRs; promotion is manual from pinned release images during the initial soak.
 
 ## Environment normalization
 
@@ -40,7 +41,7 @@ A non-printing config dry-run must pass again after normalization. `PAYGATE_CHEC
 
 1. Create a fresh production backup and verify its archive checksum.
 2. Run the non-destructive restore drill.
-3. Record the current API image/task identity and verify the persistent volume mount. Keep the preserved pre-v2 image tag for rollback.
+3. Record the current API image/task identity and verify the persistent volume mount. Keep the preserved pre-v2 image tag for rollback and confirm Dokploy auto-deploy remains disabled.
 4. Keep `PAYGATE_CHECKOUT_ORIGINS` unset/empty for the first API deployment.
 5. Keep Android relay enrollment closed.
 6. Build/tag the v2 API with an immutable release identifier (prefer the commit SHA, for example `main-payment-17aqux:v2-<sha>`), then deploy that exact image with one replica and stop-first semantics. Never deploy production from `:latest`. Set `PAYGATE_EXPECTED_IMAGE` to that exact image when running host preflight.
