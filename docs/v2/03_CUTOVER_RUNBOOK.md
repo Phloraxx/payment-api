@@ -17,7 +17,7 @@ All of the following must be true before merging/deploying:
 - Customer frontend PR CI is green and static-container smoke tests have passed.
 - Android PR CI is green and the debug APK builds successfully.
 - The latest production backup checksum verifies.
-- `backup-verify` and `backup-restore-drill` pass on production.
+- `backup-verify` passes on the current production binary. The host preflight independently extracts the latest archive and verifies the active root `data.db` and `auxiliary.db`; this is the pre-v2 restore-integrity gate because the old binary incorrectly scans nested forensic/quarantine `.db` snapshots.
 - `scripts/v2-production-copy-acceptance.sh` passes against a fresh restored production backup.
 - The production-copy alert test proves legacy webhook alerts aggregate without replay.
 - Production health is green before cutover.
@@ -47,11 +47,12 @@ A non-printing config dry-run must pass again after normalization. `PAYGATE_CHEC
 6. Build/tag the v2 API with an immutable release identifier (prefer the commit SHA, for example `main-payment-17aqux:v2-<sha>`), then deploy that exact image with one replica and stop-first semantics. Never deploy production from `:latest`. Set `PAYGATE_EXPECTED_IMAGE` to that exact image when running host preflight.
 7. Allow schema migrations to complete against the existing persistent volume.
 8. Verify `/api/health` and `/api/paygate/health` immediately.
-9. Verify Google Messages remains paired/connected and the Android relay remains ready.
-10. Verify trusted payment creation remains authenticated and public checkout remains disabled.
-11. Verify retired Google Messages QR routes return 404 for an authenticated operator. Current v1 keeps these routes behind auth and returns 401 anonymously; v2 removes them entirely.
-12. Verify operator login and `/api/operator/v2/overview`.
-13. Wait through at least one operational-alert cron pass and confirm:
+9. Run the fixed v2 `backup-restore-drill` and require it to pass for the active root databases; nested forensic/quarantine snapshots must not be treated as restore targets.
+10. Verify Google Messages remains paired/connected and the Android relay remains ready.
+11. Verify trusted payment creation remains authenticated and public checkout remains disabled.
+12. Verify retired Google Messages QR routes return 404 for an authenticated operator. Current v1 keeps these routes behind auth and returns 401 anonymously; v2 removes them entirely.
+13. Verify operator login and `/api/operator/v2/overview`.
+14. Wait through at least one operational-alert cron pass and confirm:
    - exhausted webhook rows are unchanged;
    - legacy per-delivery webhook alerts are resolved;
    - exactly one aggregate `webhook:exhausted` alert is open while exhausted rows remain;
