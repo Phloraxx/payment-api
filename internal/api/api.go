@@ -40,17 +40,18 @@ import (
 )
 
 const (
-	maxPaymentRequestBytes           int64 = (1 << 20) + (64 << 10)
-	maxSMSRequestBytes               int64 = 128 << 10
-	maxPaytmNotificationRequestBytes int64 = 160 << 10
-	maxEmailRequestBytes             int64 = ((paymentemail.MaxRawBytes + 2) / 3 * 4) + (128 << 10)
-	maxGMessagesPairBytes            int64 = 128 << 10
-	maxReviewRequestBytes            int64 = 16 << 10
-	maxRefundRequestBytes            int64 = (1 << 20) + (64 << 10)
-	maxStatementRequestBytes         int64 = reconciliation.MaxFileBytes + (1 << 20)
-	maxRazorpayTestRequestBytes      int64 = 1 << 20
-	maxRazorpayLiveRequestBytes      int64 = 1 << 20
-	robotsTagValue                         = "noindex, nofollow, noarchive, nosnippet, noimageindex"
+	maxPaymentRequestBytes                int64 = (1 << 20) + (64 << 10)
+	maxSMSRequestBytes                    int64 = 128 << 10
+	maxPaytmNotificationRequestBytes      int64 = 160 << 10
+	maxEmailRequestBytes                  int64 = ((paymentemail.MaxRawBytes + 2) / 3 * 4) + (128 << 10)
+	maxGMessagesPairBytes                 int64 = 128 << 10
+	maxReviewRequestBytes                 int64 = 16 << 10
+	maxOperatorPaymentProfileRequestBytes int64 = 2 << 20
+	maxRefundRequestBytes                 int64 = (1 << 20) + (64 << 10)
+	maxStatementRequestBytes              int64 = reconciliation.MaxFileBytes + (1 << 20)
+	maxRazorpayTestRequestBytes           int64 = 1 << 20
+	maxRazorpayLiveRequestBytes           int64 = 1 << 20
+	robotsTagValue                              = "noindex, nofollow, noarchive, nosnippet, noimageindex"
 )
 
 type API struct {
@@ -116,6 +117,7 @@ func (a *API) Register(app core.App) {
 		e.Router.GET("/api/operator/v2/overview", a.operatorV2Overview)
 		e.Router.GET("/api/operator/v2/payments", a.operatorV2Payments)
 		e.Router.GET("/api/operator/v2/payments/{id}", a.operatorV2Payment)
+		e.Router.PUT("/api/operator/v2/payments/{id}/details", a.operatorV2UpdatePaymentDetails).Bind(apis.BodyLimit(maxOperatorPaymentProfileRequestBytes))
 		e.Router.GET("/api/operator/v2/reviews", a.operatorV2Reviews)
 		e.Router.GET("/api/operator/v2/reviews/{id}", a.operatorV2Review)
 		e.Router.POST("/api/operator/v2/reviews/{id}/resolve", a.operatorV2ResolveReview).Bind(apis.BodyLimit(maxReviewRequestBytes))

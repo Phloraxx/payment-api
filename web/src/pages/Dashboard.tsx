@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Badge, formatDate } from "../components/common";
 import { api } from "../api";
-import type { OperatorOverviewResponse } from "../types";
-import { PaymentTable } from "./Payments";
+import type { OperatorOverviewResponse, OperatorPaymentSummary } from "../types";
 
 export function Dashboard() {
   const [data, setData] = useState<OperatorOverviewResponse | null>(null);
@@ -10,85 +9,78 @@ export function Dashboard() {
 
   const load = useCallback(async () => {
     try {
-      setData(await api<OperatorOverviewResponse>("/api/operator/v2/overview?limit=8"));
+      setData(await api<OperatorOverviewResponse>("/api/operator/v2/overview?limit=6"));
       setError("");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load dashboard");
-    }
+    } catch (err) { setError(err instanceof Error ? err.message : "Could not load PayGate overview"); }
   }, []);
 
   useEffect(() => {
     void load();
-    const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void load();
-    }, 10_000);
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void load(); }, 10_000);
     return () => window.clearInterval(timer);
   }, [load]);
 
   const stats = data?.overview.paymentCounts ?? {};
-  const connector = data?.connector;
-  const capacityPools = data?.capacity?.pools?.slice(0, 6) ?? [];
-  const backup = data?.backup;
-  const relay = data?.relay;
-  const openReviews = data?.overview.openReviews ?? 0;
-  const openAlerts = data?.overview.openAlerts ?? 0;
-  const attention = openReviews + openAlerts;
+  const reviews = data?.overview.openReviews ?? 0;
+  const alerts = data?.overview.openAlerts ?? 0;
+  const attention = reviews + alerts;
+  const relayReady = data?.relay?.ready === true;
+  const connectorReady = data?.connector?.connected === true;
   const settled = (stats.paid ?? 0) + (stats.late ?? 0);
 
-  return <>
-    {error && <p className="error banner">{error}</p>}
-    <section className="command-hero">
-      <div>
-        <p className="eyebrow">LIVE PAYMENT OPERATIONS</p>
-        <h2>{attention ? `${attention} item${attention === 1 ? "" : "s"} need attention` : "All clear"}</h2>
-        <p className="muted">PayGate is authoritative. Reviews and alerts are the only queues that require operator intervention.</p>
+  return <div className="overview-layout">
+    {error && <div className="soft-error">{error}<button onClick={() => void load()}>Retry</button></div>}
+    <section className={attention ? "overview-hero attention" : "overview-hero"}>
+      <div className="overview-hero-copy">
+        <span className="hero-status"><i /> {attention ? "Attention needed" : "PayGate is ready"}</span>
+        <h2>{attention ? `${attention} ${attention === 1 ? "thing needs" : "things need"} a check.` : "Everything looks good."}</h2>
+        <p>{attention ? "PayGate has stopped where it should. Open Action to make the decisions that cannot be automated safely." : "Payments are being watched automatically. You only need to step in when PayGate asks."}</p>
+        {attention > 0 && <a className="hero-action" href="#/reviews">Open Action <span>→</span></a>}
       </div>
-      <div className="command-metrics">
-        <div><span>Pending</span><strong>{stats.pending ?? 0}</strong></div>
-        <div><span>Settled</span><strong>{settled}</strong></div>
-        <div className={attention ? "attention" : ""}><span>Exceptions</span><strong>{attention}</strong></div>
-      </div>
+      <div className="hero-number"><strong>{stats.pending ?? 0}</strong><span>pending now</span></div>
     </section>
 
-    <div className="attention-grid">
-      <a className={`attention-card ${openReviews ? "active" : "quiet"}`} href="#/reviews">
-        <span>Review queue</span><strong>{openReviews}</strong><small>{openReviews ? "Evidence needs a decision" : "No payment evidence waiting"}</small>
-      </a>
-      <a className={`attention-card ${openAlerts ? "active" : "quiet"}`} href="#/alerts">
-        <span>Operational alerts</span><strong>{openAlerts}</strong><small>{openAlerts ? "Infrastructure needs attention" : "No open operational alerts"}</small>
-      </a>
-      <div className="attention-card quiet"><span>Late settlements</span><strong>{stats.late ?? 0}</strong><small>Verified after the checkout window</small></div>
-      <div className="attention-card quiet"><span>Expired</span><strong>{stats.expired ?? 0}</strong><small>No verified evidence in time</small></div>
-    </div>
-
-    <section className="rail-strip">
-      <div className="rail-status">
-        <div><p className="eyebrow">KOTAK / GOOGLE MESSAGES</p><strong>{connector?.enabled ? connector.state.replaceAll("_", " ") : "disabled"}</strong></div>
-        <Badge status={connector?.connected ? "connected" : connector?.state ?? "disabled"} />
-        <small>{connector?.lastError || (connector?.phoneResponsive ? `Phone responsive · last bank SMS ${formatDate(connector.lastMessageAt)}` : "Awaiting phone response")}</small>
-      </div>
-      <div className="rail-status">
-        <div><p className="eyebrow">PAYTM / ANDROID RELAY</p><strong>{relay?.ready ? "ready" : "unavailable"}</strong></div>
-        <Badge status={relay?.ready ? "connected" : "warning"} />
-        <small>{relay ? `${relay.activeDevices}/${relay.enabledDevices} active · heartbeat ${formatDate(relay.lastHeartbeatAt ?? undefined)} · ${relay.pendingQueueCount} queued` : "Relay status unavailable"}</small>
-      </div>
-      <div className="rail-status">
-        <div><p className="eyebrow">RECOVERY</p><strong>{backup?.enabled ? "protected" : "disabled"}</strong></div>
-        <Badge status={backup?.offsite ? "offsite" : backup?.enabled ? "local" : "disabled"} />
-        <small>{backup?.error || (backup?.latest ? `Latest backup ${formatDate(backup.latest.modTime)}` : backup?.enabled ? "Waiting for first backup" : "Backup schedule disabled")}</small>
-      </div>
+    <section className="metric-row">
+      <Metric label="Settled" value={settled} detail="verified payments" />
+      <Metric label="Pending" value={stats.pending ?? 0} detail="waiting for evidence" />
+      <Metric label="Action" value={attention} detail="needs a person" tone={attention ? "warn" : ""} />
+      <Metric label="Expired" value={stats.expired ?? 0} detail="closed without match" />
     </section>
 
-    <div className="dashboard-split">
-      <section className="card recent-panel">
-        <div className="section-title"><div><p className="eyebrow">MONEY FLOW</p><h2>Recent payments</h2></div><a className="text-link" href="#/payments">View all</a></div>
-        <PaymentTable limit={8} />
+    <div className="overview-grid">
+      <section className="panel recent-payments-panel">
+        <div className="panel-heading"><div><span>Recent activity</span><h3>Payments</h3></div><a href="#/payments">View all</a></div>
+        <div className="recent-list">
+          {(data?.overview.recentPayments ?? []).map((payment) => <RecentPayment key={payment.id} payment={payment} />)}
+          {data && data.overview.recentPayments.length === 0 && <div className="empty-state compact">No payments yet.</div>}
+        </div>
       </section>
-      <section className="card capacity-panel">
-        <div className="section-title"><div><p className="eyebrow">ALLOCATION</p><h2>Fingerprint capacity</h2></div></div>
-        {!capacityPools.length ? <p className="empty">No active or quarantined pools.</p> : <div className="capacity-list compact">{capacityPools.map((pool) => <div className="capacity-row compact" key={pool.requestedAmountPaise}><div><strong>₹{pool.requestedAmount}</strong><small>{pool.pending} pending · {pool.available} free</small></div><Badge status={pool.level} /><progress className={`capacity-meter ${pool.level}`} max={100} value={Math.min(pool.utilizationPercent, 100)} /></div>)}</div>}
-        <p className="muted capacity-note">Allocation warns at 70% and becomes critical at 95%. Quarantine prevents fingerprint reuse until evidence can no longer arrive safely.</p>
+      <section className="panel readiness-panel">
+        <div className="panel-heading"><div><span>Automatic verification</span><h3>Readiness</h3></div><a href="#/health">Health</a></div>
+        <ReadinessRow label="Kotak SMS" ready={connectorReady} detail={connectorReady ? "Google Messages connected" : "Connector needs attention"} />
+        <ReadinessRow label="Paytm" ready={relayReady} detail={relayReady ? "Android relay ready" : "Phone relay needs attention"} />
+        <ReadinessRow label="Recovery" ready={data?.backup?.enabled === true && !data?.backup?.error} detail={data?.backup?.enabled ? (data.backup.error || "Backups enabled") : "Backup schedule disabled"} />
+        <p className="readiness-footnote">Payment matching remains fail-closed if a verification rail is not healthy.</p>
       </section>
     </div>
-  </>;
+  </div>;
 }
+
+function Metric({ label, value, detail, tone = "" }: { label: string; value: number; detail: string; tone?: string }) {
+  return <article className={`metric-tile ${tone}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></article>;
+}
+
+function RecentPayment({ payment }: { payment: OperatorPaymentSummary }) {
+  const name = payment.displayName || payment.externalId || payment.customerName || payment.id;
+  return <a className="recent-payment" href={`#/payments?open=${encodeURIComponent(payment.id)}`}>
+    <div className="payment-avatar">{name.slice(0, 1).toUpperCase()}</div>
+    <div className="recent-payment-main"><strong>{name}</strong><span>{payment.customerName || payment.id} · {formatDate(payment.createdAt)}</span></div>
+    <div className="recent-payment-end"><strong>{money(payment.payableAmountPaise)}</strong><Badge status={payment.status} /></div>
+  </a>;
+}
+
+function ReadinessRow({ label, ready, detail }: { label: string; ready: boolean; detail: string }) {
+  return <div className="readiness-row"><span className={ready ? "readiness-dot ready" : "readiness-dot"} /><div><strong>{label}</strong><small>{detail}</small></div><span className={ready ? "readiness-state ready" : "readiness-state"}>{ready ? "Ready" : "Check"}</span></div>;
+}
+
+function money(paise: number) { return `₹${(paise / 100).toFixed(2)}`; }

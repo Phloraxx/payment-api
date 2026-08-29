@@ -4,6 +4,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,12 +17,14 @@ import (
 
 func TestOperatorV2RequiresOperatorAuthAndReturnsTypedViews(t *testing.T) {
 	var paymentID string
+	var payablePaise int64
 	app := apiTestFactory(t, func(app *tests.TestApp, paymentService *payments.Service) {
-		payment, _, err := paymentService.Create(payments.CreateInput{AmountRupees: 250, PaymentAccount: "kotak"})
+		payment, _, err := paymentService.Create(payments.CreateInput{AmountRupees: 250, PaymentAccount: "kotak", ExternalID: "ORIGINAL-ORDER", Metadata: map[string]any{"origin": "create"}})
 		if err != nil {
 			t.Fatal(err)
 		}
 		paymentID = payment.ID
+		payablePaise = payment.PayablePaise
 		record, err := app.FindRecordById("payments", payment.ID)
 		if err != nil {
 			t.Fatal(err)
@@ -90,6 +93,80 @@ func TestOperatorV2RequiresOperatorAuthAndReturnsTypedViews(t *testing.T) {
 	detail := operatorGet(t, server, token, "/api/operator/v2/payments/"+paymentID)
 	if !strings.Contains(detail, "Sensitive Payer") || !strings.Contains(detail, "123456789012") {
 		t.Fatalf("operator detail missing evidence: %s", detail)
+	}
+
+	paged := operatorGet(t, server, token, "/api/operator/v2/payments?status=pending&limit=1&offset=0")
+	for _, want := range []string{`"total":1`, `"limit":1`, `"offset":0`} {
+		if !strings.Contains(paged, want) {
+			t.Fatalf("paged list missing %q: %s", want, paged)
+		}
+	}
+
+	badFilterReq, _ := http.NewRequest(http.MethodGet, server.URL+"/api/operator/v2/payments?account=unknown", nil)
+	badFilterReq.Header.Set("Authorization", "Bearer "+token)
+	badFilterRes, err := server.Client().Do(badFilterReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badFilterBody, _ := io.ReadAll(badFilterRes.Body)
+	_ = badFilterRes.Body.Close()
+	if badFilterRes.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad filter status=%d body=%s", badFilterRes.StatusCode, badFilterBody)
+	}
+
+	profileBody := `{"displayName":"Workshop registration","customerName":"Sourav P Bijoy","customerEmail":"sourav@example.com","customerPhone":"+91 9000000000","description":"IEEE workshop","adminNote":"private operator note","tags":["event","S7"],"customFields":{"semester":"S7"}}`
+	unauthPut, _ := http.NewRequest(http.MethodPut, server.URL+"/api/operator/v2/payments/"+paymentID+"/details", strings.NewReader(profileBody))
+	unauthPut.Header.Set("Content-Type", "application/json")
+	unauthPutRes, err := server.Client().Do(unauthPut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = unauthPutRes.Body.Close()
+	if unauthPutRes.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauth put status=%d", unauthPutRes.StatusCode)
+	}
+
+	updated := operatorPut(t, server, token, "/api/operator/v2/payments/"+paymentID+"/details", profileBody)
+	for _, want := range []string{`"displayName":"Workshop registration"`, `"customerName":"Sourav P Bijoy"`, `"status":"pending"`, `"rrn":"123456789012"`, `"externalId":"ORIGINAL-ORDER"`, `"origin":"create"`} {
+		if !strings.Contains(updated, want) {
+			t.Fatalf("updated detail missing %q: %s", want, updated)
+		}
+	}
+	if !strings.Contains(updated, `"payableAmountPaise":`+strconv.FormatInt(payablePaise, 10)) {
+		t.Fatalf("updated detail changed amount: %s", updated)
+	}
+	searched := operatorGet(t, server, token, "/api/operator/v2/payments?q=Sourav&account=kotak&status=pending")
+	if !strings.Contains(searched, paymentID) || !strings.Contains(searched, `"total":1`) {
+		t.Fatalf("search contract=%s", searched)
+	}
+
+	for _, malicious := range []string{`{"status":"paid"}`, `{"payableAmountPaise":1}`, `{"rrn":"000000000000"}`, `{"paymentAccount":"slice"}`, `{"externalId":"tampered"}`, `{"metadata":{"tampered":true}}`} {
+		req, _ := http.NewRequest(http.MethodPut, server.URL+"/api/operator/v2/payments/"+paymentID+"/details", strings.NewReader(malicious))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		res, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(res.Body)
+		_ = res.Body.Close()
+		if res.StatusCode != http.StatusBadRequest {
+			t.Fatalf("protected update %s status=%d body=%s", malicious, res.StatusCode, body)
+		}
+	}
+	protected, err := app.FindRecordById("payments", paymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if protected.GetString("status") != "pending" || int64(protected.GetInt("payable_amount")) != payablePaise || protected.GetString("rrn") != "123456789012" || protected.GetString("payment_account") != "kotak" {
+		t.Fatalf("protected financial fields mutated: status=%q amount=%d rrn=%q account=%q", protected.GetString("status"), protected.GetInt("payable_amount"), protected.GetString("rrn"), protected.GetString("payment_account"))
+	}
+	audits, err := app.FindRecordsByFilter("audit_events", "entity_id = {:id} && action = 'payment.profile.updated'", "created", 10, 0, map[string]any{"id": paymentID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(audits) != 1 || audits[0].GetString("actor_email") != "operator@example.com" {
+		t.Fatalf("profile audit=%v", audits)
 	}
 
 	smsCollection, err := app.FindCollectionByNameOrId("sms_events")
@@ -200,6 +277,29 @@ func operatorPost(t *testing.T, server *httptest.Server, token, path, body strin
 	}
 	if res.StatusCode != http.StatusOK {
 		t.Fatalf("POST %s status=%d body=%s", path, res.StatusCode, payload)
+	}
+	return string(payload)
+}
+
+func operatorPut(t *testing.T, server *httptest.Server, token, path, body string) string {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPut, server.URL+path, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	payload, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("PUT %s status=%d body=%s", path, res.StatusCode, payload)
 	}
 	return string(payload)
 }

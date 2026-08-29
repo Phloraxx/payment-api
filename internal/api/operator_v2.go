@@ -1,13 +1,17 @@
 package api
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/Phloraxx/payment-api/internal/evidenceshadow"
+	"github.com/Phloraxx/payment-api/internal/operatoradmin"
 	"github.com/Phloraxx/payment-api/internal/operatorview"
 	"github.com/Phloraxx/payment-api/internal/reviews"
 	"github.com/Phloraxx/payment-api/internal/store"
@@ -51,14 +55,19 @@ func (a *API) operatorV2Payments(e *core.RequestEvent) error {
 	if !a.dashboardAuth(e) {
 		return e.UnauthorizedError("operator authentication is required", nil)
 	}
-	items, err := operatorview.New(e.App).ListPayments(e.Request.URL.Query().Get("status"), queryLimit(e, 50))
+	query, err := operatorPaymentQuery(e)
 	if err != nil {
-		if strings.Contains(err.Error(), "invalid payment status") {
-			return e.BadRequestError("invalid payment status", nil)
+		return e.BadRequestError(err.Error(), nil)
+	}
+	page, err := operatorview.New(e.App).QueryPayments(query)
+	if err != nil {
+		var queryErr *operatorview.PaymentQueryError
+		if errors.As(err, &queryErr) {
+			return e.BadRequestError(queryErr.Error(), nil)
 		}
 		return e.InternalServerError("failed to list payments", err)
 	}
-	return e.JSON(http.StatusOK, map[string]any{"payments": items})
+	return e.JSON(http.StatusOK, page)
 }
 
 func (a *API) operatorV2Payment(e *core.RequestEvent) error {
@@ -74,6 +83,51 @@ func (a *API) operatorV2Payment(e *core.RequestEvent) error {
 	}
 	return e.JSON(http.StatusOK, item)
 }
+
+type operatorPaymentDetailsBody struct {
+	DisplayName   string         `json:"displayName"`
+	CustomerName  string         `json:"customerName"`
+	CustomerEmail string         `json:"customerEmail"`
+	CustomerPhone string         `json:"customerPhone"`
+	Description   string         `json:"description"`
+	AdminNote     string         `json:"adminNote"`
+	Tags          []string       `json:"tags"`
+	CustomFields  map[string]any `json:"customFields"`
+}
+
+func (a *API) operatorV2UpdatePaymentDetails(e *core.RequestEvent) error {
+	if !a.dashboardAuth(e) {
+		return e.UnauthorizedError("operator authentication is required", nil)
+	}
+	var body operatorPaymentDetailsBody
+	if err := decodeStrictJSON(e, &body, maxOperatorPaymentProfileRequestBytes); err != nil {
+		return e.BadRequestError("invalid payment details body: "+err.Error(), nil)
+	}
+	service := operatoradmin.Service{Store: store.NewPocketBase(e.App)}
+	payment, err := service.UpdatePayment(e.Request.Context(), operatoradmin.UpdatePaymentInput{
+		PaymentID: e.Request.PathValue("id"), Actor: a.actor(e),
+		DisplayName: body.DisplayName, CustomerName: body.CustomerName,
+		CustomerEmail: body.CustomerEmail, CustomerPhone: body.CustomerPhone, Description: body.Description,
+		AdminNote: body.AdminNote, Tags: body.Tags, CustomFields: body.CustomFields,
+	})
+	if err != nil {
+		var validationErr *operatoradmin.ValidationError
+		switch {
+		case errors.As(err, &validationErr):
+			return e.BadRequestError(validationErr.Error(), nil)
+		case errors.Is(err, sql.ErrNoRows):
+			return e.NotFoundError("payment not found", nil)
+		default:
+			return e.InternalServerError("failed to update payment details", err)
+		}
+	}
+	item, err := operatorview.New(e.App).GetPayment(payment.ID)
+	if err != nil {
+		return e.InternalServerError("payment updated but operator view could not be loaded", err)
+	}
+	return e.JSON(http.StatusOK, item)
+}
+
 func (a *API) operatorV2Reviews(e *core.RequestEvent) error {
 	if !a.dashboardAuth(e) {
 		return e.UnauthorizedError("operator authentication is required", nil)
@@ -132,6 +186,53 @@ func (a *API) operatorV2GoogleMessagesShadow(e *core.RequestEvent) error {
 		return e.InternalServerError("failed to calculate Google Messages shadow parity", err)
 	}
 	return e.JSON(http.StatusOK, metrics)
+}
+
+func operatorPaymentQuery(e *core.RequestEvent) (operatorview.PaymentQuery, error) {
+	values := e.Request.URL.Query()
+	limit := 25
+	if raw := strings.TrimSpace(values.Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > 100 {
+			return operatorview.PaymentQuery{}, errors.New("limit must be an integer between 1 and 100")
+		}
+		limit = parsed
+	}
+	offset := 0
+	if raw := strings.TrimSpace(values.Get("offset")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 || parsed > 1_000_000 {
+			return operatorview.PaymentQuery{}, errors.New("offset must be an integer between 0 and 1000000")
+		}
+		offset = parsed
+	}
+	return operatorview.PaymentQuery{
+		Query: values.Get("q"), Status: values.Get("status"), Account: values.Get("account"),
+		Sort: values.Get("sort"), Limit: limit, Offset: offset,
+	}, nil
+}
+
+func decodeStrictJSON(e *core.RequestEvent, dst any, limit int64) error {
+	raw, err := io.ReadAll(io.LimitReader(e.Request.Body, limit+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(raw)) > limit {
+		return errors.New("JSON body exceeds the allowed size")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			return errors.New("multiple JSON values are not allowed")
+		}
+		return err
+	}
+	return nil
 }
 
 func queryLimit(e *core.RequestEvent, fallback int) int {
