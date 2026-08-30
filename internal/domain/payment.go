@@ -48,4 +48,12 @@ type Payment struct {
 	ExternalID        string
 	IdempotencyKey    string
 	Metadata          any
+	DisplayName       string
+	CustomerName      string
+	CustomerEmail     string
+	CustomerPhone     string
+	Description       string
+	AdminNote         string
+	Tags              []string
+	CustomFields      any
 }

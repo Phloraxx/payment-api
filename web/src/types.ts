@@ -1,4 +1,4 @@
-export type Page = "dashboard" | "payments" | "reviews" | "reconciliation" | "sms" | "email" | "alerts" | "refunds" | "webhooks" | "audit" | "razorpay_test" | "settings";
+export type Page = "dashboard" | "payments" | "reviews" | "health" | "more" | "reconciliation" | "sms" | "email" | "alerts" | "refunds" | "webhooks" | "audit" | "razorpay_test" | "settings";
 
 export type Connector = {
   enabled: boolean;
@@ -126,16 +126,45 @@ export type OperatorPaymentSummary = {
   createdAt: string;
   expiresAt: string;
   paidAt?: string;
+  displayName?: string;
+  externalId?: string;
+  customerName?: string;
 };
 
 export type OperatorPaymentDetail = OperatorPaymentSummary & {
-  externalId?: string;
+  customerEmail?: string;
+  customerPhone?: string;
+  description?: string;
+  adminNote?: string;
+  tags: string[];
+  metadata: unknown;
+  customFields: Record<string, unknown>;
   payerName?: string;
   upiId?: string;
   rrn?: string;
   evidenceSource?: string;
   evidenceReference?: string;
   resolvedAt?: string;
+  reuseAfter?: string;
+  idempotencyKey?: string;
+};
+
+export type OperatorPaymentPage = {
+  payments: OperatorPaymentSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type OperatorPaymentDetailsUpdate = {
+  displayName: string;
+  customerName: string;
+  customerEmail: string;
+  customerPhone: string;
+  description: string;
+  adminNote: string;
+  tags: string[];
+  customFields: Record<string, unknown>;
 };
 
 export type OperatorOverviewResponse = {

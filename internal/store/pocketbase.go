@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/domain"
@@ -182,6 +184,19 @@ func (r *pocketBasePayments) Save(payment *domain.Payment) error {
 	record.Set("resolved_at", payment.ResolvedAt)
 	record.Set("external_id", payment.ExternalID)
 	record.Set("idempotency_key", payment.IdempotencyKey)
+	record.Set("display_name", payment.DisplayName)
+	record.Set("customer_name", payment.CustomerName)
+	record.Set("customer_email", payment.CustomerEmail)
+	record.Set("customer_phone", payment.CustomerPhone)
+	record.Set("description", payment.Description)
+	record.Set("admin_note", payment.AdminNote)
+	record.Set("tags", payment.Tags)
+	record.Set("custom_fields", payment.CustomFields)
+	if payment.Metadata != nil {
+		record.Set("metadata", payment.Metadata)
+	} else {
+		record.Set("metadata", nil)
+	}
 	return r.app.Save(record)
 }
 
@@ -271,7 +286,11 @@ func paymentFromRecord(record *core.Record) *domain.Payment {
 		RRN: record.GetString("rrn"), UPIId: record.GetString("upi_id"), PayerName: record.GetString("payer_name"),
 		EvidenceSource: record.GetString("evidence_source"), EvidenceReference: record.GetString("evidence_reference"),
 		PaidAt: record.GetDateTime("paid_at").Time(), ResolvedAt: record.GetDateTime("resolved_at").Time(),
-		ExternalID: record.GetString("external_id"), IdempotencyKey: record.GetString("idempotency_key"), Metadata: record.Get("metadata"),
+		ExternalID: record.GetString("external_id"), IdempotencyKey: record.GetString("idempotency_key"), Metadata: jsonValue(record.Get("metadata")),
+		DisplayName: record.GetString("display_name"), CustomerName: record.GetString("customer_name"),
+		CustomerEmail: record.GetString("customer_email"), CustomerPhone: record.GetString("customer_phone"),
+		Description: record.GetString("description"), AdminNote: record.GetString("admin_note"),
+		Tags: stringSlice(record.Get("tags")), CustomFields: jsonValue(record.Get("custom_fields")),
 	}
 }
 
@@ -795,14 +814,48 @@ func stringSlice(value any) []string {
 	case []any:
 		result := make([]string, 0, len(items))
 		for _, item := range items {
-			if text, ok := item.(string); ok {
+			if text, ok := item.(string); ok && strings.TrimSpace(text) != "" {
 				result = append(result, text)
 			}
+		}
+		return result
+	case types.JSONRaw:
+		var result []string
+		if len(items) == 0 || json.Unmarshal(items, &result) != nil {
+			return nil
+		}
+		return result
+	case []byte:
+		var result []string
+		if len(items) == 0 || json.Unmarshal(items, &result) != nil {
+			return nil
 		}
 		return result
 	default:
 		return nil
 	}
+}
+
+func jsonValue(value any) any {
+	switch raw := value.(type) {
+	case types.JSONRaw:
+		if len(raw) == 0 {
+			return nil
+		}
+		var decoded any
+		if json.Unmarshal(raw, &decoded) == nil {
+			return decoded
+		}
+	case []byte:
+		if len(raw) == 0 {
+			return nil
+		}
+		var decoded any
+		if json.Unmarshal(raw, &decoded) == nil {
+			return decoded
+		}
+	}
+	return value
 }
 
 func (r *pocketBaseRelay) EnabledDevices(limit int) ([]domain.RelayDeviceHealth, error) {

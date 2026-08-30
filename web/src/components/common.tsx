@@ -9,9 +9,9 @@ export function Stat({ label, value, tone = "" }: { label: string; value: number
   return <div className={`card stat ${tone}`}><span>{label}</span><strong>{value}</strong></div>;
 }
 
-export function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
-  return <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-    <section className="modal" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
+export function Modal({ title, onClose, children, variant = "dialog" }: { title: string; onClose: () => void; children: ReactNode; variant?: "dialog" | "drawer" }) {
+  return <div className={`modal-backdrop ${variant}`} role="presentation" onMouseDown={onClose}>
+    <section className={`modal ${variant}`} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
       <div className="section-title"><h2>{title}</h2><button className="ghost" onClick={onClose}>Close</button></div>
       {children}
     </section>

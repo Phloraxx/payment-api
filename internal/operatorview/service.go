@@ -2,6 +2,7 @@ package operatorview
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,9 +10,17 @@ import (
 
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
+	"github.com/pocketbase/pocketbase/tools/search"
+	"github.com/pocketbase/pocketbase/tools/types"
 )
 
 type Service struct{ App core.App }
+
+type PaymentQueryError struct{ Message string }
+
+func (e *PaymentQueryError) Error() string { return e.Message }
+
+func invalidPaymentQuery(message string) error { return &PaymentQueryError{Message: message} }
 
 func New(app core.App) *Service { return &Service{App: app} }
 
@@ -24,16 +33,44 @@ type PaymentSummary struct {
 	CreatedAt            string `json:"createdAt"`
 	ExpiresAt            string `json:"expiresAt"`
 	PaidAt               string `json:"paidAt,omitempty"`
+	DisplayName          string `json:"displayName,omitempty"`
+	ExternalID           string `json:"externalId,omitempty"`
+	CustomerName         string `json:"customerName,omitempty"`
 }
+
 type PaymentDetail struct {
 	PaymentSummary
-	ExternalID        string `json:"externalId,omitempty"`
-	PayerName         string `json:"payerName,omitempty"`
-	UPIID             string `json:"upiId,omitempty"`
-	RRN               string `json:"rrn,omitempty"`
-	EvidenceSource    string `json:"evidenceSource,omitempty"`
-	EvidenceReference string `json:"evidenceReference,omitempty"`
-	ResolvedAt        string `json:"resolvedAt,omitempty"`
+	CustomerEmail     string   `json:"customerEmail,omitempty"`
+	CustomerPhone     string   `json:"customerPhone,omitempty"`
+	Description       string   `json:"description,omitempty"`
+	AdminNote         string   `json:"adminNote,omitempty"`
+	Tags              []string `json:"tags"`
+	Metadata          any      `json:"metadata"`
+	CustomFields      any      `json:"customFields"`
+	PayerName         string   `json:"payerName,omitempty"`
+	UPIID             string   `json:"upiId,omitempty"`
+	RRN               string   `json:"rrn,omitempty"`
+	EvidenceSource    string   `json:"evidenceSource,omitempty"`
+	EvidenceReference string   `json:"evidenceReference,omitempty"`
+	ResolvedAt        string   `json:"resolvedAt,omitempty"`
+	ReuseAfter        string   `json:"reuseAfter,omitempty"`
+	IdempotencyKey    string   `json:"idempotencyKey,omitempty"`
+}
+
+type PaymentQuery struct {
+	Query   string
+	Status  string
+	Account string
+	Sort    string
+	Limit   int
+	Offset  int
+}
+
+type PaymentPage struct {
+	Payments []PaymentSummary `json:"payments"`
+	Total    int64            `json:"total"`
+	Limit    int              `json:"limit"`
+	Offset   int              `json:"offset"`
 }
 
 type ReviewSummary struct {
@@ -115,39 +152,108 @@ func (s *Service) Overview(limit int) (Overview, error) {
 	if err != nil {
 		return Overview{}, err
 	}
-	recent, err := s.ListPayments("", limit)
+	page, err := s.QueryPayments(PaymentQuery{Limit: limit, Sort: "newest"})
 	if err != nil {
 		return Overview{}, err
 	}
-	return Overview{
-		PaymentCounts: counts,
-		OpenReviews:   openReviews,
-		OpenAlerts:    openAlerts,
-		Recent:        recent,
-	}, nil
+	return Overview{PaymentCounts: counts, OpenReviews: openReviews, OpenAlerts: openAlerts, Recent: page.Payments}, nil
 }
 
 func (s *Service) ListPayments(status string, limit int) ([]PaymentSummary, error) {
-	limit = clampLimit(limit, 50, 100)
-	status = strings.TrimSpace(strings.ToLower(status))
-	filter := "id != ''"
-	params := dbx.Params{}
-	if status != "" {
-		if !validPaymentStatus(status) {
-			return nil, fmt.Errorf("invalid payment status")
-		}
-		filter += " && status = {:status}"
-		params["status"] = status
-	}
-	records, err := s.App.FindRecordsByFilter("payments", filter, "-created_at", limit, 0, params)
+	page, err := s.QueryPayments(PaymentQuery{Status: status, Limit: limit, Sort: "newest"})
 	if err != nil {
 		return nil, err
 	}
-	out := make([]PaymentSummary, 0, len(records))
-	for _, record := range records {
-		out = append(out, paymentSummary(record))
+	return page.Payments, nil
+}
+
+func (s *Service) QueryPayments(input PaymentQuery) (PaymentPage, error) {
+	filter, params, err := paymentQueryFilter(input)
+	if err != nil {
+		return PaymentPage{}, err
 	}
-	return out, nil
+	sort, err := paymentQuerySort(input.Sort)
+	if err != nil {
+		return PaymentPage{}, err
+	}
+	limit := clampLimit(input.Limit, 25, 100)
+	offset := input.Offset
+	if offset < 0 || offset > 1_000_000 {
+		return PaymentPage{}, invalidPaymentQuery("invalid payment offset")
+	}
+	records, err := s.App.FindRecordsByFilter("payments", filter, sort, limit, offset, params)
+	if err != nil {
+		return PaymentPage{}, err
+	}
+	total, err := s.countPaymentFilter(filter, params)
+	if err != nil {
+		return PaymentPage{}, err
+	}
+	items := make([]PaymentSummary, 0, len(records))
+	for _, record := range records {
+		items = append(items, paymentSummary(record))
+	}
+	return PaymentPage{Payments: items, Total: total, Limit: limit, Offset: offset}, nil
+}
+
+func paymentQueryFilter(input PaymentQuery) (string, dbx.Params, error) {
+	status := strings.TrimSpace(strings.ToLower(input.Status))
+	account := strings.TrimSpace(strings.ToLower(input.Account))
+	query := strings.TrimSpace(input.Query)
+	if len(query) > 255 {
+		return "", nil, invalidPaymentQuery("payment search is too long")
+	}
+	if status != "" && !validPaymentStatus(status) {
+		return "", nil, invalidPaymentQuery("invalid payment status")
+	}
+	if account != "" && !validPaymentAccount(account) {
+		return "", nil, invalidPaymentQuery("invalid payment account")
+	}
+	parts := []string{"id != ''"}
+	params := dbx.Params{}
+	if status != "" {
+		parts = append(parts, "status = {:status}")
+		params["status"] = status
+	}
+	if account != "" {
+		parts = append(parts, "payment_account = {:account}")
+		params["account"] = account
+	}
+	if query != "" {
+		parts = append(parts, "(id ~ {:query} || external_id ~ {:query} || display_name ~ {:query} || customer_name ~ {:query} || customer_email ~ {:query} || customer_phone ~ {:query} || payer_name ~ {:query} || rrn ~ {:query} || upi_id ~ {:query} || evidence_reference ~ {:query} || description ~ {:query} || admin_note ~ {:query})")
+		params["query"] = query
+	}
+	return strings.Join(parts, " && "), params, nil
+}
+
+func paymentQuerySort(value string) (string, error) {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "", "newest":
+		return "-created_at", nil
+	case "oldest":
+		return "created_at", nil
+	case "amount_asc":
+		return "payable_amount,created_at", nil
+	case "amount_desc":
+		return "-payable_amount,-created_at", nil
+	case "status":
+		return "status,-created_at", nil
+	default:
+		return "", invalidPaymentQuery("invalid payment sort")
+	}
+}
+
+func (s *Service) countPaymentFilter(filter string, params dbx.Params) (int64, error) {
+	collection, err := s.App.FindCollectionByNameOrId("payments")
+	if err != nil {
+		return 0, err
+	}
+	resolver := core.NewRecordFieldResolver(s.App, collection, nil, true)
+	expr, err := search.FilterData(filter).BuildExpr(resolver, params)
+	if err != nil {
+		return 0, err
+	}
+	return s.App.CountRecords(collection, expr)
 }
 
 func (s *Service) GetPayment(id string) (PaymentDetail, error) {
@@ -160,13 +266,21 @@ func (s *Service) GetPayment(id string) (PaymentDetail, error) {
 	}
 	return PaymentDetail{
 		PaymentSummary:    paymentSummary(record),
-		ExternalID:        record.GetString("external_id"),
+		CustomerEmail:     record.GetString("customer_email"),
+		CustomerPhone:     record.GetString("customer_phone"),
+		Description:       record.GetString("description"),
+		AdminNote:         record.GetString("admin_note"),
+		Tags:              stringSlice(record.Get("tags")),
+		Metadata:          jsonField(record.Get("metadata")),
+		CustomFields:      jsonField(record.Get("custom_fields")),
 		PayerName:         record.GetString("payer_name"),
 		UPIID:             record.GetString("upi_id"),
 		RRN:               record.GetString("rrn"),
 		EvidenceSource:    record.GetString("evidence_source"),
 		EvidenceReference: record.GetString("evidence_reference"),
 		ResolvedAt:        dateString(record, "resolved_at"),
+		ReuseAfter:        dateString(record, "reuse_after"),
+		IdempotencyKey:    record.GetString("idempotency_key"),
 	}, nil
 }
 func (s *Service) ListReviews(status string, limit int) ([]ReviewSummary, error) {
@@ -280,6 +394,9 @@ func paymentSummary(record *core.Record) PaymentSummary {
 		CreatedAt:            dateString(record, "created_at"),
 		ExpiresAt:            dateString(record, "expires_at"),
 		PaidAt:               dateString(record, "paid_at"),
+		DisplayName:          record.GetString("display_name"),
+		ExternalID:           record.GetString("external_id"),
+		CustomerName:         record.GetString("customer_name"),
 	}
 }
 
@@ -299,6 +416,40 @@ func validPaymentStatus(status string) bool {
 		return false
 	}
 }
+func validPaymentAccount(account string) bool {
+	switch account {
+	case "kotak", "slice", "paytm":
+		return true
+	default:
+		return false
+	}
+}
+
+func jsonField(value any) any {
+	switch item := value.(type) {
+	case nil:
+		return map[string]any{}
+	case types.JSONRaw:
+		var out any
+		if len(item) > 0 && json.Unmarshal(item, &out) == nil {
+			return out
+		}
+	case []byte:
+		var out any
+		if len(item) > 0 && json.Unmarshal(item, &out) == nil {
+			return out
+		}
+	case string:
+		var out any
+		if strings.TrimSpace(item) != "" && json.Unmarshal([]byte(item), &out) == nil {
+			return out
+		}
+	default:
+		return item
+	}
+	return map[string]any{}
+}
+
 func stringSlice(value any) []string {
 	switch items := value.(type) {
 	case []string:
