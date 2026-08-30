@@ -9,6 +9,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/payments"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/Phloraxx/payment-api/internal/webhooks"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/core"
@@ -20,7 +21,7 @@ type fakeWebhookScheduler struct {
 	wakes  int
 }
 
-func (f *fakeWebhookScheduler) ScheduleRefund(_ core.App, event string, _, _ *core.Record, _ time.Time) error {
+func (f *fakeWebhookScheduler) ScheduleRefundPayment(_ store.UnitOfWork, event string, _ *domain.Payment, _ *domain.Refund, _ time.Time) error {
 	f.events = append(f.events, event)
 	return nil
 }
@@ -84,7 +85,7 @@ func TestRefundRequestIsAuditedIdempotentAndBounded(t *testing.T) {
 		PaymentID: payment.ID, AmountPaise: 5000, Reason: "Customer requested partial refund",
 		ExternalID: "refund-order-1", IdempotencyKey: "refund-idem-1", Actor: actor,
 	})
-	if err != nil || !replayed || second.Id != first.Id {
+	if err != nil || !replayed || second.ID != first.ID {
 		t.Fatalf("second=%v replayed=%v err=%v", second, replayed, err)
 	}
 	_, _, err = service.Request(RequestInput{PaymentID: payment.ID, AmountPaise: 5100, Reason: "Too much remaining", IdempotencyKey: "refund-idem-2", Actor: actor})
@@ -107,24 +108,24 @@ func TestRefundLifecycleRequiresReferenceAndRejectsTerminalTransitions(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Update(UpdateInput{RefundID: refund.Id, Status: "completed", Note: "Bank transfer completed.", Actor: actor})
+	_, err = service.Update(UpdateInput{RefundID: refund.ID, Status: "completed", Note: "Bank transfer completed.", Actor: actor})
 	var domainErr *domain.Error
 	if !errors.As(err, &domainErr) || domainErr.Code != "REFUND_REFERENCE_REQUIRED" {
 		t.Fatalf("error=%v", err)
 	}
-	processing, err := service.Update(UpdateInput{RefundID: refund.Id, Status: "processing", Note: "Initiated in bank app.", Actor: actor})
-	if err != nil || processing.GetString("status") != "processing" {
+	processing, err := service.Update(UpdateInput{RefundID: refund.ID, Status: "processing", Note: "Initiated in bank app.", Actor: actor})
+	if err != nil || processing.Status != "processing" {
 		t.Fatalf("processing=%v err=%v", processing, err)
 	}
-	completed, err := service.Update(UpdateInput{RefundID: refund.Id, Status: "completed", Reference: "RFND123456789", Note: "Verified bank transfer reference.", Actor: actor})
-	if err != nil || completed.GetString("status") != "completed" {
+	completed, err := service.Update(UpdateInput{RefundID: refund.ID, Status: "completed", Reference: "RFND123456789", Note: "Verified bank transfer reference.", Actor: actor})
+	if err != nil || completed.Status != "completed" {
 		t.Fatalf("completed=%v err=%v", completed, err)
 	}
-	_, err = service.Update(UpdateInput{RefundID: refund.Id, Status: "cancelled", Note: "Cannot cancel completed refund.", Actor: actor})
+	_, err = service.Update(UpdateInput{RefundID: refund.ID, Status: "cancelled", Note: "Cannot cancel completed refund.", Actor: actor})
 	if !errors.As(err, &domainErr) || domainErr.Code != "INVALID_REFUND_TRANSITION" {
 		t.Fatalf("terminal error=%v", err)
 	}
-	stored, _ := app.FindRecordById("refunds", refund.Id)
+	stored, _ := app.FindRecordById("refunds", refund.ID)
 	if stored.GetString("reference") != "RFND123456789" || stored.GetDateTime("completed_at").IsZero() {
 		t.Fatalf("stored reference=%s completed=%s", stored.GetString("reference"), stored.GetDateTime("completed_at"))
 	}
@@ -179,7 +180,7 @@ func TestRefundEventsPersistThroughRealWebhookOutbox(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Update(UpdateInput{RefundID: refund.Id, Status: "processing", Note: "Started", Actor: audit.Actor{ID: operator.Id, Email: operator.Email()}}); err != nil {
+	if _, err := service.Update(UpdateInput{RefundID: refund.ID, Status: "processing", Note: "Started", Actor: audit.Actor{ID: operator.Id, Email: operator.Email()}}); err != nil {
 		t.Fatal(err)
 	}
 	deliveries, err := app.FindAllRecords("webhook_deliveries")
@@ -191,12 +192,12 @@ func TestRefundEventsPersistThroughRealWebhookOutbox(t *testing.T) {
 		switch delivery.GetString("event") {
 		case "refund.requested":
 			foundRequested = true
-			if delivery.GetString("refund") != refund.Id {
+			if delivery.GetString("refund") != refund.ID {
 				t.Fatalf("requested delivery refund=%s", delivery.GetString("refund"))
 			}
 		case "refund.processing":
 			foundProcessing = true
-			if delivery.GetString("refund") != refund.Id {
+			if delivery.GetString("refund") != refund.ID {
 				t.Fatalf("processing delivery refund=%s", delivery.GetString("refund"))
 			}
 		}
@@ -213,22 +214,22 @@ func TestFailedRefundCannotBeReactivatedBeyondRemainingAmount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Update(UpdateInput{RefundID: first.Id, Status: "failed", Note: "Bank transfer failed", Actor: actor}); err != nil {
+	if _, err := service.Update(UpdateInput{RefundID: first.ID, Status: "failed", Note: "Bank transfer failed", Actor: actor}); err != nil {
 		t.Fatal(err)
 	}
 	second, _, err := service.Request(RequestInput{PaymentID: payment.ID, AmountPaise: payment.PayablePaise, Reason: "Replacement attempt", Actor: actor})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = service.Update(UpdateInput{RefundID: first.Id, Status: "processing", Note: "Unsafe retry", Actor: actor})
+	_, err = service.Update(UpdateInput{RefundID: first.ID, Status: "processing", Note: "Unsafe retry", Actor: actor})
 	var domainErr *domain.Error
 	if !errors.As(err, &domainErr) || domainErr.Code != "REFUND_AMOUNT_EXCEEDS_AVAILABLE" {
 		t.Fatalf("reactivation error=%v", err)
 	}
-	if _, err := service.Update(UpdateInput{RefundID: second.Id, Status: "cancelled", Note: "Replacement cancelled", Actor: actor}); err != nil {
+	if _, err := service.Update(UpdateInput{RefundID: second.ID, Status: "cancelled", Note: "Replacement cancelled", Actor: actor}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.Update(UpdateInput{RefundID: first.Id, Status: "processing", Note: "Retry after capacity released", Actor: actor}); err != nil {
+	if _, err := service.Update(UpdateInput{RefundID: first.ID, Status: "processing", Note: "Retry after capacity released", Actor: actor}); err != nil {
 		t.Fatalf("retry after capacity released: %v", err)
 	}
 }

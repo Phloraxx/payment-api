@@ -1,6 +1,7 @@
 package androidrelay
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -18,6 +19,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/paytmnotification"
+	"github.com/Phloraxx/payment-api/internal/store"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/tests"
 )
@@ -35,6 +37,19 @@ func testKey(t *testing.T) (*ecdsa.PrivateKey, string, string) {
 	block := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
 	sum := sha256.Sum256(der)
 	return priv, hex.EncodeToString(sum[:]), string(block)
+}
+
+func typedRelayDevice(t *testing.T, service *Service, recordID string) *domain.RelayDevice {
+	t.Helper()
+	var device *domain.RelayDevice
+	if err := service.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		var err error
+		device, err = uow.Relay().Get(recordID)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return device
 }
 
 func TestEnrollVerifyAndIngestPaytmRemoteViewEvidence(t *testing.T) {
@@ -129,7 +144,7 @@ func TestRelayObservesGPayWithoutMatching(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.Ingest(device, EventInput{SchemaVersion: 1, EventID: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", Kind: "notification", Notification: Notification{PackageName: GPayPersonalPackage, Title: "You received money"}}, nil)
+	result, err := service.Ingest(typedRelayDevice(t, service, device.Id), EventInput{SchemaVersion: 1, EventID: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", Kind: "notification", Notification: Notification{PackageName: GPayPersonalPackage, Title: "You received money"}}, nil)
 	if err != nil || result.Status != "observed" || result.Action != "observed_only" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -152,7 +167,7 @@ func TestRelayIgnoresNotificationThatPredatesEnrollment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := service.Ingest(device, EventInput{
+	result, err := service.Ingest(typedRelayDevice(t, service, device.Id), EventInput{
 		SchemaVersion: 1,
 		EventID:       "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
 		Kind:          "notification",
@@ -202,5 +217,58 @@ func TestVerifyAloneDoesNotRefreshRelayReadiness(t *testing.T) {
 	}
 	if !device.GetDateTime("last_seen_at").Time().IsZero() {
 		t.Fatalf("signature verification alone refreshed last_seen_at: %s", device.GetDateTime("last_seen_at"))
+	}
+}
+
+func TestRelayGoogleMessagesIsShadowOnlyAndCannotMatchPayment(t *testing.T) {
+	app, err := tests.NewTestApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(app.Cleanup)
+	now := time.Date(2026, 8, 28, 12, 0, 0, 0, time.UTC)
+	cfg := config.Config{PaymentTTL: 20 * time.Minute, AmountQuarantine: 24 * time.Hour, TestMode: true}
+	paymentService := payments.NewService(app, cfg, nil)
+	paymentService.Now = func() time.Time { return now }
+	paymentService.SuffixStart = func() (int64, error) { return 1, nil }
+	payment, _, err := paymentService.Create(payments.CreateInput{AmountRupees: 100, PaymentAccount: "kotak"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(app, nil)
+	service.Now = func() time.Time { return now }
+	_, deviceID, publicPEM := testKey(t)
+	if _, err := service.Enroll(EnrollmentInput{DeviceID: deviceID, Name: "Phone", PublicKeyPEM: publicPEM}); err != nil {
+		t.Fatal(err)
+	}
+	record, err := app.FindFirstRecordByFilter("relay_devices", "device_id={:id}", map[string]any{"id": deviceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := typedRelayDevice(t, service, record.Id)
+	result, err := service.Ingest(device, EventInput{SchemaVersion: 1, EventID: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", Kind: "notification", CapturedAtMs: now.UnixMilli(), Notification: Notification{PackageName: GoogleMessagesPackage, AppName: "Messages", PostTimeMs: now.UnixMilli(), WhenMs: now.UnixMilli(), Title: "Bank", Text: "Received Rs.100.01 from Person UPI Ref:123456789012"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "observed" || result.Action != "shadow_complete" || result.PaymentID != "" {
+		t.Fatalf("shadow result=%+v", result)
+	}
+	stored, err := paymentService.Get(payment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != domain.StatusPending || stored.RRN != "" || stored.EvidenceSource != "" {
+		t.Fatalf("shadow evidence mutated payment: %+v", stored)
+	}
+	var relayEvent *domain.RelayEvent
+	if err := service.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		var loadErr error
+		relayEvent, loadErr = uow.RelayEvents().FindByDeviceEvent(device.ID, "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")
+		return loadErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if relayEvent.ProcessingStatus != "shadow_observed" || relayEvent.ProviderResult == nil {
+		t.Fatalf("relay event=%+v", relayEvent)
 	}
 }

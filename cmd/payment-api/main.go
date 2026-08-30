@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -54,6 +55,9 @@ func main() {
 		HideStartBanner: false,
 	})
 	migratecmd.MustRegister(app, app.RootCmd, migratecmd.Config{Automigrate: false})
+	if args, changed := withServeOrigins(os.Args[1:], cfg.CheckoutAllowedOrigins); changed {
+		app.RootCmd.SetArgs(args)
+	}
 
 	zeroLogger := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"}).With().Timestamp().Logger()
 	gmessagesLogger := gmessages.ProductionLogger(zeroLogger)
@@ -168,7 +172,7 @@ func main() {
 			if relayErr != nil {
 				stdLogger.Error("relay health check failed", "error", relayErr)
 			} else if !relayStatus.Ready {
-				_, _, _ = alertService.Open(alerts.Input{
+				_, _, _ = alertService.EnsureOpen(alerts.Input{
 					Kind: "relay_unavailable", Severity: "warning", DedupeKey: "relay:paytm",
 					Message: "Paytm verification relay is unavailable; new Paytm checkouts are blocked.", Details: relayStatus,
 				})
@@ -321,4 +325,25 @@ func registerBackupCommands(app *pocketbase.PocketBase, service *backups.Service
 		},
 	}
 	app.RootCmd.AddCommand(createCmd, verifyCmd, restoreDrillCmd)
+}
+
+func withServeOrigins(args, origins []string) ([]string, bool) {
+	if len(origins) == 0 {
+		return args, false
+	}
+	hasServe := false
+	for _, arg := range args {
+		if arg == "serve" {
+			hasServe = true
+		}
+		if arg == "--origins" || strings.HasPrefix(arg, "--origins=") {
+			return args, false
+		}
+	}
+	if !hasServe {
+		return args, false
+	}
+	result := append([]string(nil), args...)
+	result = append(result, "--origins="+strings.Join(origins, ","))
+	return result, true
 }

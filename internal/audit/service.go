@@ -6,6 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"context"
+
+	"github.com/Phloraxx/payment-api/internal/domain"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/pocketbase/core"
 )
 
@@ -25,19 +29,22 @@ type Entry struct {
 }
 
 type Service struct {
-	App core.App
-	Now func() time.Time
+	App   core.App // transitional constructor dependency
+	Store store.Database
+	Now   func() time.Time
 }
 
 func NewService(app core.App) *Service {
-	return &Service{App: app, Now: time.Now}
+	return &Service{App: app, Store: store.NewPocketBase(app), Now: time.Now}
 }
 
 func (s *Service) Record(entry Entry) error {
-	return s.RecordInApp(s.App, entry)
+	return s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		return s.RecordUoW(uow, entry)
+	})
 }
 
-func (s *Service) RecordInApp(app core.App, entry Entry) error {
+func (s *Service) RecordUoW(uow store.UnitOfWork, entry Entry) error {
 	entry.Action = strings.TrimSpace(entry.Action)
 	entry.EntityType = strings.TrimSpace(entry.EntityType)
 	entry.EntityID = strings.TrimSpace(entry.EntityID)
@@ -58,22 +65,10 @@ func (s *Service) RecordInApp(app core.App, entry Entry) error {
 	if at.IsZero() {
 		at = s.now()
 	}
-	collection, err := app.FindCollectionByNameOrId("audit_events")
-	if err != nil {
-		return err
-	}
-	record := core.NewRecord(collection)
-	record.Set("action", entry.Action)
-	record.Set("actor_id", truncate(entry.Actor.ID, 255))
-	record.Set("actor_email", truncate(entry.Actor.Email, 255))
-	record.Set("entity_type", entry.EntityType)
-	record.Set("entity_id", entry.EntityID)
-	record.Set("summary", entry.Summary)
-	record.Set("occurred_at", at)
-	if entry.Details != nil {
-		record.Set("details", entry.Details)
-	}
-	return app.Save(record)
+	return uow.Audit().Record(domain.AuditEvent{
+		Action: entry.Action, ActorID: truncate(entry.Actor.ID, 255), ActorEmail: truncate(entry.Actor.Email, 255),
+		EntityType: entry.EntityType, EntityID: entry.EntityID, Summary: entry.Summary, Details: entry.Details, OccurredAt: at,
+	})
 }
 
 func (s *Service) now() time.Time {

@@ -1,6 +1,7 @@
 package refunds
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -11,17 +12,17 @@ import (
 
 	"github.com/Phloraxx/payment-api/internal/audit"
 	"github.com/Phloraxx/payment-api/internal/domain"
-	"github.com/pocketbase/dbx"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/pocketbase/core"
 )
 
 type WebhookScheduler interface {
-	ScheduleRefund(app core.App, event string, payment, refund *core.Record, at time.Time) error
+	ScheduleRefundPayment(uow store.UnitOfWork, event string, payment *domain.Payment, refund *domain.Refund, at time.Time) error
 	Wake()
 }
 
 type Service struct {
-	App      core.App
+	Store    store.Database
 	Audit    *audit.Service
 	Webhooks WebhookScheduler
 	Now      func() time.Time
@@ -46,10 +47,10 @@ type UpdateInput struct {
 }
 
 func NewService(app core.App, auditService *audit.Service, webhooks WebhookScheduler) *Service {
-	return &Service{App: app, Audit: auditService, Webhooks: webhooks, Now: time.Now}
+	return &Service{Store: store.NewPocketBase(app), Audit: auditService, Webhooks: webhooks, Now: time.Now}
 }
 
-func (s *Service) Request(input RequestInput) (*core.Record, bool, error) {
+func (s *Service) Request(input RequestInput) (*domain.Refund, bool, error) {
 	input.PaymentID = strings.TrimSpace(input.PaymentID)
 	input.Reason = strings.TrimSpace(input.Reason)
 	input.ExternalID = strings.TrimSpace(input.ExternalID)
@@ -65,79 +66,60 @@ func (s *Service) Request(input RequestInput) (*core.Record, bool, error) {
 		return nil, false, domain.New("INVALID_REFUND_METADATA", "refund metadata must be valid JSON no larger than 1 MiB", 400)
 	}
 	now := s.now()
-	var result *core.Record
-	var replayed bool
-	var queued bool
-	err = s.App.RunInTransaction(func(tx core.App) error {
+	var result *domain.Refund
+	var replayed, queued bool
+	err = s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		repo := uow.Refunds()
 		if input.IdempotencyKey != "" {
-			existing, err := tx.FindFirstRecordByData("refunds", "idempotency_key", input.IdempotencyKey)
-			if err == nil {
-				existingMetadata, metadataErr := normalizeMetadata(existing.Get("metadata"))
+			existing, findErr := repo.FindByIdempotencyKey(input.IdempotencyKey)
+			if findErr == nil {
+				existingMetadata, metadataErr := normalizeMetadata(existing.Metadata)
 				if metadataErr != nil {
 					return metadataErr
 				}
-				if existing.GetString("payment") != input.PaymentID || int64(existing.GetInt("amount")) != input.AmountPaise || existing.GetString("reason") != input.Reason || existing.GetString("external_id") != input.ExternalID || !reflect.DeepEqual(existingMetadata, metadata) {
+				if existing.PaymentID != input.PaymentID || existing.AmountPaise != input.AmountPaise || existing.Reason != input.Reason || existing.ExternalID != input.ExternalID || !reflect.DeepEqual(existingMetadata, metadata) {
 					return domain.New("REFUND_IDEMPOTENCY_CONFLICT", "the refund idempotency key was already used with different parameters", 409)
 				}
-				result = existing.Clone()
-				replayed = true
+				result, replayed = existing, true
 				return nil
 			}
-			if !errors.Is(err, sql.ErrNoRows) {
-				return err
+			if !errors.Is(findErr, sql.ErrNoRows) {
+				return findErr
 			}
 		}
-		payment, err := tx.FindRecordById("payments", input.PaymentID)
+		payment, err := uow.Payments().Get(input.PaymentID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return domain.PaymentNotFound()
 			}
 			return err
 		}
-		status := payment.GetString("status")
-		if status != "paid" && status != "late" {
+		if payment.Status != domain.StatusPaid && payment.Status != domain.StatusLate {
 			return domain.New("PAYMENT_NOT_REFUNDABLE", "only paid or late payments can have refund records", 409)
 		}
-		paidAmount := int64(payment.GetInt("payable_amount"))
-		reserved, err := reservedRefundAmount(tx, payment.Id)
+		reserved, err := repo.ReservedAmount(payment.ID)
 		if err != nil {
 			return err
 		}
-		if input.AmountPaise > paidAmount-reserved {
+		if input.AmountPaise > payment.PayablePaise-reserved {
 			return domain.New("REFUND_AMOUNT_EXCEEDS_AVAILABLE", "refund amount exceeds the remaining refundable payment amount", 409)
 		}
-		collection, err := tx.FindCollectionByNameOrId("refunds")
-		if err != nil {
-			return err
-		}
-		record := core.NewRecord(collection)
-		record.Set("payment", payment.Id)
-		record.Set("amount", input.AmountPaise)
-		record.Set("status", "requested")
-		record.Set("reason", input.Reason)
-		record.Set("external_id", input.ExternalID)
-		record.Set("idempotency_key", input.IdempotencyKey)
-		record.Set("metadata", metadata)
-		record.Set("requested_by", input.Actor.ID)
-		record.Set("requested_at", now)
-		if err := tx.Save(record); err != nil {
+		refund := &domain.Refund{PaymentID: payment.ID, AmountPaise: input.AmountPaise, Status: "requested", Reason: input.Reason, ExternalID: input.ExternalID, IdempotencyKey: input.IdempotencyKey, Metadata: metadata, RequestedBy: input.Actor.ID, RequestedAt: now}
+		if err := repo.Create(refund); err != nil {
 			return err
 		}
 		if s.Audit != nil {
-			if err := s.Audit.RecordInApp(tx, audit.Entry{
-				Action: "refund.requested", Actor: input.Actor, EntityType: "refund", EntityID: record.Id,
-				Summary: "Operator recorded a refund request", Details: map[string]any{"paymentId": payment.Id, "amountPaise": input.AmountPaise, "reason": input.Reason}, OccurredAt: now,
-			}); err != nil {
+			if err := s.Audit.RecordUoW(uow, audit.Entry{Action: "refund.requested", Actor: input.Actor, EntityType: "refund", EntityID: refund.ID, Summary: "Operator recorded a refund request", Details: map[string]any{"paymentId": payment.ID, "amountPaise": input.AmountPaise, "reason": input.Reason}, OccurredAt: now}); err != nil {
 				return err
 			}
 		}
 		if s.Webhooks != nil {
-			if err := s.Webhooks.ScheduleRefund(tx, "refund.requested", payment, record, now); err != nil {
+			if err := s.Webhooks.ScheduleRefundPayment(uow, "refund.requested", payment, refund, now); err != nil {
 				return err
 			}
 			queued = true
 		}
-		result = record.Clone()
+		result = refund
 		return nil
 	})
 	if err != nil {
@@ -149,7 +131,7 @@ func (s *Service) Request(input RequestInput) (*core.Record, bool, error) {
 	return result, replayed, nil
 }
 
-func (s *Service) Update(input UpdateInput) (*core.Record, error) {
+func (s *Service) Update(input UpdateInput) (*domain.Refund, error) {
 	input.RefundID = strings.TrimSpace(input.RefundID)
 	input.Status = strings.TrimSpace(input.Status)
 	input.Reference = strings.TrimSpace(input.Reference)
@@ -161,81 +143,72 @@ func (s *Service) Update(input UpdateInput) (*core.Record, error) {
 		return nil, domain.New("REFUND_REFERENCE_REQUIRED", "a bank refund reference is required before marking a refund completed", 400)
 	}
 	now := s.now()
-	var result *core.Record
+	var result *domain.Refund
 	var queued bool
-	err := s.App.RunInTransaction(func(tx core.App) error {
-		refund, err := tx.FindRecordById("refunds", input.RefundID)
+	err := s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		repo := uow.Refunds()
+		refund, err := repo.Get(input.RefundID)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return domain.New("REFUND_NOT_FOUND", "refund not found", 404)
 			}
 			return err
 		}
-		current := refund.GetString("status")
+		current := refund.Status
 		if current == input.Status {
-			if input.Reference != "" && input.Reference != refund.GetString("reference") {
+			if input.Reference != "" && input.Reference != refund.Reference {
 				return domain.New("REFUND_REFERENCE_CONFLICT", "same-status retry supplied a different refund reference", 409)
 			}
-			result = refund.Clone()
+			result = refund
 			return nil
 		}
 		if !validTransition(current, input.Status) {
 			return domain.New("INVALID_REFUND_TRANSITION", fmt.Sprintf("refund cannot transition from %s to %s", current, input.Status), 409)
 		}
+		payment, err := uow.Payments().Get(refund.PaymentID)
+		if err != nil {
+			return err
+		}
 		if !statusReservesFunds(current) && statusReservesFunds(input.Status) {
-			paymentID := refund.GetString("payment")
-			payment, err := tx.FindRecordById("payments", paymentID)
+			reserved, err := repo.ReservedAmount(refund.PaymentID)
 			if err != nil {
 				return err
 			}
-			reserved, err := reservedRefundAmount(tx, paymentID)
-			if err != nil {
-				return err
-			}
-			available := int64(payment.GetInt("payable_amount")) - reserved
-			if int64(refund.GetInt("amount")) > available {
+			if refund.AmountPaise > payment.PayablePaise-reserved {
 				return domain.New("REFUND_AMOUNT_EXCEEDS_AVAILABLE", "refund amount exceeds the remaining refundable payment amount", 409)
 			}
 		}
 		if input.Reference != "" {
-			existing, findErr := tx.FindFirstRecordByData("refunds", "reference", input.Reference)
-			if findErr == nil && existing.Id != refund.Id {
+			existing, findErr := repo.FindByReference(input.Reference)
+			if findErr == nil && existing.ID != refund.ID {
 				return domain.New("REFUND_REFERENCE_CONFLICT", "refund reference is already assigned", 409)
 			}
 			if findErr != nil && !errors.Is(findErr, sql.ErrNoRows) {
 				return findErr
 			}
 		}
-		refund.Set("status", input.Status)
+		refund.Status = input.Status
 		if input.Reference != "" {
-			refund.Set("reference", input.Reference)
+			refund.Reference = input.Reference
 		}
 		if input.Status == "completed" {
-			refund.Set("completed_at", now)
+			refund.CompletedAt = now
 		}
-		if err := tx.Save(refund); err != nil {
-			return err
-		}
-		payment, err := tx.FindRecordById("payments", refund.GetString("payment"))
-		if err != nil {
+		if err := repo.Save(refund); err != nil {
 			return err
 		}
 		if s.Audit != nil {
-			if err := s.Audit.RecordInApp(tx, audit.Entry{
-				Action: "refund." + input.Status, Actor: input.Actor, EntityType: "refund", EntityID: refund.Id,
-				Summary: "Operator updated a refund lifecycle record", Details: map[string]any{"from": current, "to": input.Status, "reference": input.Reference, "note": input.Note}, OccurredAt: now,
-			}); err != nil {
+			if err := s.Audit.RecordUoW(uow, audit.Entry{Action: "refund." + input.Status, Actor: input.Actor, EntityType: "refund", EntityID: refund.ID, Summary: "Operator updated a refund lifecycle record", Details: map[string]any{"from": current, "to": input.Status, "reference": input.Reference, "note": input.Note}, OccurredAt: now}); err != nil {
 				return err
 			}
 		}
 		if s.Webhooks != nil {
-			event := "refund." + input.Status
-			if err := s.Webhooks.ScheduleRefund(tx, event, payment, refund, now); err != nil {
+			if err := s.Webhooks.ScheduleRefundPayment(uow, "refund."+input.Status, payment, refund, now); err != nil {
 				return err
 			}
 			queued = true
 		}
-		result = refund.Clone()
+		result = refund
 		return nil
 	})
 	if err != nil {
@@ -245,18 +218,6 @@ func (s *Service) Update(input UpdateInput) (*core.Record, error) {
 		s.Webhooks.Wake()
 	}
 	return result, nil
-}
-
-func reservedRefundAmount(app core.App, paymentID string) (int64, error) {
-	records, err := app.FindRecordsByFilter("refunds", "payment = {:payment} && status != 'cancelled' && status != 'failed'", "created", 0, 0, dbx.Params{"payment": paymentID})
-	if err != nil {
-		return 0, err
-	}
-	var total int64
-	for _, record := range records {
-		total += int64(record.GetInt("amount"))
-	}
-	return total, nil
 }
 
 func statusReservesFunds(status string) bool {

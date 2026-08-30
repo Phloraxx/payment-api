@@ -1,12 +1,15 @@
 package api
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/androidrelay"
 	"github.com/Phloraxx/payment-api/internal/config"
+	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/paymentemail"
+	"github.com/Phloraxx/payment-api/internal/store"
 	_ "github.com/Phloraxx/payment-api/migrations"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
@@ -58,7 +61,15 @@ func TestPaytmReadinessAcceptsHealthyHeartbeat(t *testing.T) {
 	if err := app.Save(device); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := relay.Heartbeat(device, androidrelay.HeartbeatInput{
+	var typedDevice *domain.RelayDevice
+	if err := relay.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		var err error
+		typedDevice, err = uow.Relay().Get(device.Id)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := relay.Heartbeat(typedDevice, androidrelay.HeartbeatInput{
 		SchemaVersion: 1, NotificationAccess: true, ListenerConnected: true,
 	}); err != nil {
 		t.Fatal(err)

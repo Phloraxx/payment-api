@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { Badge, formatDate } from "../components/common";
-import { api, pb } from "../pb";
-import type { RazorpayTestConfig, RazorpayTestOrder, RazorpayTestOrderResponse } from "../types";
+import { api } from "../api";
+import type { OperatorRazorpayOrder, RazorpayTestConfig, RazorpayTestOrderResponse } from "../types";
 
 type CheckoutSuccess = {
   razorpay_payment_id: string;
@@ -32,7 +32,7 @@ let checkoutLoader: Promise<void> | null = null;
 
 export function RazorpayTestPage({ notify }: { notify: (value: string) => void }) {
   const [config, setConfig] = useState<RazorpayTestConfig | null>(null);
-  const [orders, setOrders] = useState<RazorpayTestOrder[]>([]);
+  const [orders, setOrders] = useState<OperatorRazorpayOrder[]>([]);
   const [amount, setAmount] = useState("1.00");
   const [externalId, setExternalId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -44,8 +44,8 @@ export function RazorpayTestPage({ notify }: { notify: (value: string) => void }
       const nextConfig = await api<RazorpayTestConfig>("/api/razorpay/test/config");
       setConfig(nextConfig);
       if (nextConfig.enabled) {
-        const result = await pb.collection("razorpay_test_orders").getList<RazorpayTestOrder>(1, 100, { sort: "-created_at" });
-        setOrders(result.items);
+        const result = await api<{ orders: OperatorRazorpayOrder[] }>("/api/operator/v2/razorpay/test/orders?limit=100");
+        setOrders(result.orders);
       } else {
         setOrders([]);
       }
@@ -58,12 +58,8 @@ export function RazorpayTestPage({ notify }: { notify: (value: string) => void }
   useEffect(() => { void load(); }, [load]);
   useEffect(() => {
     if (!config?.enabled) return;
-    let disposed = false;
-    let unsubscribe: (() => void) | undefined;
-    void pb.collection("razorpay_test_orders").subscribe("*", () => void load()).then((fn) => {
-      if (disposed) void fn(); else unsubscribe = fn;
-    });
-    return () => { disposed = true; unsubscribe?.(); };
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void load(); }, 10_000);
+    return () => window.clearInterval(timer);
   }, [config?.enabled, load]);
 
   async function create(event: FormEvent) {
@@ -103,7 +99,7 @@ export function RazorpayTestPage({ notify }: { notify: (value: string) => void }
     }
   }
 
-  async function refresh(order: RazorpayTestOrder) {
+  async function refresh(order: OperatorRazorpayOrder) {
     setBusy(true);
     try {
       const updated = await api<RazorpayTestOrderResponse>(`/api/razorpay/test/orders/${order.id}/refresh`, { method: "POST" });
@@ -146,12 +142,12 @@ export function RazorpayTestPage({ notify }: { notify: (value: string) => void }
       {!orders.length ? <p className="empty">No Razorpay test orders yet.</p> : <div className="table-wrap"><table>
         <thead><tr><th>Created</th><th>Amount</th><th>Local / Razorpay IDs</th><th>Status</th><th>Method</th><th>Action</th></tr></thead>
         <tbody>{orders.map((order) => <tr key={order.id}>
-          <td>{formatDate(order.created_at)}</td>
-          <td>₹{(order.amount / 100).toFixed(2)}</td>
-          <td><strong>{order.id}</strong><small>{order.razorpay_order_id || "Provider order pending"}</small><small>{order.razorpay_payment_id || "No payment yet"}</small></td>
+          <td>{formatDate(order.createdAt)}</td>
+          <td>₹{(order.amountPaise / 100).toFixed(2)}</td>
+          <td><strong>{order.id}</strong><small>{order.razorpayOrderId || "Provider order pending"}</small><small>{order.razorpayPaymentId || "No payment yet"}</small></td>
           <td><Badge status={order.status} />{order.error && <small className="error">{order.error}</small>}</td>
-          <td>{order.payment_method || "—"}</td>
-          <td><button disabled={busy || !order.razorpay_payment_id} onClick={() => void refresh(order)}>Fetch status</button></td>
+          <td>{order.paymentMethod || "—"}</td>
+          <td><button disabled={busy || !order.razorpayPaymentId} onClick={() => void refresh(order)}>Fetch status</button></td>
         </tr>)}</tbody>
       </table></div>}
     </section>

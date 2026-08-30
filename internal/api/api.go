@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/alerts"
@@ -32,23 +33,25 @@ import (
 	"github.com/Phloraxx/payment-api/internal/refunds"
 	"github.com/Phloraxx/payment-api/internal/reviews"
 	"github.com/Phloraxx/payment-api/internal/sms"
+	"github.com/Phloraxx/payment-api/internal/store"
 	appweb "github.com/Phloraxx/payment-api/internal/web"
 	"github.com/pocketbase/pocketbase/apis"
 	"github.com/pocketbase/pocketbase/core"
 )
 
 const (
-	maxPaymentRequestBytes           int64 = (1 << 20) + (64 << 10)
-	maxSMSRequestBytes               int64 = 128 << 10
-	maxPaytmNotificationRequestBytes int64 = 160 << 10
-	maxEmailRequestBytes             int64 = ((paymentemail.MaxRawBytes + 2) / 3 * 4) + (128 << 10)
-	maxGMessagesPairBytes            int64 = 128 << 10
-	maxReviewRequestBytes            int64 = 16 << 10
-	maxRefundRequestBytes            int64 = (1 << 20) + (64 << 10)
-	maxStatementRequestBytes         int64 = reconciliation.MaxFileBytes + (1 << 20)
-	maxRazorpayTestRequestBytes      int64 = 1 << 20
-	maxRazorpayLiveRequestBytes      int64 = 1 << 20
-	robotsTagValue                         = "noindex, nofollow, noarchive, nosnippet, noimageindex"
+	maxPaymentRequestBytes                int64 = (1 << 20) + (64 << 10)
+	maxSMSRequestBytes                    int64 = 128 << 10
+	maxPaytmNotificationRequestBytes      int64 = 160 << 10
+	maxEmailRequestBytes                  int64 = ((paymentemail.MaxRawBytes + 2) / 3 * 4) + (128 << 10)
+	maxGMessagesPairBytes                 int64 = 128 << 10
+	maxReviewRequestBytes                 int64 = 16 << 10
+	maxOperatorPaymentProfileRequestBytes int64 = 512 << 10
+	maxRefundRequestBytes                 int64 = (1 << 20) + (64 << 10)
+	maxStatementRequestBytes              int64 = reconciliation.MaxFileBytes + (1 << 20)
+	maxRazorpayTestRequestBytes           int64 = 1 << 20
+	maxRazorpayLiveRequestBytes           int64 = 1 << 20
+	robotsTagValue                              = "noindex, nofollow, noarchive, nosnippet, noimageindex"
 )
 
 type API struct {
@@ -67,6 +70,8 @@ type API struct {
 	Backups            *backups.Service
 	RazorpayTest       *razorpaytest.Service
 	RazorpayLive       *razorpaylive.Service
+	checkoutMu         sync.Mutex
+	checkoutLimits     *checkoutLimiterSet
 }
 
 func New(cfg config.Config, paymentService *payments.Service, smsService *sms.Service, manager *gmessages.Manager) *API {
@@ -84,6 +89,14 @@ func (a *API) Register(app core.App) {
 			return event.String(http.StatusOK, "User-agent: *\nContent-Signal: search=no, ai-input=no, ai-train=no, use=immediate\nDisallow:\n")
 		})
 		e.Router.POST("/api/payments", a.createPayment).Bind(apis.BodyLimit(maxPaymentRequestBytes))
+		e.Router.OPTIONS("/api/checkout/v2/{path...}", a.checkoutPreflight)
+		e.Router.GET("/api/checkout/v2/payment-accounts", a.checkoutPaymentAccounts)
+		e.Router.POST("/api/checkout/v2/payments", a.checkoutCreatePayment).Bind(apis.BodyLimit(maxPaymentRequestBytes))
+		e.Router.GET("/api/checkout/v2/payments/{id}", a.checkoutGetPayment)
+		e.Router.GET("/api/checkout/v2/razorpay/{mode}/config", a.checkoutRazorpayConfig)
+		e.Router.POST("/api/checkout/v2/razorpay/{mode}/orders", a.checkoutRazorpayCreateOrder).Bind(apis.BodyLimit(maxRazorpayTestRequestBytes))
+		e.Router.GET("/api/checkout/v2/razorpay/{mode}/orders/{id}", a.checkoutRazorpayGetOrder)
+		e.Router.POST("/api/checkout/v2/razorpay/{mode}/orders/{id}/verify", a.checkoutRazorpayVerify).Bind(apis.BodyLimit(maxRazorpayTestRequestBytes))
 		e.Router.GET("/api/payment-accounts", a.paymentAccounts)
 		e.Router.GET("/api/payments/{id}", a.getPayment)
 		e.Router.POST("/api/payments/{id}/cancel", a.cancelPayment)
@@ -101,6 +114,23 @@ func (a *API) Register(app core.App) {
 		e.Router.GET("/api/paygate/health", a.health)
 		e.Router.GET("/api/config", a.getConfig)
 		e.Router.GET("/api/dashboard", a.dashboard)
+		e.Router.GET("/api/operator/v2/overview", a.operatorV2Overview)
+		e.Router.GET("/api/operator/v2/payments", a.operatorV2Payments)
+		e.Router.GET("/api/operator/v2/payments/{id}", a.operatorV2Payment)
+		e.Router.PUT("/api/operator/v2/payments/{id}/details", a.operatorV2UpdatePaymentDetails).Bind(apis.BodyLimit(maxOperatorPaymentProfileRequestBytes))
+		e.Router.GET("/api/operator/v2/reviews", a.operatorV2Reviews)
+		e.Router.GET("/api/operator/v2/reviews/{id}", a.operatorV2Review)
+		e.Router.POST("/api/operator/v2/reviews/{id}/resolve", a.operatorV2ResolveReview).Bind(apis.BodyLimit(maxReviewRequestBytes))
+		e.Router.GET("/api/operator/v2/alerts", a.operatorV2Alerts)
+		e.Router.GET("/api/operator/v2/relay", a.operatorV2Relay)
+		e.Router.GET("/api/operator/v2/evidence-shadow/google-messages", a.operatorV2GoogleMessagesShadow)
+		e.Router.GET("/api/operator/v2/reconciliation", a.operatorV2ReconciliationRuns)
+		e.Router.GET("/api/operator/v2/reconciliation/{id}/entries", a.operatorV2ReconciliationEntries)
+		e.Router.GET("/api/operator/v2/refunds", a.operatorV2Refunds)
+		e.Router.GET("/api/operator/v2/records/{kind}", a.operatorV2OperationalRecords)
+		e.Router.GET("/api/operator/v2/razorpay/{mode}/orders", a.operatorV2RazorpayOrders)
+		e.Router.POST("/api/operator/v2/payments/{id}/cancel", a.operatorV2CancelPayment).Bind(apis.BodyLimit(maxReviewRequestBytes))
+		e.Router.POST("/api/operator/v2/reviews/{id}/dismiss", a.operatorV2DismissReview).Bind(apis.BodyLimit(maxReviewRequestBytes))
 		e.Router.GET("/api/capacity", a.capacity)
 		e.Router.POST("/api/review-cases/{id}/resolve", a.resolveReview).Bind(apis.BodyLimit(maxReviewRequestBytes))
 		e.Router.POST("/api/reconciliation/import", a.importReconciliation).Bind(apis.BodyLimit(maxStatementRequestBytes))
@@ -125,11 +155,6 @@ func (a *API) Register(app core.App) {
 		e.Router.GET("/api/connector/gmessages/status", a.gmessagesStatus)
 		e.Router.POST("/api/connector/gmessages/pair/google", a.gmessagesGooglePair).Bind(apis.BodyLimit(maxGMessagesPairBytes))
 		e.Router.POST("/api/connector/gmessages/reauth/google", a.gmessagesGoogleReauth).Bind(apis.BodyLimit(maxGMessagesPairBytes))
-		e.Router.POST("/api/connector/gmessages/pair/qr", a.gmessagesPair)
-		e.Router.POST("/api/connector/gmessages/pair/qr/refresh", a.gmessagesPairRefresh)
-		// Backward-compatible QR aliases from the first PayGate rebuild.
-		e.Router.POST("/api/connector/gmessages/pair", a.gmessagesPair)
-		e.Router.POST("/api/connector/gmessages/pair/refresh", a.gmessagesPairRefresh)
 		e.Router.POST("/api/connector/gmessages/reconnect", a.gmessagesReconnect)
 		e.Router.DELETE("/api/connector/gmessages/pair", a.gmessagesUnpair)
 
@@ -284,8 +309,8 @@ func (a *API) createPayment(e *core.RequestEvent) error {
 		ExternalID:     strings.TrimSpace(body.ExternalID),
 		Metadata:       metadata,
 		IdempotencyKey: strings.TrimSpace(e.Request.Header.Get("Idempotency-Key")),
-	}, func(tx core.App) error {
-		return a.ensurePaymentAccountReadyInApp(tx, body.PaymentAccount)
+	}, func(uow store.UnitOfWork) error {
+		return a.ensurePaymentAccountReadyUoW(uow, body.PaymentAccount)
 	})
 	if err != nil {
 		return writeDomainError(e, err)
@@ -814,17 +839,21 @@ func (a *API) restoreDrill(e *core.RequestEvent) error {
 	return e.JSON(http.StatusOK, result)
 }
 
-func refundResponse(record *core.Record) map[string]any {
-	if record == nil {
+func refundResponse(refund *domain.Refund) map[string]any {
+	if refund == nil {
 		return nil
 	}
+	requestedAt, completedAt := "", ""
+	if !refund.RequestedAt.IsZero() {
+		requestedAt = refund.RequestedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !refund.CompletedAt.IsZero() {
+		completedAt = refund.CompletedAt.UTC().Format(time.RFC3339Nano)
+	}
 	return map[string]any{
-		"id": record.Id, "paymentId": record.GetString("payment"),
-		"amountPaise": record.GetInt("amount"), "status": record.GetString("status"),
-		"reason": record.GetString("reason"), "reference": record.GetString("reference"),
-		"externalId":  record.GetString("external_id"),
-		"requestedAt": record.GetDateTime("requested_at").String(),
-		"completedAt": record.GetDateTime("completed_at").String(),
+		"id": refund.ID, "paymentId": refund.PaymentID, "amountPaise": refund.AmountPaise,
+		"status": refund.Status, "reason": refund.Reason, "reference": refund.Reference,
+		"externalId": refund.ExternalID, "requestedAt": requestedAt, "completedAt": completedAt,
 	}
 }
 
@@ -876,34 +905,6 @@ func (a *API) gmessagesGoogleReauth(e *core.RequestEvent) error {
 		return e.BadRequestError(err.Error(), nil)
 	}
 	return e.JSON(http.StatusOK, a.GMessages.Status())
-}
-
-func (a *API) gmessagesPair(e *core.RequestEvent) error {
-	if !a.dashboardAuth(e) {
-		return e.UnauthorizedError("dashboard authentication is required", nil)
-	}
-	if a.GMessages == nil {
-		return e.BadRequestError("Google Messages connector is unavailable", nil)
-	}
-	qrURL, err := a.GMessages.BeginPair()
-	if err != nil {
-		return e.BadRequestError("failed to start Google Messages pairing", err)
-	}
-	return e.JSON(http.StatusOK, map[string]any{"qrUrl": qrURL, "status": a.GMessages.Status()})
-}
-
-func (a *API) gmessagesPairRefresh(e *core.RequestEvent) error {
-	if !a.dashboardAuth(e) {
-		return e.UnauthorizedError("dashboard authentication is required", nil)
-	}
-	if a.GMessages == nil {
-		return e.BadRequestError("Google Messages connector is unavailable", nil)
-	}
-	qrURL, err := a.GMessages.RefreshPair()
-	if err != nil {
-		return e.BadRequestError("failed to refresh Google Messages pairing", err)
-	}
-	return e.JSON(http.StatusOK, map[string]any{"qrUrl": qrURL, "status": a.GMessages.Status()})
 }
 
 func (a *API) gmessagesReconnect(e *core.RequestEvent) error {

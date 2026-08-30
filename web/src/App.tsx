@@ -1,34 +1,55 @@
 import { useEffect, useMemo, useState } from "react";
-import { pb } from "./pb";
+import { auth, refreshAuth as refreshOperatorAuth } from "./api";
 import type { Page } from "./types";
 import { Dashboard } from "./pages/Dashboard";
+import { Health } from "./pages/Health";
 import { Login } from "./pages/Login";
 import { Payments } from "./pages/Payments";
+import { More } from "./pages/More";
 import { AuditEvents, EmailEvents, SMSEvents, WebhookDeliveries } from "./pages/Records";
 import { AlertsPage, ReconciliationPage, RefundsPage, ReviewsPage } from "./pages/Operations";
 import { Settings } from "./pages/Settings";
 import { RazorpayTestPage } from "./pages/RazorpayTest";
 
-const pages: Page[] = ["dashboard", "payments", "reviews", "reconciliation", "sms", "email", "alerts", "refunds", "webhooks", "audit", "razorpay_test", "settings"];
+const primaryPages: Page[] = ["dashboard", "payments", "reviews", "health", "more"];
+const advancedPages: Page[] = ["reconciliation", "refunds", "sms", "email", "razorpay_test", "alerts", "webhooks", "audit", "settings"];
+const pages = [...primaryPages, ...advancedPages];
+
+const pageMeta: Record<Page, { label: string; eyebrow: string; description: string }> = {
+  dashboard: { label: "Overview", eyebrow: "Today", description: "What needs your attention right now." },
+  payments: { label: "Payments", eyebrow: "Money flow", description: "Find, create and manage every payment." },
+  reviews: { label: "Action", eyebrow: "Needs a person", description: "Only the cases PayGate cannot decide safely." },
+  health: { label: "Health", eyebrow: "System status", description: "The few things that must stay healthy for PayGate to work." },
+  more: { label: "More", eyebrow: "Advanced", description: "Investigation, recovery and low-frequency operator tools." },
+  reconciliation: { label: "Reconciliation", eyebrow: "Advanced", description: "Compare bank statements without changing payment truth automatically." },
+  refunds: { label: "Refunds", eyebrow: "Advanced", description: "Record and audit manual refund workflows." },
+  sms: { label: "SMS evidence", eyebrow: "Advanced", description: "Raw operational SMS records." },
+  email: { label: "Email evidence", eyebrow: "Advanced", description: "Raw operational bank-email records." },
+  razorpay_test: { label: "Razorpay test", eyebrow: "Advanced", description: "Sandbox payment diagnostics." },
+  alerts: { label: "Alerts", eyebrow: "Advanced", description: "Operational alert history." },
+  webhooks: { label: "Webhooks", eyebrow: "Advanced", description: "Delivery-level diagnostics." },
+  audit: { label: "Audit trail", eyebrow: "Advanced", description: "Immutable operator and system actions." },
+  settings: { label: "Settings", eyebrow: "Advanced", description: "Low-frequency infrastructure controls." },
+};
 
 function pageFromHash(): Page {
-  const value = window.location.hash.replace(/^#\/?/, "") as Page;
+  const value = window.location.hash.replace(/^#\/?/, "").split("?")[0] as Page;
   return pages.includes(value) ? value : "dashboard";
 }
 
 export function App() {
-  const [loggedIn, setLoggedIn] = useState(pb.authStore.isValid);
+  const [loggedIn, setLoggedIn] = useState(auth.isValid);
   const [page, setPage] = useState<Page>(pageFromHash());
   const [notice, setNotice] = useState("");
 
-  useEffect(() => pb.authStore.onChange(() => setLoggedIn(pb.authStore.isValid)), []);
+  useEffect(() => auth.subscribe(() => setLoggedIn(auth.isValid)), []);
   useEffect(() => {
-    if (!pb.authStore.token) return;
-    const refreshAuth = async () => {
-      try { await pb.collection("users").authRefresh(); } catch { pb.authStore.clear(); }
+    if (!auth.token) return;
+    const refreshSession = async () => {
+      try { await refreshOperatorAuth(); } catch { auth.clear(); }
     };
-    void refreshAuth();
-    const timer = window.setInterval(() => void refreshAuth(), 10 * 60_000);
+    void refreshSession();
+    const timer = window.setInterval(() => void refreshSession(), 10 * 60_000);
     return () => window.clearInterval(timer);
   }, [loggedIn]);
   useEffect(() => {
@@ -38,51 +59,58 @@ export function App() {
   }, []);
   useEffect(() => {
     if (!notice) return;
-    const timer = window.setTimeout(() => setNotice(""), 5000);
+    const timer = window.setTimeout(() => setNotice(""), 4500);
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  const title = useMemo(() => label(page), [page]);
+  const meta = useMemo(() => pageMeta[page], [page]);
   if (!loggedIn) return <Login />;
+  const primaryActive: Page = advancedPages.includes(page) ? "more" : page;
 
   function navigate(next: Page) {
     window.location.hash = `/${next}`;
     setPage(next);
   }
 
-  return <div className="shell">
-    <aside>
-      <div className="brand">PAY<span>GATE</span></div>
-      <p className="muted">Operator console</p>
-      <nav>{pages.map((item) => <button className={page === item ? "nav active" : "nav"} key={item} onClick={() => navigate(item)}>{label(item)}</button>)}</nav>
-      <div className="sidebar-bottom">
-        <span className="operator">{pb.authStore.record?.email}</span>
-        <button className="signout" onClick={() => pb.authStore.clear()}>Sign out</button>
+  return <div className="app-shell">
+    <aside className="app-sidebar">
+      <button className="brand-lockup" onClick={() => navigate("dashboard")} aria-label="PayGate overview">
+        <span className="brand-mark">PG</span><span><strong>PayGate</strong><small>Operator</small></span>
+      </button>
+      <nav className="primary-nav" aria-label="Primary navigation">
+        {primaryPages.map((item, index) => <button className={primaryActive === item ? "nav-item active" : "nav-item"} key={item} onClick={() => navigate(item)}>
+          <span className="nav-index">0{index + 1}</span><span>{pageMeta[item].label}</span>{item === "reviews" && <span className="nav-signal" />}
+        </button>)}
+      </nav>
+      <div className="sidebar-account">
+        <span className="account-avatar">{(auth.email || "O").slice(0, 1).toUpperCase()}</span>
+        <span className="account-copy"><strong>{auth.email || "Operator"}</strong><small>Administrator</small></span>
+        <button className="quiet-button" onClick={() => auth.clear()}>Sign out</button>
       </div>
     </aside>
-    <main>
-      <header><div><p className="eyebrow">PAYMENT OPERATIONS</p><h1>{title}</h1></div></header>
-      {notice && <div className="notice" role="status" onClick={() => setNotice("")}>{notice}</div>}
-      {page === "dashboard" && <Dashboard />}
-      {page === "payments" && <Payments notify={setNotice} />}
-      {page === "reviews" && <ReviewsPage notify={setNotice} />}
-      {page === "reconciliation" && <ReconciliationPage notify={setNotice} />}
-      {page === "sms" && <SMSEvents />}
-      {page === "email" && <EmailEvents />}
-      {page === "alerts" && <AlertsPage />}
-      {page === "refunds" && <RefundsPage notify={setNotice} />}
-      {page === "webhooks" && <WebhookDeliveries />}
-      {page === "audit" && <AuditEvents />}
-      {page === "razorpay_test" && <RazorpayTestPage notify={setNotice} />}
-      {page === "settings" && <Settings notify={setNotice} />}
+
+    <main className="app-main">
+      <header className="page-header">
+        <div><p className="page-eyebrow">{meta.eyebrow}</p><h1>{meta.label}</h1><p>{meta.description}</p></div>
+        <div className="live-chip"><span /> Live</div>
+      </header>
+      {notice && <button className="notice-toast" role="status" onClick={() => setNotice("")}>{notice}</button>}
+      <div className="page-content">
+        {page === "dashboard" && <Dashboard />}
+        {page === "payments" && <Payments notify={setNotice} />}
+        {page === "reviews" && <ReviewsPage notify={setNotice} />}
+        {page === "health" && <Health />}
+        {page === "more" && <More />}
+        {page === "reconciliation" && <ReconciliationPage notify={setNotice} />}
+        {page === "refunds" && <RefundsPage notify={setNotice} />}
+        {page === "sms" && <SMSEvents />}
+        {page === "email" && <EmailEvents />}
+        {page === "razorpay_test" && <RazorpayTestPage notify={setNotice} />}
+        {page === "alerts" && <AlertsPage />}
+        {page === "webhooks" && <WebhookDeliveries />}
+        {page === "audit" && <AuditEvents />}
+        {page === "settings" && <Settings notify={setNotice} />}
+      </div>
     </main>
   </div>;
-}
-
-function label(value: string) {
-  if (value === "sms") return "SMS Events";
-  if (value === "email") return "Email Events";
-  if (value === "audit") return "Audit Trail";
-  if (value === "razorpay_test") return "Razorpay Test";
-  return value.charAt(0).toUpperCase() + value.slice(1);
 }

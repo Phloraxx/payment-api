@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
 )
 
@@ -57,5 +58,22 @@ func TestDomainCollectionsOnlyExposeReadsToOperatorUsers(t *testing.T) {
 	}
 	if reviews.Fields.GetByName("email_event") == nil {
 		t.Fatal("review_cases.email_event migration field is missing")
+	}
+	relayDevices, err := app.FindCollectionByNameOrId("relay_devices")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"power_health_reported", "battery_optimization_exempt", "power_save_mode", "background_restricted", "foreground_service_active"} {
+		if relayDevices.Fields.GetByName(name) == nil {
+			t.Fatalf("relay_devices.%s migration field is missing", name)
+		}
+	}
+	relayEvents, err := app.FindCollectionByNameOrId("relay_events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, ok := relayEvents.Fields.GetByName("processing_status").(*core.SelectField)
+	if !ok || !containsSelectValue(status.Values, "shadow_observed") {
+		t.Fatal("relay_events.processing_status shadow_observed value is missing")
 	}
 }

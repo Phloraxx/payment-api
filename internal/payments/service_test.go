@@ -1,6 +1,7 @@
 package payments
 
 import (
+	"context"
 	"errors"
 	"net/url"
 	"strings"
@@ -11,8 +12,8 @@ import (
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/money"
+	"github.com/Phloraxx/payment-api/internal/store"
 	_ "github.com/Phloraxx/payment-api/migrations"
-	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
 )
 
@@ -105,10 +106,10 @@ func TestPaytmQROnlyCreateResponseEncodesExactAmountWithoutTransactionNote(t *te
 }
 
 func TestCreateGuardedSkipsReadinessGateForIdempotentReplay(t *testing.T) {
-	service, _, _ := paymentTestService(t)
+	service, app, _ := paymentTestService(t)
 	input := CreateInput{AmountRupees: 25, PaymentAccount: "kotak", IdempotencyKey: "guarded-replay"}
 	gateCalls := 0
-	first, replayed, err := service.CreateGuarded(input, func(core.App) error {
+	first, replayed, err := service.CreateGuarded(input, func(store.UnitOfWork) error {
 		gateCalls++
 		return nil
 	})
@@ -116,7 +117,7 @@ func TestCreateGuardedSkipsReadinessGateForIdempotentReplay(t *testing.T) {
 		t.Fatalf("first guarded create = %+v replayed=%v calls=%d err=%v", first, replayed, gateCalls, err)
 	}
 
-	replay, replayed, err := service.CreateGuarded(input, func(core.App) error {
+	replay, replayed, err := service.CreateGuarded(input, func(store.UnitOfWork) error {
 		t.Fatal("readiness gate must not run for an exact idempotency replay")
 		return errors.New("unreachable")
 	})
@@ -124,17 +125,17 @@ func TestCreateGuardedSkipsReadinessGateForIdempotentReplay(t *testing.T) {
 		t.Fatalf("guarded replay = %+v replayed=%v err=%v", replay, replayed, err)
 	}
 
-	before, err := service.App.CountRecords("payments")
+	before, err := app.CountRecords("payments")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, replayed, err = service.CreateGuarded(CreateInput{AmountRupees: 26, IdempotencyKey: "guarded-denied"}, func(core.App) error {
+	_, replayed, err = service.CreateGuarded(CreateInput{AmountRupees: 26, IdempotencyKey: "guarded-denied"}, func(store.UnitOfWork) error {
 		return domain.New("PAYMENT_ACCOUNT_UNAVAILABLE", "verification unavailable", 503)
 	})
 	if err == nil || replayed {
 		t.Fatalf("denied guarded create err=%v replayed=%v", err, replayed)
 	}
-	after, err := service.App.CountRecords("payments")
+	after, err := app.CountRecords("payments")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +168,7 @@ func TestCreateAllocatesAllNinetyNineSlotsAndExhausts(t *testing.T) {
 }
 
 func TestCreateIdempotencyAndExactPaymentMatching(t *testing.T) {
-	service, _, now := paymentTestService(t)
+	service, app, now := paymentTestService(t)
 	first, replayed, err := service.Create(CreateInput{
 		AmountRupees:   100,
 		ExternalID:     "order-1",
@@ -202,7 +203,7 @@ func TestCreateIdempotencyAndExactPaymentMatching(t *testing.T) {
 	}
 
 	// A freshly constructed service still reads the durable record state.
-	restarted := NewService(service.App, service.Config, nil)
+	restarted := NewService(app, service.Config, nil)
 	restarted.Now = func() time.Time { return *now }
 	persisted, err := restarted.Get(first.ID)
 	if err != nil || persisted.Status != domain.StatusPaid || persisted.PayablePaise != first.PayablePaise {
@@ -261,12 +262,7 @@ func TestConcurrentAllocationsRemainUnique(t *testing.T) {
 }
 
 func TestPublicPaymentRedactsEvidence(t *testing.T) {
-	record := core.NewRecord(core.NewBaseCollection("payments"))
-	record.Id = "payment-id"
-	record.Set("requested_amount", 10000)
-	record.Set("payable_amount", 10001)
-	record.Set("status", "paid")
-	payment := FromRecord(record)
+	payment := &domain.Payment{ID: "payment-id", RequestedPaise: 10000, PayablePaise: 10001, Status: domain.StatusPaid}
 	public := PublicPayment(payment)
 	for _, forbidden := range []string{"rrn", "upiId", "payerName", "rawSms"} {
 		if _, ok := public[forbidden]; ok {
@@ -469,12 +465,12 @@ func TestManualMatchKeepsExactAmountAndRRNInvariants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var matched *core.Record
-	err = service.App.RunInTransaction(func(tx core.App) error {
+	var matched *domain.Payment
+	err = service.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
 		var action string
 		var queued bool
 		var matchErr error
-		matched, action, queued, matchErr = service.ManualMatchInApp(tx, payment.ID, domain.ParsedSMS{
+		matched, action, queued, matchErr = service.ManualMatch(uow, payment.ID, domain.ParsedSMS{
 			AmountPaise: payment.PayablePaise,
 			RRN:         "800800800800",
 			OccurredAt:  *now,
@@ -490,16 +486,16 @@ func TestManualMatchKeepsExactAmountAndRRNInvariants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if matched.GetString("status") != "paid" {
-		t.Fatalf("status=%s", matched.GetString("status"))
+	if matched.Status != domain.StatusPaid {
+		t.Fatalf("status=%s", matched.Status)
 	}
 
 	other, _, err := service.Create(CreateInput{AmountRupees: 801})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = service.App.RunInTransaction(func(tx core.App) error {
-		_, _, _, err := service.ManualMatchInApp(tx, other.ID, domain.ParsedSMS{
+	err = service.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		_, _, _, err := service.ManualMatch(uow, other.ID, domain.ParsedSMS{
 			AmountPaise: other.PayablePaise,
 			RRN:         "800800800800",
 		}, *now)
@@ -545,11 +541,11 @@ func TestManualMatchUsesEvidenceTimeForHistoricalReconciliation(t *testing.T) {
 	if _, err := service.ExpireDue(); err != nil {
 		t.Fatal(err)
 	}
-	var matched *core.Record
-	err = service.App.RunInTransaction(func(tx core.App) error {
+	var matched *domain.Payment
+	err = service.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
 		var action string
 		var matchErr error
-		matched, action, _, matchErr = service.ManualMatchInApp(tx, payment.ID, domain.ParsedSMS{
+		matched, action, _, matchErr = service.ManualMatch(uow, payment.ID, domain.ParsedSMS{
 			AmountPaise: payment.PayablePaise,
 			RRN:         "850850850850",
 			OccurredAt:  evidenceAt,
@@ -562,8 +558,8 @@ func TestManualMatchUsesEvidenceTimeForHistoricalReconciliation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("historical evidence inside original quarantine was rejected: %v", err)
 	}
-	if matched.GetString("status") != "late" {
-		t.Fatalf("status=%s", matched.GetString("status"))
+	if matched.Status != domain.StatusLate {
+		t.Fatalf("status=%s", matched.Status)
 	}
 }
 
@@ -574,8 +570,8 @@ func TestManualMatchRejectsTransactionAfterFingerprintReuseBoundary(t *testing.T
 		t.Fatal(err)
 	}
 	*now = payment.ReuseAfter.Add(2 * time.Hour)
-	err = service.App.RunInTransaction(func(tx core.App) error {
-		_, _, _, err := service.ManualMatchInApp(tx, payment.ID, domain.ParsedSMS{
+	err = service.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		_, _, _, err := service.ManualMatch(uow, payment.ID, domain.ParsedSMS{
 			AmountPaise: payment.PayablePaise,
 			RRN:         "851851851851",
 			OccurredAt:  payment.ReuseAfter.Add(time.Minute),

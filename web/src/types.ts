@@ -1,22 +1,4 @@
-import type { RecordModel } from "pocketbase";
-
-export type Page = "dashboard" | "payments" | "reviews" | "reconciliation" | "sms" | "email" | "alerts" | "refunds" | "webhooks" | "audit" | "razorpay_test" | "settings";
-
-export type Payment = RecordModel & {
-  payment_account: "kotak" | "slice" | "paytm";
-  requested_amount: number;
-  payable_amount: number;
-  status: "pending" | "paid" | "expired" | "cancelled" | "late";
-  expires_at: string;
-  reuse_after: string;
-  resolved_at: string;
-  rrn: string;
-  upi_id: string;
-  payer_name: string;
-  paid_at: string;
-  external_id: string;
-  metadata?: unknown;
-};
+export type Page = "dashboard" | "payments" | "reviews" | "health" | "more" | "reconciliation" | "sms" | "email" | "alerts" | "refunds" | "webhooks" | "audit" | "razorpay_test" | "settings";
 
 export type Connector = {
   enabled: boolean;
@@ -33,10 +15,29 @@ export type Connector = {
 };
 
 
+export type EvidenceShadowMetrics = {
+  windowStart: string;
+  windowDays: number;
+  androidObserved: number;
+  androidParseable: number;
+  androidComplete: number;
+  libgmObserved: number;
+  libgmComplete: number;
+  exactMatches: number;
+  androidOnlyComplete: number;
+  libgmOnlyComplete: number;
+  referenceCoveragePercent: number;
+  exactParityPercent: number;
+  removalReady: boolean;
+  removalGate: string;
+};
+
 export type RelayStatus = {
   ready: boolean;
   enabledDevices: number;
   activeDevices: number;
+  legacyGraceDevices: number;
+  powerUnhealthyDevices: number;
   staleAfterSeconds: number;
   lastSeenAt?: string | null;
   lastHeartbeatAt?: string | null;
@@ -60,6 +61,12 @@ export type RelayDevice = {
   heartbeatGraceUntil?: string | null;
   notificationAccess: boolean;
   listenerConnected: boolean;
+  powerHealthReported: boolean;
+  batteryOptimizationExempt: boolean;
+  powerSaveMode: boolean;
+  backgroundRestricted: boolean;
+  foregroundService: boolean;
+  powerHealthy: boolean;
   pendingCount: number;
   failedCount: number;
   lastClientError?: string;
@@ -110,6 +117,69 @@ export type DashboardData = {
   backup?: BackupStatus;
 };
 
+export type OperatorPaymentSummary = {
+  id: string;
+  paymentAccount: "kotak" | "slice" | "paytm";
+  requestedAmountPaise: number;
+  payableAmountPaise: number;
+  status: "pending" | "paid" | "expired" | "cancelled" | "late";
+  createdAt: string;
+  expiresAt: string;
+  paidAt?: string;
+  displayName?: string;
+  externalId?: string;
+  customerName?: string;
+};
+
+export type OperatorPaymentDetail = OperatorPaymentSummary & {
+  customerEmail?: string;
+  customerPhone?: string;
+  description?: string;
+  adminNote?: string;
+  tags: string[];
+  metadata: unknown;
+  customFields: Record<string, unknown>;
+  payerName?: string;
+  upiId?: string;
+  rrn?: string;
+  evidenceSource?: string;
+  evidenceReference?: string;
+  resolvedAt?: string;
+  reuseAfter?: string;
+  idempotencyKey?: string;
+};
+
+export type OperatorPaymentPage = {
+  payments: OperatorPaymentSummary[];
+  total: number;
+  limit: number;
+  offset: number;
+};
+
+export type OperatorPaymentDetailsUpdate = {
+  displayName: string;
+  customerName: string;
+  customerEmail: string;
+  customerPhone: string;
+  description: string;
+  adminNote: string;
+  tags: string[];
+  customFields: Record<string, unknown>;
+};
+
+export type OperatorOverviewResponse = {
+  overview: {
+    paymentCounts: Record<string, number>;
+    openReviews: number;
+    openAlerts: number;
+    recentPayments: OperatorPaymentSummary[];
+  };
+  connector: Connector;
+  relay?: RelayStatus;
+  capacity?: CapacitySnapshot;
+  backup?: BackupStatus;
+};
+
 export type PaymentCreateResponse = {
   id: string;
   paymentAccount: "kotak" | "slice" | "paytm";
@@ -128,66 +198,34 @@ export type PaymentCreateResponse = {
   qrPayload?: string;
 };
 
-export type ReviewCase = RecordModel & {
-  kind: string;
-  status: "open" | "resolved" | "dismissed";
-  severity: string;
-  sms_event: string;
-  email_event: string;
-  reconciliation_entry: string;
-  payment: string;
-  candidate_payment_ids?: string[];
-  reason: string;
-  resolution: string;
-  resolution_note: string;
-  resolved_by: string;
-  opened_at: string;
-  resolved_at: string;
-  expand?: Record<string, RecordModel>;
+export type OperatorEvidenceDetail = {
+  kind: "sms" | "email" | "reconciliation";
+  id: string;
+  source?: string; sender?: string; subject?: string;
+  amountPaise?: number; reference?: string; upiId?: string; payerName?: string;
+  occurredAt?: string; description?: string; status?: string; notes?: string;
+};
+export type OperatorReviewSummary = {
+  id: string; kind: string; status: "open" | "resolved" | "dismissed"; severity: string;
+  paymentId?: string; candidatePaymentIds?: string[]; reason: string; openedAt: string;
+};
+export type OperatorReviewDetail = OperatorReviewSummary & {
+  resolution?: string; resolutionNote?: string; resolvedAt?: string; evidence?: OperatorEvidenceDetail;
+};
+export type OperatorAlertSummary = {
+  id: string; kind: string; status: "open" | "resolved"; severity: string; message: string;
+  occurrenceCount: number; firstSeenAt: string; lastSeenAt: string; notificationStatus?: string;
+  notificationAttempts?: number; notificationLastError?: string; notificationDeliveredAt?: string;
 };
 
-export type AlertRecord = RecordModel & {
-  kind: string;
-  status: "open" | "resolved";
-  severity: string;
-  dedupe_key: string;
-  message: string;
-  details?: unknown;
-  occurrence_count: number;
-  first_seen_at: string;
-  last_seen_at: string;
-  resolved_at: string;
-  notification_status: string;
-  notification_attempts: number;
-  notification_last_error: string;
-  notification_delivered_at: string;
+export type OperatorReconciliationRun = {
+  id: string; filename: string; status: string; totalRows: number; matchedRows: number; unmatchedRows: number; duplicateRows: number; conflictRows: number; invalidRows: number; error?: string; startedAt: string; completedAt?: string;
 };
-
-export type ReconciliationRun = RecordModel & {
-  filename: string;
-  sha256: string;
-  status: string;
-  total_rows: number;
-  matched_rows: number;
-  unmatched_rows: number;
-  duplicate_rows: number;
-  conflict_rows: number;
-  invalid_rows: number;
-  error: string;
-  started_at: string;
-  completed_at: string;
+export type OperatorReconciliationEntry = {
+  id: string; rowNumber: number; transactionTime?: string; amountPaise?: number; reference?: string; description?: string; status: string; paymentId?: string; notes?: string;
 };
-
-export type RefundRecord = RecordModel & {
-  payment: string;
-  amount: number;
-  status: string;
-  reason: string;
-  reference: string;
-  external_id: string;
-  requested_at: string;
-  completed_at: string;
-  expand?: Record<string, RecordModel>;
+export type OperatorRefund = {
+  id: string; paymentId: string; amountPaise: number; status: string; reason?: string; reference?: string; externalId?: string; requestedAt: string; completedAt?: string;
 };
 
 export type RazorpayTestConfig = {
@@ -197,19 +235,8 @@ export type RazorpayTestConfig = {
   mode: "test";
 };
 
-export type RazorpayTestOrder = RecordModel & {
-  amount: number;
-  currency: string;
-  status: string;
-  external_id: string;
-  razorpay_order_id: string;
-  razorpay_payment_id: string;
-  provider_status: string;
-  payment_method: string;
-  amount_refunded: number;
-  error: string;
-  created_at: string;
-  captured_at: string;
+export type OperatorRazorpayOrder = {
+  id: string; amountPaise: number; currency: string; status: string; externalId?: string; razorpayOrderId?: string; razorpayPaymentId?: string; providerStatus?: string; paymentMethod?: string; amountRefunded?: number; error?: string; createdAt: string; capturedAt?: string;
 };
 
 export type RazorpayTestOrderResponse = {

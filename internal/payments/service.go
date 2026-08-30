@@ -1,6 +1,7 @@
 package payments
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
@@ -17,20 +18,19 @@ import (
 	"github.com/Phloraxx/payment-api/internal/config"
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/money"
-	"github.com/pocketbase/dbx"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/pocketbase/core"
-	"github.com/pocketbase/pocketbase/tools/types"
 )
 
 const EvidenceTimestampTolerance = 2 * time.Second
 
 type WebhookScheduler interface {
-	Schedule(app core.App, event string, payment *core.Record, at time.Time) error
+	SchedulePayment(uow store.UnitOfWork, event string, payment *domain.Payment, at time.Time) error
 	Wake()
 }
 
 type Service struct {
-	App      core.App
+	Store    store.Database
 	Config   config.Config
 	Webhooks WebhookScheduler
 	Now      func() time.Time
@@ -54,7 +54,7 @@ type MatchResult struct {
 
 func NewService(app core.App, cfg config.Config, webhooks WebhookScheduler) *Service {
 	return &Service{
-		App:         app,
+		Store:       store.NewPocketBase(app),
 		Config:      cfg,
 		Webhooks:    webhooks,
 		Now:         time.Now,
@@ -62,7 +62,7 @@ func NewService(app core.App, cfg config.Config, webhooks WebhookScheduler) *Ser
 	}
 }
 
-type CreateGate func(core.App) error
+type CreateGate func(store.UnitOfWork) error
 
 func (s *Service) Create(input CreateInput) (*domain.Payment, bool, error) {
 	return s.CreateGuarded(input, nil)
@@ -93,27 +93,18 @@ func (s *Service) CreateGuarded(input CreateInput, gate CreateGate) (*domain.Pay
 		return nil, false, err
 	}
 	now := s.now()
-	var result *core.Record
-	var reused bool
-	var queued bool
+	var result *domain.Payment
+	reused := false
 
-	err = s.App.RunInTransaction(func(tx core.App) error {
-		expired, err := s.ExpireDueInApp(tx, now)
-		if err != nil {
-			return err
-		}
-		queued = expired > 0
-
+	err = s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		repo := uow.Payments()
 		if input.IdempotencyKey != "" {
-			existing, findErr := tx.FindFirstRecordByData("payments", "idempotency_key", input.IdempotencyKey)
+			existing, findErr := repo.FindByIdempotencyKey(input.IdempotencyKey)
 			if findErr == nil {
-				if int64(existing.GetInt("requested_amount")) != requested ||
-					existing.GetString("payment_account") != account ||
-					existing.GetString("external_id") != input.ExternalID ||
-					!metadataEqual(existing.Get("metadata"), metadata) {
+				if existing.RequestedPaise != requested || existing.Account != domain.PaymentAccount(account) || existing.ExternalID != input.ExternalID || !metadataEqual(existing.Metadata, metadata) {
 					return domain.IdempotencyConflict()
 				}
-				result = existing.Clone()
+				result = existing
 				reused = true
 				return nil
 			}
@@ -123,7 +114,7 @@ func (s *Service) CreateGuarded(input CreateInput, gate CreateGate) (*domain.Pay
 		}
 
 		if gate != nil {
-			if err := gate(tx); err != nil {
+			if err := gate(uow); err != nil {
 				return err
 			}
 		}
@@ -135,45 +126,33 @@ func (s *Service) CreateGuarded(input CreateInput, gate CreateGate) (*domain.Pay
 		if start < 1 || start > 99 {
 			return fmt.Errorf("invalid amount fingerprint start %d", start)
 		}
-		collection, err := tx.FindCollectionByNameOrId("payments")
-		if err != nil {
-			return err
-		}
 		expiresAt := now.Add(s.Config.PaymentTTL)
 		reuseAfter := expiresAt.Add(s.Config.AmountQuarantine)
-
 		for i := int64(0); i < 99; i++ {
 			suffix := ((start - 1 + i) % 99) + 1
 			candidate := requested + suffix
-			blocked, err := tx.FindFirstRecordByFilter(
-				"payments",
-				"payable_amount = {:amount} && reuse_after > {:now}",
-				dbx.Params{"amount": candidate, "now": filterDate(now)},
-			)
-			if err == nil && blocked != nil {
+			blocked, err := repo.IsFingerprintBlocked(candidate, now)
+			if err != nil {
+				return err
+			}
+			if blocked {
 				continue
 			}
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			created, err := repo.Create(store.NewPayment{
+				Account: domain.PaymentAccount(account), RequestedPaise: requested, PayablePaise: candidate,
+				CreatedAt: now, ExpiresAt: expiresAt, ReuseAfter: reuseAfter,
+				ExternalID: input.ExternalID, IdempotencyKey: input.IdempotencyKey, Metadata: metadata,
+			})
+			if err != nil {
+				if input.IdempotencyKey != "" {
+					if existing, findErr := repo.FindByIdempotencyKey(input.IdempotencyKey); findErr == nil {
+						result, reused = existing, true
+						return nil
+					}
+				}
 				return err
 			}
-
-			record := core.NewRecord(collection)
-			record.Set("created_at", now)
-			record.Set("payment_account", account)
-			record.Set("requested_amount", requested)
-			record.Set("payable_amount", candidate)
-			record.Set("status", string(domain.StatusPending))
-			record.Set("expires_at", expiresAt)
-			record.Set("reuse_after", reuseAfter)
-			record.Set("external_id", input.ExternalID)
-			record.Set("idempotency_key", input.IdempotencyKey)
-			if metadata != nil {
-				record.Set("metadata", metadata)
-			}
-			if err := tx.Save(record); err != nil {
-				return err
-			}
-			result = record.Clone()
+			result = created
 			return nil
 		}
 		return domain.CapacityExhausted()
@@ -181,77 +160,64 @@ func (s *Service) CreateGuarded(input CreateInput, gate CreateGate) (*domain.Pay
 	if err != nil {
 		return nil, false, err
 	}
-	if queued {
-		s.WakeWebhooks()
-	}
-	return FromRecord(result), reused, nil
+	return result, reused, nil
 }
 
 func (s *Service) Get(id string) (*domain.Payment, error) {
-	now := s.now()
-	var result *core.Record
-	var queued bool
-	err := s.App.RunInTransaction(func(tx core.App) error {
-		expired, err := s.ExpireDueInApp(tx, now)
-		if err != nil {
-			return err
-		}
-		queued = expired > 0
-		record, err := tx.FindRecordById("payments", id)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return domain.PaymentNotFound()
-			}
-			return err
-		}
-		result = record.Clone()
-		return nil
+	var payment *domain.Payment
+	err := s.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		var err error
+		payment, err = uow.Payments().Get(strings.TrimSpace(id))
+		return err
 	})
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, domain.PaymentNotFound()
+		}
 		return nil, err
 	}
-	if queued {
-		s.WakeWebhooks()
+	if payment.Status == domain.StatusPending && !payment.ExpiresAt.IsZero() && !payment.ExpiresAt.After(s.now()) {
+		payment.Status = domain.StatusExpired
 	}
-	return FromRecord(result), nil
+	return payment, nil
 }
 
 func (s *Service) Cancel(id string) (*domain.Payment, error) {
 	now := s.now()
-	var result *core.Record
-	var queued bool
-	err := s.App.RunInTransaction(func(tx core.App) error {
-		expired, err := s.ExpireDueInApp(tx, now)
-		if err != nil {
-			return err
-		}
-		queued = expired > 0
-		record, err := tx.FindRecordById("payments", id)
+	var result *domain.Payment
+	queued := false
+	err := s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		payment, err := uow.Payments().Get(strings.TrimSpace(id))
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
 				return domain.PaymentNotFound()
 			}
 			return err
 		}
-		status := record.GetString("status")
-		if status == string(domain.StatusCancelled) {
-			result = record.Clone()
+		if payment.Status == domain.StatusCancelled {
+			result = payment
 			return nil
 		}
-		if status != string(domain.StatusPending) {
-			return domain.PaymentResolved(status)
+		if payment.Status != domain.StatusPending {
+			return domain.PaymentResolved(string(payment.Status))
 		}
-		record.Set("status", string(domain.StatusCancelled))
-		record.Set("resolved_at", now)
-		extendReuseAfter(record, now.Add(s.Config.AmountQuarantine))
-		if err := tx.Save(record); err != nil {
+		if !payment.ExpiresAt.IsZero() && !payment.ExpiresAt.After(now) {
+			return domain.PaymentResolved(string(domain.StatusExpired))
+		}
+		payment.Status = domain.StatusCancelled
+		payment.ResolvedAt = now
+		candidate := now.Add(s.Config.AmountQuarantine)
+		if payment.ReuseAfter.IsZero() || candidate.After(payment.ReuseAfter) {
+			payment.ReuseAfter = candidate
+		}
+		if err := uow.Payments().Save(payment); err != nil {
 			return err
 		}
-		if err := s.schedule(tx, "payment.cancelled", record, now); err != nil {
+		if err := s.scheduleTyped(uow, "payment.cancelled", payment, now); err != nil {
 			return err
 		}
 		queued = true
-		result = record.Clone()
+		result = payment
 		return nil
 	})
 	if err != nil {
@@ -260,7 +226,7 @@ func (s *Service) Cancel(id string) (*domain.Payment, error) {
 	if queued {
 		s.WakeWebhooks()
 	}
-	return FromRecord(result), nil
+	return result, nil
 }
 
 func (s *Service) Match(parsed domain.ParsedSMS) (*MatchResult, error) {
@@ -268,12 +234,12 @@ func (s *Service) Match(parsed domain.ParsedSMS) (*MatchResult, error) {
 		return nil, domain.New("SMS_NOT_MATCHABLE", "bank SMS requires an exact amount and RRN", http.StatusUnprocessableEntity)
 	}
 	now := s.now()
-	var record *core.Record
-	var action string
+	var payment *domain.Payment
+	var outcome domain.MatchOutcome
 	var queued bool
-	err := s.App.RunInTransaction(func(tx core.App) error {
+	err := s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
 		var err error
-		record, action, queued, err = s.MatchInApp(tx, parsed, now)
+		payment, outcome, queued, err = s.MatchBankEvidence(uow, parsed, now)
 		return err
 	})
 	if err != nil {
@@ -282,105 +248,24 @@ func (s *Service) Match(parsed domain.ParsedSMS) (*MatchResult, error) {
 	if queued {
 		s.WakeWebhooks()
 	}
-	return &MatchResult{Payment: FromRecord(record), Action: action}, nil
+	return &MatchResult{Payment: payment, Action: string(outcome)}, nil
 }
 
-// MatchInApp applies exact-amount matching inside the caller's transaction.
-// It returns whether outgoing webhook work was queued so the caller can wake the
-// delivery loop only after the transaction commits.
-func (s *Service) MatchInApp(tx core.App, parsed domain.ParsedSMS, now time.Time) (*core.Record, string, bool, error) {
-	now = now.UTC()
-	account, _, err := s.paymentAccount(string(parsed.Account))
-	if err != nil {
-		return nil, "not_matchable", false, err
+// MatchBankEvidence normalizes trusted bank evidence into the common matcher.
+func (s *Service) MatchBankEvidence(uow store.UnitOfWork, parsed domain.ParsedSMS, now time.Time) (*domain.Payment, domain.MatchOutcome, bool, error) {
+	if parsed.AmountPaise <= 0 || strings.TrimSpace(parsed.RRN) == "" {
+		return nil, domain.MatchNotMatchable, false, domain.New("SMS_NOT_MATCHABLE", "bank SMS requires an exact amount and RRN", http.StatusUnprocessableEntity)
 	}
-	rrn := strings.TrimSpace(parsed.RRN)
-	evidenceAt := parsed.OccurredAt.UTC()
-	if evidenceAt.IsZero() || evidenceAt.After(now) {
-		evidenceAt = now
+	source := domain.EvidenceSourceBankSMS
+	if parsed.Account == domain.PaymentAccountSlice {
+		source = domain.EvidenceSourceBankEmail
 	}
-	if rrn == "" || parsed.AmountPaise <= 0 {
-		return nil, "not_matchable", false, domain.New("SMS_NOT_MATCHABLE", "bank SMS requires an exact amount and RRN", http.StatusUnprocessableEntity)
-	}
-
-	existing, err := tx.FindFirstRecordByData("payments", "rrn", rrn)
-	if err == nil {
-		if existing.GetString("payment_account") != account {
-			return nil, "rrn_account_mismatch", false, domain.New("RRN_ACCOUNT_MISMATCH", "the UPI reference was already recorded for a different payment account", http.StatusConflict)
-		}
-		if int64(existing.GetInt("payable_amount")) != parsed.AmountPaise {
-			return nil, "rrn_amount_mismatch", false, domain.New("RRN_AMOUNT_MISMATCH", "the UPI reference was already recorded with a different amount", http.StatusConflict)
-		}
-		return existing, "duplicate_rrn", false, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, "error", false, err
-	}
-
-	createdBefore := evidenceAt.Add(EvidenceTimestampTolerance)
-
-	// Match by when the bank says the credit occurred, not merely when the SMS
-	// happened to reach PayGate. This prevents an on-time payment from becoming
-	// "late" solely because the bank/phone delivered the SMS after expiry.
-	onTime, err := tx.FindRecordsByFilter(
-		"payments",
-		"payment_account = {:account} && payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
-		"created",
-		2,
-		0,
-		dbx.Params{"account": account, "amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
-	)
-	if err != nil {
-		return nil, "error", false, err
-	}
-	if len(onTime) > 1 {
-		return nil, "ambiguous", false, domain.AmbiguousMatch()
-	}
-	if len(onTime) == 1 {
-		record := onTime[0]
-		applyEvidence(record, parsed, domain.StatusPaid, now, s.Config.AmountQuarantine)
-		if err := tx.Save(record); err != nil {
-			return nil, "error", false, err
-		}
-		if err := s.schedule(tx, "payment.paid", record, now); err != nil {
-			return nil, "error", false, err
-		}
-		return record, "marked_paid", true, nil
-	}
-
-	expired, err := s.ExpireDueInApp(tx, now)
-	if err != nil {
-		return nil, "error", false, err
-	}
-	queued := expired > 0
-
-	late, err := tx.FindRecordsByFilter(
-		"payments",
-		"payment_account = {:account} && payable_amount = {:amount} && (status = 'expired' || status = 'cancelled') && reuse_after > {:now} && created_at <= {:createdBefore}",
-		"-created",
-		2,
-		0,
-		dbx.Params{"account": account, "amount": parsed.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
-	)
-	if err != nil {
-		return nil, "error", queued, err
-	}
-	if len(late) > 1 {
-		return nil, "ambiguous", queued, domain.AmbiguousMatch()
-	}
-	if len(late) == 1 {
-		record := late[0]
-		applyEvidence(record, parsed, domain.StatusLate, now, s.Config.AmountQuarantine)
-		if err := tx.Save(record); err != nil {
-			return nil, "error", queued, err
-		}
-		if err := s.schedule(tx, "payment.late", record, now); err != nil {
-			return nil, "error", queued, err
-		}
-		return record, "marked_late", true, nil
-	}
-
-	return nil, "unmatched", queued, nil
+	return s.MatchEvidence(uow, domain.Evidence{
+		Account: parsed.Account, AmountPaise: parsed.AmountPaise,
+		OccurredFrom: parsed.OccurredAt, OccurredUntil: parsed.OccurredAt,
+		Reference: strings.TrimSpace(parsed.RRN), ReferenceKind: domain.EvidenceReferenceRRN,
+		Source: source, PayerName: parsed.PayerName, UPIID: parsed.UPIId,
+	}, now)
 }
 
 type NotificationEvidence struct {
@@ -392,131 +277,34 @@ type NotificationEvidence struct {
 	Reference     string
 }
 
-// MatchNotificationInApp matches a trusted Paytm for Business notification by
-// account, exact DDM amount, and notification occurrence time. Unlike bank SMS
-// evidence, Paytm push notifications do not necessarily expose a UPI RRN, so a
-// unique relay evidence reference is used for idempotency instead.
-func (s *Service) MatchNotificationInApp(tx core.App, evidence NotificationEvidence, now time.Time) (*core.Record, string, bool, error) {
-	now = now.UTC()
-	account, _, err := s.paymentAccount(string(evidence.Account))
-	if err != nil {
-		return nil, "not_matchable", false, err
+// MatchNotification applies normalized Paytm relay evidence through the same matcher.
+func (s *Service) MatchNotification(uow store.UnitOfWork, evidence NotificationEvidence, now time.Time) (*domain.Payment, string, bool, error) {
+	if evidence.Account != domain.PaymentAccountPaytm {
+		return nil, string(domain.MatchNotMatchable), false, domain.New("NOTIFICATION_ACCOUNT_INVALID", "notification evidence is only valid for the Paytm account", http.StatusBadRequest)
 	}
-	if account != string(domain.PaymentAccountPaytm) {
-		return nil, "not_matchable", false, domain.New("NOTIFICATION_ACCOUNT_INVALID", "notification evidence is only valid for the Paytm account", http.StatusBadRequest)
+	if evidence.AmountPaise <= 0 || strings.TrimSpace(evidence.Reference) == "" {
+		return nil, string(domain.MatchNotMatchable), false, domain.New("NOTIFICATION_NOT_MATCHABLE", "Paytm notification requires an exact amount and evidence reference", http.StatusUnprocessableEntity)
 	}
-	reference := strings.TrimSpace(evidence.Reference)
-	if evidence.AmountPaise <= 0 || reference == "" {
-		return nil, "not_matchable", false, domain.New("NOTIFICATION_NOT_MATCHABLE", "Paytm notification requires an exact amount and evidence reference", http.StatusUnprocessableEntity)
-	}
-	evidenceAt := evidence.OccurredAt.UTC()
-	evidenceUntil := evidence.OccurredUntil.UTC()
-	if evidenceAt.IsZero() || evidenceAt.After(now) {
-		evidenceAt = now
-		evidenceUntil = now
-	}
-	if evidenceUntil.IsZero() || evidenceUntil.Before(evidenceAt) {
-		evidenceUntil = evidenceAt
-	}
-	if evidenceUntil.After(now) {
-		evidenceUntil = now
-	}
-
-	existing, err := tx.FindFirstRecordByData("payments", "evidence_reference", reference)
-	if err == nil {
-		if existing.GetString("payment_account") != account {
-			return nil, "evidence_account_mismatch", false, domain.New("EVIDENCE_ACCOUNT_MISMATCH", "the notification evidence was already recorded for a different payment account", http.StatusConflict)
-		}
-		if int64(existing.GetInt("payable_amount")) != evidence.AmountPaise {
-			return nil, "evidence_amount_mismatch", false, domain.New("EVIDENCE_AMOUNT_MISMATCH", "the notification evidence was already recorded with a different amount", http.StatusConflict)
-		}
-		return existing, "duplicate_evidence", false, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return nil, "error", false, err
-	}
-
-	createdBefore := evidenceUntil.Add(EvidenceTimestampTolerance)
-	onTime, err := tx.FindRecordsByFilter(
-		"payments",
-		"payment_account = {:account} && payable_amount = {:amount} && created_at <= {:createdBefore} && ((status = 'pending' && expires_at >= {:evidenceAt}) || (status = 'expired' && expires_at >= {:evidenceAt} && reuse_after > {:now}) || (status = 'cancelled' && resolved_at != '' && resolved_at >= {:evidenceAt} && reuse_after > {:now}))",
-		"created", 2, 0,
-		dbx.Params{"account": account, "amount": evidence.AmountPaise, "now": filterDate(now), "evidenceAt": filterDate(evidenceAt), "createdBefore": filterDate(createdBefore)},
-	)
-	if err != nil {
-		return nil, "error", false, err
-	}
-	if len(onTime) > 1 {
-		return nil, "ambiguous", false, domain.AmbiguousMatch()
-	}
-	if len(onTime) == 1 {
-		record := onTime[0]
-		applyNotificationEvidence(record, evidence, domain.StatusPaid, now, s.Config.AmountQuarantine)
-		if err := tx.Save(record); err != nil {
-			return nil, "error", false, err
-		}
-		if err := s.schedule(tx, "payment.paid", record, now); err != nil {
-			return nil, "error", false, err
-		}
-		return record, "marked_paid", true, nil
-	}
-
-	expired, err := s.ExpireDueInApp(tx, now)
-	if err != nil {
-		return nil, "error", false, err
-	}
-	queued := expired > 0
-	late, err := tx.FindRecordsByFilter(
-		"payments",
-		"payment_account = {:account} && payable_amount = {:amount} && (status = 'expired' || status = 'cancelled') && reuse_after > {:now} && created_at <= {:createdBefore}",
-		"-created", 2, 0,
-		dbx.Params{"account": account, "amount": evidence.AmountPaise, "now": filterDate(now), "createdBefore": filterDate(createdBefore)},
-	)
-	if err != nil {
-		return nil, "error", queued, err
-	}
-	if len(late) > 1 {
-		return nil, "ambiguous", queued, domain.AmbiguousMatch()
-	}
-	if len(late) == 1 {
-		record := late[0]
-		applyNotificationEvidence(record, evidence, domain.StatusLate, now, s.Config.AmountQuarantine)
-		if err := tx.Save(record); err != nil {
-			return nil, "error", queued, err
-		}
-		if err := s.schedule(tx, "payment.late", record, now); err != nil {
-			return nil, "error", queued, err
-		}
-		return record, "marked_late", true, nil
-	}
-	return nil, "unmatched", queued, nil
+	payment, outcome, queued, err := s.MatchEvidence(uow, domain.Evidence{
+		Account: evidence.Account, AmountPaise: evidence.AmountPaise,
+		OccurredFrom: evidence.OccurredAt, OccurredUntil: evidence.OccurredUntil,
+		Reference: strings.TrimSpace(evidence.Reference), ReferenceKind: domain.EvidenceReferenceRelay,
+		Source: domain.EvidenceSourcePaytmNotification, PayerName: evidence.PayerName,
+	}, now)
+	return payment, string(outcome), queued, err
 }
 
-func applyNotificationEvidence(record *core.Record, evidence NotificationEvidence, status domain.PaymentStatus, now time.Time, quarantine time.Duration) {
-	paidAt := evidence.OccurredAt.UTC()
-	if paidAt.IsZero() || paidAt.After(now) {
-		paidAt = now.UTC()
-	}
-	record.Set("status", string(status))
-	record.Set("payer_name", strings.TrimSpace(evidence.PayerName))
-	record.Set("evidence_source", "paytm_notification")
-	record.Set("evidence_reference", strings.TrimSpace(evidence.Reference))
-	record.Set("paid_at", paidAt)
-	record.Set("resolved_at", now.UTC())
-	extendReuseAfter(record, now.UTC().Add(quarantine))
-}
-
-// ManualMatchInApp explicitly links reviewed bank evidence to one payment. It
-// still enforces exact amount equality and global RRN uniqueness; the operator
-// chooses the payment, but cannot override those monetary invariants.
-func (s *Service) ManualMatchInApp(tx core.App, paymentID string, parsed domain.ParsedSMS, now time.Time) (*core.Record, string, bool, error) {
+// ManualMatch applies reviewed bank evidence to one explicitly selected payment.
+// Operator choice does not bypass account, exact amount, RRN uniqueness,
+// creation-time or quarantine invariants.
+func (s *Service) ManualMatch(uow store.UnitOfWork, paymentID string, parsed domain.ParsedSMS, now time.Time) (*domain.Payment, string, bool, error) {
 	now = now.UTC()
 	paymentID = strings.TrimSpace(paymentID)
 	rrn := strings.TrimSpace(parsed.RRN)
 	if paymentID == "" || parsed.AmountPaise <= 0 || rrn == "" {
 		return nil, "not_matchable", false, domain.New("MANUAL_MATCH_INVALID", "payment, exact amount and bank reference are required", http.StatusBadRequest)
 	}
-	record, err := tx.FindRecordById("payments", paymentID)
+	payment, err := uow.Payments().Get(paymentID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, "not_found", false, domain.PaymentNotFound()
@@ -527,178 +315,155 @@ func (s *Service) ManualMatchInApp(tx core.App, paymentID string, parsed domain.
 	if accountErr != nil {
 		return nil, "not_matchable", false, accountErr
 	}
-	if record.GetString("payment_account") != account {
+	if payment.Account != domain.PaymentAccount(account) {
 		return nil, "account_mismatch", false, domain.New("PAYMENT_ACCOUNT_MISMATCH", "bank evidence belongs to a different payment account", http.StatusConflict)
 	}
-	if int64(record.GetInt("payable_amount")) != parsed.AmountPaise {
+	if payment.PayablePaise != parsed.AmountPaise {
 		return nil, "amount_mismatch", false, domain.New("MANUAL_AMOUNT_MISMATCH", "bank evidence amount does not equal the payment payable amount", http.StatusConflict)
 	}
 
-	existing, findErr := tx.FindFirstRecordByData("payments", "rrn", rrn)
-	if findErr == nil && existing.Id != record.Id {
+	existing, findErr := uow.Payments().FindByEvidenceReference(domain.EvidenceReferenceRRN, rrn)
+	if findErr == nil && existing.ID != payment.ID {
 		return nil, "rrn_conflict", false, domain.New("RRN_ALREADY_ASSIGNED", "the bank reference is already assigned to another payment", http.StatusConflict)
 	}
 	if findErr != nil && !errors.Is(findErr, sql.ErrNoRows) {
 		return nil, "error", false, findErr
 	}
-	status := domain.PaymentStatus(record.GetString("status"))
-	if status == domain.StatusPaid || status == domain.StatusLate {
-		if record.GetString("rrn") == rrn {
-			return record, "already_matched", false, nil
+	if payment.Status == domain.StatusPaid || payment.Status == domain.StatusLate {
+		if payment.RRN == rrn {
+			return payment, "already_matched", false, nil
 		}
-		return nil, "resolved", false, domain.PaymentResolved(string(status))
+		return nil, "resolved", false, domain.PaymentResolved(string(payment.Status))
 	}
 
 	evidenceAt := parsed.OccurredAt.UTC()
 	if evidenceAt.IsZero() || evidenceAt.After(now) {
 		evidenceAt = now
 	}
-	createdAt := record.GetDateTime("created_at").Time()
-	if !createdAt.IsZero() && evidenceAt.Add(EvidenceTimestampTolerance).Before(createdAt) {
+	if !payment.CreatedAt.IsZero() && evidenceAt.Add(EvidenceTimestampTolerance).Before(payment.CreatedAt) {
 		return nil, "stale", false, domain.New("STALE_BANK_EVIDENCE", "bank evidence predates this payment", http.StatusConflict)
 	}
-	reuseAfter := record.GetDateTime("reuse_after").Time()
-	if !reuseAfter.IsZero() && evidenceAt.After(reuseAfter) {
+	if !payment.ReuseAfter.IsZero() && evidenceAt.After(payment.ReuseAfter) {
 		return nil, "stale", false, domain.New("PAYMENT_QUARANTINE_ELAPSED", "bank transaction occurred after this amount fingerprint became reusable", http.StatusConflict)
 	}
 
 	target := domain.StatusLate
-	expiresAt := record.GetDateTime("expires_at").Time()
-	resolvedAt := record.GetDateTime("resolved_at").Time()
-	if status == domain.StatusPending && (expiresAt.IsZero() || !evidenceAt.After(expiresAt)) {
+	if payment.Status == domain.StatusPending && (payment.ExpiresAt.IsZero() || !evidenceAt.After(payment.ExpiresAt)) {
 		target = domain.StatusPaid
-	} else if status == domain.StatusExpired && !expiresAt.IsZero() && !evidenceAt.After(expiresAt) {
+	} else if payment.Status == domain.StatusExpired && !payment.ExpiresAt.IsZero() && !evidenceAt.After(payment.ExpiresAt) {
 		target = domain.StatusPaid
-	} else if status == domain.StatusCancelled && !resolvedAt.IsZero() && !evidenceAt.After(resolvedAt) {
+	} else if payment.Status == domain.StatusCancelled && !payment.ResolvedAt.IsZero() && !evidenceAt.After(payment.ResolvedAt) {
 		target = domain.StatusPaid
 	}
 
-	applyEvidence(record, parsed, target, now, s.Config.AmountQuarantine)
-	if err := tx.Save(record); err != nil {
+	applyBankEvidence(payment, parsed, target, now, s.Config.AmountQuarantine)
+	if err := uow.Payments().Save(payment); err != nil {
 		return nil, "error", false, err
 	}
-	event := "payment.late"
-	action := "marked_late"
+	event, action := "payment.late", "marked_late"
 	if target == domain.StatusPaid {
-		event = "payment.paid"
-		action = "marked_paid"
+		event, action = "payment.paid", "marked_paid"
 	}
-	if err := s.schedule(tx, event, record, now); err != nil {
+	if err := s.scheduleTyped(uow, event, payment, now); err != nil {
 		return nil, "error", false, err
 	}
-	return record, action, true, nil
+	return payment, action, true, nil
 }
 
-func applyEvidence(record *core.Record, parsed domain.ParsedSMS, status domain.PaymentStatus, now time.Time, quarantine time.Duration) {
+func applyBankEvidence(payment *domain.Payment, parsed domain.ParsedSMS, status domain.PaymentStatus, now time.Time, quarantine time.Duration) {
 	paidAt := parsed.OccurredAt.UTC()
 	if paidAt.IsZero() || paidAt.After(now) {
 		paidAt = now.UTC()
 	}
-	record.Set("status", string(status))
-	record.Set("rrn", strings.TrimSpace(parsed.RRN))
-	record.Set("upi_id", strings.TrimSpace(parsed.UPIId))
-	record.Set("payer_name", strings.TrimSpace(parsed.PayerName))
-	record.Set("paid_at", paidAt)
-	record.Set("resolved_at", now.UTC())
-	extendReuseAfter(record, now.UTC().Add(quarantine))
-}
-
-func extendReuseAfter(record *core.Record, candidate time.Time) {
-	existing := record.GetDateTime("reuse_after").Time()
-	if existing.IsZero() || candidate.After(existing) {
-		record.Set("reuse_after", candidate.UTC())
+	payment.Status = status
+	payment.RRN = strings.TrimSpace(parsed.RRN)
+	payment.UPIId = strings.TrimSpace(parsed.UPIId)
+	payment.PayerName = strings.TrimSpace(parsed.PayerName)
+	payment.PaidAt = paidAt
+	payment.ResolvedAt = now.UTC()
+	candidate := now.UTC().Add(quarantine)
+	if payment.ReuseAfter.IsZero() || candidate.After(payment.ReuseAfter) {
+		payment.ReuseAfter = candidate
 	}
 }
+
+const (
+	expireBatchSize  = 100
+	expireMaxBatches = 10
+)
 
 func (s *Service) ExpireDue() (int, error) {
 	now := s.now()
-	count := 0
-	err := s.App.RunInTransaction(func(tx core.App) error {
-		var err error
-		count, err = s.ExpireDueInApp(tx, now)
-		return err
-	})
-	if err == nil && count > 0 {
+	total := 0
+	for batch := 0; batch < expireMaxBatches; batch++ {
+		count := 0
+		err := s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+			var err error
+			count, err = s.ExpireDueUoW(uow, now)
+			return err
+		})
+		if err != nil {
+			return total, err
+		}
+		total += count
+		if count < expireBatchSize {
+			break
+		}
+	}
+	if total > 0 {
 		s.WakeWebhooks()
 	}
-	return count, err
+	return total, nil
 }
 
-// ExpireDueInApp changes only currently pending records whose persisted expiry
-// timestamp is due. Existing reuse_after is retained because it was fixed at
-// creation as expires_at + quarantine.
-func (s *Service) ExpireDueInApp(tx core.App, now time.Time) (int, error) {
+// ExpireDueUoW processes one bounded batch using typed repositories. Payment
+// state and any outgoing event are committed atomically by the caller's UoW.
+func (s *Service) ExpireDueUoW(uow store.UnitOfWork, now time.Time) (int, error) {
 	now = now.UTC()
-	records, err := tx.FindRecordsByFilter(
-		"payments",
-		"status = 'pending' && expires_at <= {:now}",
-		"expires_at",
-		0,
-		0,
-		dbx.Params{"now": filterDate(now)},
-	)
+	payments, err := uow.Payments().ListDue(now, expireBatchSize)
 	if err != nil {
 		return 0, err
 	}
-	for _, record := range records {
-		record.Set("status", string(domain.StatusExpired))
-		record.Set("resolved_at", now)
-		if record.GetDateTime("reuse_after").IsZero() {
-			record.Set("reuse_after", now.Add(s.Config.AmountQuarantine))
+	for _, payment := range payments {
+		payment.Status = domain.StatusExpired
+		payment.ResolvedAt = now
+		if payment.ReuseAfter.IsZero() {
+			payment.ReuseAfter = now.Add(s.Config.AmountQuarantine)
 		}
-		if err := tx.Save(record); err != nil {
+		if err := uow.Payments().Save(payment); err != nil {
 			return 0, err
 		}
-		if err := s.schedule(tx, "payment.expired", record, now); err != nil {
+		if err := s.scheduleTyped(uow, "payment.expired", payment, now); err != nil {
 			return 0, err
 		}
 	}
-	return len(records), nil
+	return len(payments), nil
 }
 
 func (s *Service) Stats() (map[string]int64, error) {
-	if _, err := s.ExpireDue(); err != nil {
-		return nil, err
-	}
+	now := s.now()
 	result := map[string]int64{
 		"total": 0, "pending": 0, "paid": 0, "expired": 0, "cancelled": 0, "late": 0,
 	}
-	records, err := s.App.FindAllRecords("payments")
-	if err != nil {
+	var payments []*domain.Payment
+	if err := s.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		var err error
+		payments, err = uow.Payments().ListAll()
+		return err
+	}); err != nil {
 		return nil, err
 	}
-	for _, record := range records {
+	for _, payment := range payments {
 		result["total"]++
-		status := record.GetString("status")
-		if _, ok := result[status]; ok {
-			result[status]++
+		status := payment.Status
+		if status == domain.StatusPending && !payment.ExpiresAt.IsZero() && !payment.ExpiresAt.After(now) {
+			status = domain.StatusExpired
+		}
+		if _, ok := result[string(status)]; ok {
+			result[string(status)]++
 		}
 	}
 	return result, nil
-}
-
-func FromRecord(record *core.Record) *domain.Payment {
-	if record == nil {
-		return nil
-	}
-	return &domain.Payment{
-		ID:                record.Id,
-		Account:           domain.PaymentAccount(record.GetString("payment_account")),
-		RequestedPaise:    int64(record.GetInt("requested_amount")),
-		PayablePaise:      int64(record.GetInt("payable_amount")),
-		Status:            domain.PaymentStatus(record.GetString("status")),
-		ExpiresAt:         record.GetDateTime("expires_at").Time(),
-		ReuseAfter:        record.GetDateTime("reuse_after").Time(),
-		RRN:               record.GetString("rrn"),
-		UPIId:             record.GetString("upi_id"),
-		PayerName:         record.GetString("payer_name"),
-		EvidenceSource:    record.GetString("evidence_source"),
-		EvidenceReference: record.GetString("evidence_reference"),
-		PaidAt:            record.GetDateTime("paid_at").Time(),
-		ResolvedAt:        record.GetDateTime("resolved_at").Time(),
-		ExternalID:        record.GetString("external_id"),
-		IdempotencyKey:    record.GetString("idempotency_key"),
-	}
 }
 
 func PublicPayment(payment *domain.Payment) map[string]any {
@@ -771,11 +536,11 @@ func (s *Service) WakeWebhooks() {
 	}
 }
 
-func (s *Service) schedule(tx core.App, event string, payment *core.Record, at time.Time) error {
+func (s *Service) scheduleTyped(uow store.UnitOfWork, event string, payment *domain.Payment, at time.Time) error {
 	if s.Webhooks == nil {
 		return nil
 	}
-	return s.Webhooks.Schedule(tx, event, payment, at)
+	return s.Webhooks.SchedulePayment(uow, event, payment, at)
 }
 
 func (s *Service) now() time.Time {
@@ -827,14 +592,6 @@ func metadataEqual(a, b any) bool {
 	return reflect.DeepEqual(normalizeMetadata(a), normalizeMetadata(b))
 }
 
-func filterDate(t time.Time) string {
-	value, err := types.ParseDateTime(t.UTC())
-	if err != nil {
-		return t.UTC().Format(time.RFC3339Nano)
-	}
-	return value.String()
-}
-
 func formatTime(t time.Time) string {
 	if t.IsZero() {
 		return ""
@@ -868,18 +625,12 @@ type CapacitySnapshot struct {
 
 func (s *Service) Capacity() (CapacitySnapshot, error) {
 	now := s.now()
-	if _, err := s.ExpireDue(); err != nil {
-		return CapacitySnapshot{}, err
-	}
-	records, err := s.App.FindRecordsByFilter(
-		"payments",
-		"reuse_after > {:now}",
-		"requested_amount,payable_amount",
-		0,
-		0,
-		dbx.Params{"now": filterDate(now)},
-	)
-	if err != nil {
+	var payments []*domain.Payment
+	if err := s.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		var err error
+		payments, err = uow.Payments().ListBlocked(now)
+		return err
+	}); err != nil {
 		return CapacitySnapshot{}, err
 	}
 	type counts struct {
@@ -888,15 +639,14 @@ func (s *Service) Capacity() (CapacitySnapshot, error) {
 		amounts     map[int64]struct{}
 	}
 	byRequested := map[int64]*counts{}
-	for _, record := range records {
-		requested := int64(record.GetInt("requested_amount"))
-		entry := byRequested[requested]
+	for _, payment := range payments {
+		entry := byRequested[payment.RequestedPaise]
 		if entry == nil {
 			entry = &counts{amounts: map[int64]struct{}{}}
-			byRequested[requested] = entry
+			byRequested[payment.RequestedPaise] = entry
 		}
-		entry.amounts[int64(record.GetInt("payable_amount"))] = struct{}{}
-		if record.GetString("status") == string(domain.StatusPending) {
+		entry.amounts[payment.PayablePaise] = struct{}{}
+		if payment.Status == domain.StatusPending && (payment.ExpiresAt.IsZero() || payment.ExpiresAt.After(now)) {
 			entry.pending++
 		} else {
 			entry.quarantined++
@@ -919,14 +669,9 @@ func (s *Service) Capacity() (CapacitySnapshot, error) {
 			result.WarningPools++
 		}
 		result.Pools = append(result.Pools, CapacityPool{
-			RequestedAmountPaise: requested,
-			RequestedAmount:      money.FormatPaise(requested),
-			Pending:              entry.pending,
-			Quarantined:          entry.quarantined,
-			Blocked:              blocked,
-			Available:            available,
-			UtilizationPercent:   utilization,
-			Level:                level,
+			RequestedAmountPaise: requested, RequestedAmount: money.FormatPaise(requested),
+			Pending: entry.pending, Quarantined: entry.quarantined, Blocked: blocked,
+			Available: available, UtilizationPercent: utilization, Level: level,
 		})
 	}
 	sort.Slice(result.Pools, func(i, j int) bool {

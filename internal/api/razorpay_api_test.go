@@ -70,6 +70,7 @@ func newRazorpayAPIFixture(t *testing.T, enabled bool) *razorpayAPIFixture {
 		RazorpayTestEnabled: enabled, RazorpayTestKeyID: "rzp_test_api",
 		RazorpayTestKeySecret: "checkout-secret-123456", RazorpayTestWebhookSecret: "webhook-secret-123456789012",
 		RazorpayTestDisplayName: "PayGate Test",
+		CheckoutAllowedOrigins:  []string{checkoutOrigin},
 	}
 	paymentService := payments.NewService(app, cfg, nil)
 	smsService := sms.NewService(app, paymentService)
@@ -243,5 +244,54 @@ func TestRazorpayTestRoutesAcceptServerAPIKey(t *testing.T) {
 	res, body = fixture.apiKeyRequest(t, http.MethodGet, "/api/razorpay/test/orders/"+localID, "", nil)
 	if res.StatusCode != http.StatusOK || !strings.Contains(body, `"amountPaise":125`) {
 		t.Fatalf("get status=%d body=%s", res.StatusCode, body)
+	}
+}
+
+func TestCheckoutRazorpayTestCreateAndReplayWithoutAPIKey(t *testing.T) {
+	fixture := newRazorpayAPIFixture(t, true)
+	headers := map[string]string{
+		"Origin":          checkoutOrigin,
+		"Idempotency-Key": "30000000-0000-4000-8000-000000000001",
+	}
+	res, body := fixture.request(t, http.MethodGet, "/api/checkout/v2/razorpay/test/config", "", false, map[string]string{"Origin": checkoutOrigin})
+	if res.StatusCode != http.StatusOK || !strings.Contains(body, `"enabled":true`) || !strings.Contains(body, `"keyId":"rzp_test_api"`) {
+		t.Fatalf("public config status=%d body=%s", res.StatusCode, body)
+	}
+	res, body = fixture.request(t, http.MethodPost, "/api/checkout/v2/razorpay/test/orders", `{"amount":2}`, false, headers)
+	if res.StatusCode != http.StatusCreated || !strings.Contains(body, `"amountPaise":200`) || !strings.Contains(body, `"razorpayOrderId":"order_api_test"`) {
+		t.Fatalf("public create status=%d body=%s", res.StatusCode, body)
+	}
+	if !strings.Contains(body, `"externalId":"portal:30000000-0000-4000-8000-000000000001"`) {
+		t.Fatalf("public create did not constrain externalId: %s", body)
+	}
+	res, replay := fixture.request(t, http.MethodPost, "/api/checkout/v2/razorpay/test/orders", `{"amount":2}`, false, headers)
+	if res.StatusCode != http.StatusOK || res.Header.Get("X-Idempotent-Replayed") != "true" || jsonStringField(t, replay, "id") != jsonStringField(t, body, "id") {
+		t.Fatalf("public replay status=%d replay=%q body=%s", res.StatusCode, res.Header.Get("X-Idempotent-Replayed"), replay)
+	}
+}
+
+func TestCheckoutRazorpayTestVerifyUsesServerOrderAndSignature(t *testing.T) {
+	fixture := newRazorpayAPIFixture(t, true)
+	fixture.provider.order = razorpaytest.ProviderOrder{ID: "order_APITest123", Status: "created"}
+	headers := map[string]string{
+		"Origin":          checkoutOrigin,
+		"Idempotency-Key": "30000000-0000-4000-8000-000000000002",
+	}
+	res, createBody := fixture.request(t, http.MethodPost, "/api/checkout/v2/razorpay/test/orders", `{"amount":3}`, false, headers)
+	if res.StatusCode != http.StatusCreated {
+		t.Fatalf("create status=%d body=%s", res.StatusCode, createBody)
+	}
+	localID := jsonStringField(t, createBody, "id")
+	fixture.provider.payment = razorpaytest.ProviderPayment{OrderID: "order_APITest123", Amount: 300, Currency: "INR", Status: "captured", Method: "netbanking", Captured: true}
+	bad := `{"razorpay_order_id":"order_APITest123","razorpay_payment_id":"pay_APITest123","razorpay_signature":"` + strings.Repeat("0", 64) + `"}`
+	res, _ = fixture.request(t, http.MethodPost, "/api/checkout/v2/razorpay/test/orders/"+localID+"/verify", bad, false, map[string]string{"Origin": checkoutOrigin})
+	if res.StatusCode != http.StatusBadRequest {
+		t.Fatalf("tampered public verify status=%d", res.StatusCode)
+	}
+	signature := apiCheckoutSignature("checkout-secret-123456", "order_APITest123", "pay_APITest123")
+	good := `{"razorpay_order_id":"order_APITest123","razorpay_payment_id":"pay_APITest123","razorpay_signature":"` + signature + `"}`
+	res, body := fixture.request(t, http.MethodPost, "/api/checkout/v2/razorpay/test/orders/"+localID+"/verify", good, false, map[string]string{"Origin": checkoutOrigin})
+	if res.StatusCode != http.StatusOK || !strings.Contains(body, `"status":"captured"`) {
+		t.Fatalf("public verify status=%d body=%s", res.StatusCode, body)
 	}
 }

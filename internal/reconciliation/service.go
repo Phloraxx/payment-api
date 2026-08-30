@@ -3,6 +3,7 @@ package reconciliation
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/csv"
@@ -20,22 +21,22 @@ import (
 	"github.com/Phloraxx/payment-api/internal/audit"
 	"github.com/Phloraxx/payment-api/internal/domain"
 	"github.com/Phloraxx/payment-api/internal/money"
-	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/reviews"
 	"github.com/Phloraxx/payment-api/internal/sms"
-	"github.com/pocketbase/dbx"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/xuri/excelize/v2"
 )
 
 const (
-	MaxFileBytes = 10 << 20
-	MaxRows      = 10_000
-	MaxColumns   = 64
+	MaxFileBytes            = 10 << 20
+	MaxRows                 = 10_000
+	MaxColumns              = 64
+	ReconciliationBatchSize = 250
 )
 
 type Service struct {
-	App               core.App
+	Store             store.Database
 	Reviews           *reviews.Service
 	Alerts            *alerts.Service
 	Audit             *audit.Service
@@ -80,7 +81,7 @@ func NewService(app core.App, reviewService *reviews.Service, alertService *aler
 	if err != nil {
 		location = time.FixedZone("IST", 5*60*60+30*60)
 	}
-	return &Service{App: app, Reviews: reviewService, Alerts: alertService, Audit: auditService, Now: time.Now, StatementLocation: location}
+	return &Service{Store: store.NewPocketBase(app), Reviews: reviewService, Alerts: alertService, Audit: auditService, Now: time.Now, StatementLocation: location}
 }
 
 func (s *Service) Import(input ImportInput) (Result, error) {
@@ -93,11 +94,18 @@ func (s *Service) Import(input ImportInput) (Result, error) {
 	}
 	hashBytes := sha256.Sum256(input.Data)
 	hash := hex.EncodeToString(hashBytes[:])
-	if existing, err := s.App.FindFirstRecordByFilter("reconciliation_runs", "sha256 = {:hash} && status = 'completed'", dbx.Params{"hash": hash}); err == nil {
+	var existing *domain.ReconciliationRun
+	err := s.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		var findErr error
+		existing, findErr = uow.ReconciliationRuns().FindCompletedByHash(hash)
+		return findErr
+	})
+	if err == nil {
 		domainErr := domain.New("STATEMENT_ALREADY_IMPORTED", "this exact statement file was already imported", 409)
-		domainErr.Details = map[string]any{"runId": existing.Id}
+		domainErr.Details = map[string]any{"runId": existing.ID}
 		return Result{}, domainErr
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
 		return Result{}, err
 	}
 
@@ -112,194 +120,185 @@ func (s *Service) Import(input ImportInput) (Result, error) {
 		return Result{}, domain.New("STATEMENT_PARSE_FAILED", parseErr.Error(), 422)
 	}
 
-	result := Result{RunID: run.Id, Status: "completed"}
+	result := Result{RunID: run.ID, Status: "completed"}
 	seenRRN := map[string]int{}
-	err = s.App.RunInTransaction(func(tx core.App) error {
-		entryCollection, err := tx.FindCollectionByNameOrId("reconciliation_entries")
-		if err != nil {
-			return err
+	for start := 0; start < len(rows); start += ReconciliationBatchSize {
+		end := start + ReconciliationBatchSize
+		if end > len(rows) {
+			end = len(rows)
 		}
-		for _, row := range rows {
-			result.TotalRows++
-			entry := core.NewRecord(entryCollection)
-			entry.Set("run", run.Id)
-			entry.Set("row_number", row.RowNumber)
-			entry.Set("transaction_time", row.TransactionTime)
-			entry.Set("amount", row.AmountPaise)
-			entry.Set("rrn", row.RRN)
-			entry.Set("description", truncate(row.Description, 4096))
-			entry.Set("raw_row", row.Raw)
-
-			status, paymentID, note, candidateIDs, classifyErr := s.classify(tx, row, seenRRN, now)
-			if classifyErr != nil {
-				return classifyErr
-			}
-			entry.Set("status", status)
-			entry.Set("payment", paymentID)
-			entry.Set("notes", note)
-			if err := tx.Save(entry); err != nil {
-				return err
-			}
-
-			switch status {
-			case "matched":
-				result.MatchedRows++
-			case "unmatched":
-				result.UnmatchedRows++
-			case "duplicate":
-				result.DuplicateRows++
-			case "conflict":
-				result.ConflictRows++
-			case "invalid":
-				result.InvalidRows++
-			}
-
-			needsReview := status == "conflict" || (status == "unmatched" && (row.RRN != "" || strings.Contains(strings.ToLower(row.Description), "upi")))
-			if needsReview && s.Reviews != nil {
-				caseID, err := s.Reviews.OpenInApp(tx, reviews.OpenInput{
-					Kind: "reconciliation_conflict", Severity: severityForStatus(status),
-					ReconciliationEntryID: entry.Id, PaymentID: paymentID,
-					CandidatePaymentIDs: candidateIDs, Reason: note, OpenedAt: now,
-				})
-				if err != nil {
-					return err
-				}
-				if caseID != "" {
-					result.ReviewCases++
-				}
-			}
+		if err := s.persistRowsBatch(run.ID, rows[start:end], seenRRN, now, &result); err != nil {
+			s.failRun(run, err, now)
+			return Result{}, err
 		}
-
-		runRecord, err := tx.FindRecordById("reconciliation_runs", run.Id)
-		if err != nil {
-			return err
-		}
-		runRecord.Set("status", "completed")
-		runRecord.Set("total_rows", result.TotalRows)
-		runRecord.Set("matched_rows", result.MatchedRows)
-		runRecord.Set("unmatched_rows", result.UnmatchedRows)
-		runRecord.Set("duplicate_rows", result.DuplicateRows)
-		runRecord.Set("conflict_rows", result.ConflictRows)
-		runRecord.Set("invalid_rows", result.InvalidRows)
-		runRecord.Set("completed_at", now)
-		runRecord.Set("summary", result)
-		if err := tx.Save(runRecord); err != nil {
-			return err
-		}
-		if s.Audit != nil {
-			if err := s.Audit.RecordInApp(tx, audit.Entry{
-				Action: "reconciliation.import", Actor: input.Actor,
-				EntityType: "reconciliation_run", EntityID: run.Id,
-				Summary: "Imported bank statement for reconciliation", Details: result, OccurredAt: now,
-			}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
+	}
+	if err := s.completeRun(run.ID, input.Actor, now, result); err != nil {
 		s.failRun(run, err, now)
 		return Result{}, err
 	}
 	if result.ConflictRows > 0 && s.Alerts != nil {
 		_, _, _ = s.Alerts.Open(alerts.Input{
-			Kind: "reconciliation_conflict", Severity: "warning", DedupeKey: "reconciliation:" + run.Id,
+			Kind: "reconciliation_conflict", Severity: "warning", DedupeKey: "reconciliation:" + run.ID,
 			Message: fmt.Sprintf("Statement reconciliation found %d conflicting rows", result.ConflictRows), Details: result,
 		})
 	}
 	return result, nil
 }
 
-func (s *Service) createRun(input ImportInput, hash string, now time.Time) (*core.Record, error) {
-	collection, err := s.App.FindCollectionByNameOrId("reconciliation_runs")
+func (s *Service) persistRowsBatch(runID string, rows []statementRow, seenRRN map[string]int, now time.Time, result *Result) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	if len(rows) > ReconciliationBatchSize {
+		return fmt.Errorf("reconciliation batch exceeds %d rows", ReconciliationBatchSize)
+	}
+	delta := Result{}
+	err := s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		for _, row := range rows {
+			delta.TotalRows++
+			status, paymentID, note, candidateIDs, err := s.classify(uow, row, seenRRN, now)
+			if err != nil {
+				return err
+			}
+			entry := &domain.ReconciliationEntry{
+				RunID: runID, RowNumber: row.RowNumber, TransactionTime: row.TransactionTime,
+				AmountPaise: row.AmountPaise, RRN: row.RRN, Description: truncate(row.Description, 4096),
+				Status: status, PaymentID: paymentID, Notes: note, RawRow: row.Raw,
+			}
+			if err := uow.ReconciliationEntries().Create(entry); err != nil {
+				return err
+			}
+			switch status {
+			case "matched":
+				delta.MatchedRows++
+			case "unmatched":
+				delta.UnmatchedRows++
+			case "duplicate":
+				delta.DuplicateRows++
+			case "conflict":
+				delta.ConflictRows++
+			case "invalid":
+				delta.InvalidRows++
+			}
+			needsReview := status == "conflict" || (status == "unmatched" && (row.RRN != "" || strings.Contains(strings.ToLower(row.Description), "upi")))
+			if needsReview && s.Reviews != nil {
+				caseID, err := s.Reviews.Open(uow, reviews.OpenInput{
+					Kind: "reconciliation_conflict", Severity: severityForStatus(status),
+					ReconciliationEntryID: entry.ID, PaymentID: paymentID,
+					CandidatePaymentIDs: candidateIDs, Reason: note, OpenedAt: now,
+				})
+				if err != nil {
+					return err
+				}
+				if caseID != "" {
+					delta.ReviewCases++
+				}
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return nil, err
+		return err
 	}
-	record := core.NewRecord(collection)
-	record.Set("filename", truncate(input.Filename, 255))
-	record.Set("sha256", hash)
-	record.Set("status", "processing")
-	record.Set("created_by", input.Actor.ID)
-	record.Set("started_at", now)
-	if err := s.App.Save(record); err != nil {
-		return nil, err
-	}
-	return record, nil
+	addResult(result, delta)
+	return nil
 }
 
-func (s *Service) failRun(run *core.Record, cause error, now time.Time) {
+func (s *Service) completeRun(runID string, actor audit.Actor, now time.Time, result Result) error {
+	return s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		run, err := uow.ReconciliationRuns().Get(runID)
+		if err != nil {
+			return err
+		}
+		run.Status = "completed"
+		run.TotalRows, run.MatchedRows, run.UnmatchedRows = result.TotalRows, result.MatchedRows, result.UnmatchedRows
+		run.DuplicateRows, run.ConflictRows, run.InvalidRows = result.DuplicateRows, result.ConflictRows, result.InvalidRows
+		run.CompletedAt, run.Summary = now, result
+		if err := uow.ReconciliationRuns().Save(run); err != nil {
+			return err
+		}
+		if s.Audit != nil {
+			if err := s.Audit.RecordUoW(uow, audit.Entry{Action: "reconciliation.import", Actor: actor, EntityType: "reconciliation_run", EntityID: runID, Summary: "Imported bank statement for reconciliation", Details: result, OccurredAt: now}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func addResult(target *Result, delta Result) {
+	if target == nil {
+		return
+	}
+	target.TotalRows += delta.TotalRows
+	target.MatchedRows += delta.MatchedRows
+	target.UnmatchedRows += delta.UnmatchedRows
+	target.DuplicateRows += delta.DuplicateRows
+	target.ConflictRows += delta.ConflictRows
+	target.InvalidRows += delta.InvalidRows
+	target.ReviewCases += delta.ReviewCases
+}
+
+func (s *Service) createRun(input ImportInput, hash string, now time.Time) (*domain.ReconciliationRun, error) {
+	run := &domain.ReconciliationRun{Filename: truncate(input.Filename, 255), SHA256: hash, Status: "processing", CreatedBy: input.Actor.ID, StartedAt: now}
+	if err := s.Store.Write(context.Background(), func(uow store.UnitOfWork) error { return uow.ReconciliationRuns().Create(run) }); err != nil {
+		return nil, err
+	}
+	return run, nil
+}
+
+func (s *Service) failRun(run *domain.ReconciliationRun, cause error, now time.Time) {
 	if run == nil {
 		return
 	}
-	record, err := s.App.FindRecordById("reconciliation_runs", run.Id)
-	if err != nil {
-		return
-	}
-	record.Set("status", "failed")
-	record.Set("error", truncate(cause.Error(), 4096))
-	record.Set("completed_at", now)
-	_ = s.App.Save(record)
+	_ = s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		stored, err := uow.ReconciliationRuns().Get(run.ID)
+		if err != nil {
+			return err
+		}
+		stored.Status, stored.Error, stored.CompletedAt = "failed", truncate(cause.Error(), 4096), now
+		return uow.ReconciliationRuns().Save(stored)
+	})
 }
 
-func (s *Service) classify(app core.App, row statementRow, seenRRN map[string]int, now time.Time) (status, paymentID, note string, candidateIDs []string, err error) {
+func (s *Service) classify(uow store.UnitOfWork, row statementRow, seenRRN map[string]int, now time.Time) (status, paymentID, note string, candidateIDs []string, err error) {
 	if row.InvalidReason != "" || row.AmountPaise <= 0 {
 		return "invalid", "", row.InvalidReason, nil, nil
 	}
+	paymentsRepo := uow.Payments()
 	if row.RRN != "" {
 		if firstRow, ok := seenRRN[row.RRN]; ok {
 			return "duplicate", "", fmt.Sprintf("Duplicate bank reference already appeared on row %d", firstRow), nil, nil
 		}
 		seenRRN[row.RRN] = row.RowNumber
-		existing, findErr := app.FindFirstRecordByData("payments", "rrn", row.RRN)
+		existing, findErr := paymentsRepo.FindByEvidenceReference(domain.EvidenceReferenceRRN, row.RRN)
 		if findErr == nil {
-			if existing.GetString("payment_account") != "kotak" {
-				return "conflict", existing.Id, "Bank reference belongs to a non-Kotak payment", []string{existing.Id}, nil
+			if existing.Account != domain.PaymentAccountKotak {
+				return "conflict", existing.ID, "Bank reference belongs to a non-Kotak payment", []string{existing.ID}, nil
 			}
-			if int64(existing.GetInt("payable_amount")) == row.AmountPaise {
-				return "matched", existing.Id, "Exact amount and bank reference match", []string{existing.Id}, nil
+			if existing.PayablePaise == row.AmountPaise {
+				return "matched", existing.ID, "Exact amount and bank reference match", []string{existing.ID}, nil
 			}
-			return "conflict", existing.Id, "Bank reference exists in PayGate with a different amount", []string{existing.Id}, nil
+			return "conflict", existing.ID, "Bank reference exists in PayGate with a different amount", []string{existing.ID}, nil
 		}
 		if !errors.Is(findErr, sql.ErrNoRows) {
 			return "", "", "", nil, findErr
 		}
 	}
-
-	candidates, findErr := reconciliationCandidates(app, row.AmountPaise, row.TransactionTime, now)
+	candidates, findErr := paymentsRepo.FindReconciliationCandidates(domain.PaymentAccountKotak, row.AmountPaise, row.TransactionTime, now, 10)
 	if findErr != nil {
 		return "", "", "", nil, findErr
 	}
 	for _, candidate := range candidates {
-		candidateIDs = append(candidateIDs, candidate.Id)
+		candidateIDs = append(candidateIDs, candidate.ID)
 	}
 	if len(candidates) == 1 {
-		return "conflict", candidates[0].Id, "Exact amount matches one PayGate payment, but the bank reference was not linked", candidateIDs, nil
+		return "conflict", candidates[0].ID, "Exact amount matches one PayGate payment, but the bank reference was not linked", candidateIDs, nil
 	}
 	if len(candidates) > 1 {
 		return "conflict", "", "Multiple historical PayGate payments are plausible for this statement row", candidateIDs, nil
 	}
 	return "unmatched", "", "No PayGate payment matches this statement credit", nil, nil
-}
-
-func reconciliationCandidates(app core.App, amount int64, transactionTime, now time.Time) ([]*core.Record, error) {
-	if amount <= 0 {
-		return nil, nil
-	}
-	if !transactionTime.IsZero() {
-		return app.FindRecordsByFilter(
-			"payments",
-			"payment_account = 'kotak' && payable_amount = {:amount} && created_at <= {:createdBefore} && reuse_after >= {:at}",
-			"-created_at", 10, 0,
-			dbx.Params{
-				"amount": amount, "at": formatDate(transactionTime),
-				"createdBefore": formatDate(transactionTime.Add(payments.EvidenceTimestampTolerance)),
-			},
-		)
-	}
-	return app.FindRecordsByFilter(
-		"payments", "payment_account = 'kotak' && payable_amount = {:amount} && reuse_after > {:now}",
-		"-created_at", 10, 0, dbx.Params{"amount": amount, "now": formatDate(now)},
-	)
 }
 
 func parseStatement(filename string, data []byte, location *time.Location) ([]statementRow, error) {
@@ -589,10 +588,6 @@ func severityForStatus(status string) string {
 		return "critical"
 	}
 	return "warning"
-}
-
-func formatDate(value time.Time) string {
-	return value.UTC().Format("2006-01-02 15:04:05.000Z")
 }
 
 func truncate(value string, max int) string {

@@ -16,10 +16,11 @@ import (
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/config"
-	"github.com/pocketbase/dbx"
+	"github.com/Phloraxx/payment-api/internal/deliveryqueue"
+	"github.com/Phloraxx/payment-api/internal/domain"
+	"github.com/Phloraxx/payment-api/internal/store"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tools/security"
-	"github.com/pocketbase/pocketbase/tools/types"
 )
 
 const maxAttempts = 8
@@ -45,80 +46,83 @@ func NewService(app core.App, cfg config.Config) *Service {
 	}
 }
 
+func (s *Service) queue() deliveryqueue.Queue {
+	return deliveryqueue.Queue{
+		App: s.App, Collection: "webhook_deliveries", MaxAttempts: maxAttempts,
+		Fields: deliveryqueue.Fields{
+			Status: "status", Attempts: "attempts", NextAttemptAt: "next_attempt_at",
+			LockedAt: "locked_at", LastAttemptAt: "last_attempt_at", DeliveredAt: "delivered_at",
+			LastError: "last_error", ResponseCode: "response_code",
+		},
+		RetryDelays: []time.Duration{time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour, 6 * time.Hour, 12 * time.Hour, 24 * time.Hour},
+		StaleAfter:  2 * time.Minute, ExhaustedAfter: 365 * 24 * time.Hour, ErrorMax: 4000,
+		StaleMessage: "recovered stale delivery lease after restart",
+	}
+}
+
 func (s *Service) Enabled() bool {
 	return s != nil && strings.TrimSpace(s.Config.OutgoingWebhookURL) != "" && s.Config.OutgoingWebhookSecret != ""
 }
 
-func (s *Service) Schedule(app core.App, event string, payment *core.Record, at time.Time) error {
+func (s *Service) SchedulePayment(uow store.UnitOfWork, event string, payment *domain.Payment, at time.Time) error {
 	if payment == nil {
 		return errors.New("payment is required for webhook scheduling")
 	}
-	return s.schedule(app, event, payment, nil, at)
-}
-
-func (s *Service) ScheduleRefund(app core.App, event string, payment, refund *core.Record, at time.Time) error {
-	if payment == nil || refund == nil {
-		return errors.New("payment and refund are required for refund webhook scheduling")
-	}
-	return s.schedule(app, event, payment, refund, at)
-}
-
-func (s *Service) schedule(app core.App, event string, payment, refund *core.Record, at time.Time) error {
 	if !s.Enabled() {
 		return nil
 	}
-	collection, err := app.FindCollectionByNameOrId("webhook_deliveries")
-	if err != nil {
-		return err
-	}
 	eventID := "evt_" + security.RandomString(24)
-	data := map[string]any{
-		"payment": map[string]any{
-			"id":                   payment.Id,
-			"paymentAccount":       payment.GetString("payment_account"),
-			"requestedAmountPaise": payment.GetInt("requested_amount"),
-			"payableAmountPaise":   payment.GetInt("payable_amount"),
-			"status":               payment.GetString("status"),
-			"rrn":                  payment.GetString("rrn"),
-			"upiId":                payment.GetString("upi_id"),
-			"payerName":            payment.GetString("payer_name"),
-			"paidAt":               payment.GetDateTime("paid_at").String(),
-			"externalId":           payment.GetString("external_id"),
-		},
-	}
-	if refund != nil {
-		data["refund"] = map[string]any{
-			"id":          refund.Id,
-			"amountPaise": refund.GetInt("amount"),
-			"status":      refund.GetString("status"),
-			"reason":      refund.GetString("reason"),
-			"reference":   refund.GetString("reference"),
-			"externalId":  refund.GetString("external_id"),
-			"requestedAt": refund.GetDateTime("requested_at").String(),
-			"completedAt": refund.GetDateTime("completed_at").String(),
-		}
+	paidAt := ""
+	if !payment.PaidAt.IsZero() {
+		paidAt = payment.PaidAt.UTC().Format(time.RFC3339Nano)
 	}
 	body, err := json.Marshal(map[string]any{
-		"id": eventID, "type": event,
-		"createdAt": at.UTC().Format(time.RFC3339Nano),
-		"data":      data,
+		"id": eventID, "type": event, "createdAt": at.UTC().Format(time.RFC3339Nano),
+		"data": map[string]any{"payment": map[string]any{
+			"id": payment.ID, "paymentAccount": payment.Account,
+			"requestedAmountPaise": payment.RequestedPaise, "payableAmountPaise": payment.PayablePaise,
+			"status": payment.Status, "rrn": payment.RRN, "upiId": payment.UPIId,
+			"payerName": payment.PayerName, "paidAt": paidAt, "externalId": payment.ExternalID,
+		}},
 	})
 	if err != nil {
 		return fmt.Errorf("marshal webhook payload: %w", err)
 	}
-	record := core.NewRecord(collection)
-	record.Set("event_id", eventID)
-	record.Set("event", event)
-	record.Set("payment", payment.Id)
-	if refund != nil {
-		record.Set("refund", refund.Id)
+	return uow.Outbox().Enqueue(store.OutboxDelivery{
+		EventID: eventID, Event: event, PaymentID: payment.ID,
+		URL: s.Config.OutgoingWebhookURL, Body: string(body), CreatedAt: at.UTC(),
+	})
+}
+
+func (s *Service) ScheduleRefundPayment(uow store.UnitOfWork, event string, payment *domain.Payment, refund *domain.Refund, at time.Time) error {
+	if payment == nil || refund == nil {
+		return errors.New("payment and refund are required for refund webhook scheduling")
 	}
-	record.Set("url", s.Config.OutgoingWebhookURL)
-	record.Set("body", string(body))
-	record.Set("attempts", 0)
-	record.Set("status", "pending")
-	record.Set("next_attempt_at", at.UTC())
-	return app.Save(record)
+	if !s.Enabled() {
+		return nil
+	}
+	eventID := "evt_" + security.RandomString(24)
+	paidAt, requestedAt, completedAt := "", "", ""
+	if !payment.PaidAt.IsZero() {
+		paidAt = payment.PaidAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !refund.RequestedAt.IsZero() {
+		requestedAt = refund.RequestedAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !refund.CompletedAt.IsZero() {
+		completedAt = refund.CompletedAt.UTC().Format(time.RFC3339Nano)
+	}
+	body, err := json.Marshal(map[string]any{
+		"id": eventID, "type": event, "createdAt": at.UTC().Format(time.RFC3339Nano),
+		"data": map[string]any{
+			"payment": map[string]any{"id": payment.ID, "paymentAccount": payment.Account, "requestedAmountPaise": payment.RequestedPaise, "payableAmountPaise": payment.PayablePaise, "status": payment.Status, "rrn": payment.RRN, "upiId": payment.UPIId, "payerName": payment.PayerName, "paidAt": paidAt, "externalId": payment.ExternalID},
+			"refund":  map[string]any{"id": refund.ID, "amountPaise": refund.AmountPaise, "status": refund.Status, "reason": refund.Reason, "reference": refund.Reference, "externalId": refund.ExternalID, "requestedAt": requestedAt, "completedAt": completedAt},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal webhook payload: %w", err)
+	}
+	return uow.Outbox().Enqueue(store.OutboxDelivery{EventID: eventID, Event: event, PaymentID: payment.ID, RefundID: refund.ID, URL: s.Config.OutgoingWebhookURL, Body: string(body), CreatedAt: at.UTC()})
 }
 
 func (s *Service) Wake() {
@@ -156,17 +160,11 @@ func (s *Service) SendPending(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 	now := s.now()
-	if err := s.recoverStale(now); err != nil {
+	queue := s.queue()
+	if err := queue.RecoverStale(now, 50); err != nil {
 		return 0, err
 	}
-	records, err := s.App.FindRecordsByFilter(
-		"webhook_deliveries",
-		"(status = 'pending' || status = 'failed') && next_attempt_at <= {:now}",
-		"next_attempt_at,created",
-		50,
-		0,
-		dbx.Params{"now": filterDate(now)},
-	)
+	records, err := queue.Due(now, 50)
 	if err != nil {
 		return 0, err
 	}
@@ -175,7 +173,7 @@ func (s *Service) SendPending(ctx context.Context) (int, error) {
 		if err := ctx.Err(); err != nil {
 			return processed, err
 		}
-		claimed, err := s.claim(record.Id, now)
+		claimed, err := queue.Claim(record.Id, now)
 		if err != nil {
 			s.logger().Warn("failed to claim webhook delivery", "id", record.Id, "error", err)
 			continue
@@ -187,33 +185,6 @@ func (s *Service) SendPending(ctx context.Context) (int, error) {
 		processed++
 	}
 	return processed, nil
-}
-
-func (s *Service) claim(id string, now time.Time) (*core.Record, error) {
-	var claimed *core.Record
-	err := s.App.RunInTransaction(func(tx core.App) error {
-		record, err := tx.FindRecordById("webhook_deliveries", id)
-		if err != nil {
-			return err
-		}
-		status := record.GetString("status")
-		if status != "pending" && status != "failed" {
-			return nil
-		}
-		if next := record.GetDateTime("next_attempt_at").Time(); !next.IsZero() && next.After(now) {
-			return nil
-		}
-		record.Set("status", "sending")
-		record.Set("locked_at", now)
-		record.Set("last_attempt_at", now)
-		record.Set("attempts", record.GetInt("attempts")+1)
-		if err := tx.Save(record); err != nil {
-			return err
-		}
-		claimed = record.Clone()
-		return nil
-	})
-	return claimed, err
 }
 
 func (s *Service) deliver(ctx context.Context, record *core.Record) {
@@ -242,64 +213,9 @@ func (s *Service) deliver(ctx context.Context, record *core.Record) {
 			}
 		}
 	}
-	if finishErr := s.finish(record.Id, statusCode, err); finishErr != nil {
+	if finishErr := s.queue().Finish(record.Id, s.now(), statusCode, err, nil); finishErr != nil {
 		s.logger().Error("failed to persist webhook result", "id", record.Id, "error", finishErr)
 	}
-}
-
-func (s *Service) finish(id string, statusCode int, deliveryErr error) error {
-	now := s.now()
-	return s.App.RunInTransaction(func(tx core.App) error {
-		record, err := tx.FindRecordById("webhook_deliveries", id)
-		if err != nil {
-			return err
-		}
-		record.Set("locked_at", "")
-		record.Set("response_code", statusCode)
-		if deliveryErr == nil {
-			record.Set("status", "delivered")
-			record.Set("delivered_at", now)
-			record.Set("last_error", "")
-			return tx.Save(record)
-		}
-
-		attempts := record.GetInt("attempts")
-		record.Set("last_error", truncate(deliveryErr.Error(), 4000))
-		if attempts >= maxAttempts {
-			record.Set("status", "exhausted")
-			// Keep a valid date for the required field; exhausted records aren't queried.
-			record.Set("next_attempt_at", now.Add(365*24*time.Hour))
-		} else {
-			record.Set("status", "failed")
-			record.Set("next_attempt_at", now.Add(retryDelay(attempts)))
-		}
-		return tx.Save(record)
-	})
-}
-
-func (s *Service) recoverStale(now time.Time) error {
-	stale := now.Add(-2 * time.Minute)
-	records, err := s.App.FindRecordsByFilter(
-		"webhook_deliveries",
-		"status = 'sending' && locked_at < {:stale}",
-		"locked_at",
-		50,
-		0,
-		dbx.Params{"stale": filterDate(stale)},
-	)
-	if err != nil {
-		return err
-	}
-	for _, record := range records {
-		record.Set("status", "failed")
-		record.Set("locked_at", "")
-		record.Set("next_attempt_at", now)
-		record.Set("last_error", "recovered stale delivery lease after restart")
-		if err := s.App.Save(record); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func Sign(secret, timestamp string, body []byte) string {
@@ -308,26 +224,6 @@ func Sign(secret, timestamp string, body []byte) string {
 	_, _ = mac.Write([]byte("."))
 	_, _ = mac.Write(body)
 	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func retryDelay(attempt int) time.Duration {
-	delays := []time.Duration{time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour, 6 * time.Hour, 12 * time.Hour, 24 * time.Hour}
-	index := attempt - 1
-	if index < 0 {
-		index = 0
-	}
-	if index >= len(delays) {
-		return delays[len(delays)-1]
-	}
-	return delays[index]
-}
-
-func filterDate(t time.Time) string {
-	value, err := types.ParseDateTime(t.UTC())
-	if err != nil {
-		return t.UTC().Format(time.RFC3339Nano)
-	}
-	return value.String()
 }
 
 func (s *Service) now() time.Time {
@@ -358,11 +254,4 @@ func (s *Service) logger() *slog.Logger {
 		return slog.Default()
 	}
 	return s.Logger
-}
-
-func truncate(value string, max int) string {
-	if len(value) <= max {
-		return value
-	}
-	return value[:max]
 }

@@ -70,6 +70,7 @@ func newRazorpayLiveAPIFixture(t *testing.T, enabled bool) *razorpayLiveAPIFixtu
 		RazorpayLiveEnabled: enabled, RazorpayLiveKeyID: "rzp_live_api",
 		RazorpayLiveKeySecret: "checkout-secret-123456", RazorpayLiveWebhookSecret: "webhook-secret-123456789012",
 		RazorpayLiveDisplayName: "PayGate Live",
+		CheckoutAllowedOrigins:  []string{checkoutOrigin},
 	}
 	paymentService := payments.NewService(app, cfg, nil)
 	smsService := sms.NewService(app, paymentService)
@@ -251,5 +252,22 @@ func TestRazorpayLiveRoutesAcceptServerAPIKey(t *testing.T) {
 	res, body = fixture.apiKeyRequest(t, http.MethodGet, "/api/razorpay/live/orders/"+localID, "", nil)
 	if res.StatusCode != http.StatusOK || !strings.Contains(body, `"amountPaise":100`) {
 		t.Fatalf("get status=%d body=%s", res.StatusCode, body)
+	}
+}
+
+func TestCheckoutRazorpayLiveKeepsOneRupeePilot(t *testing.T) {
+	fixture := newRazorpayLiveAPIFixture(t, true)
+	headers := map[string]string{
+		"Origin":          checkoutOrigin,
+		"Idempotency-Key": "40000000-0000-4000-8000-000000000001",
+	}
+	res, body := fixture.request(t, http.MethodPost, "/api/checkout/v2/razorpay/live/orders", `{"amount":2}`, false, headers)
+	if res.StatusCode != http.StatusBadRequest || !strings.Contains(body, "exactly ₹1") {
+		t.Fatalf("live non-pilot amount status=%d body=%s", res.StatusCode, body)
+	}
+	headers["Idempotency-Key"] = "40000000-0000-4000-8000-000000000002"
+	res, body = fixture.request(t, http.MethodPost, "/api/checkout/v2/razorpay/live/orders", `{"amount":1}`, false, headers)
+	if res.StatusCode != http.StatusCreated || !strings.Contains(body, `"amountPaise":100`) || !strings.Contains(body, `"keyId":"rzp_live_api"`) {
+		t.Fatalf("live pilot create status=%d body=%s", res.StatusCode, body)
 	}
 }

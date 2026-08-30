@@ -1,13 +1,14 @@
 package androidrelay
 
 import (
+	"context"
+	"database/sql"
+	"errors"
 	"strings"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/domain"
-	"github.com/pocketbase/dbx"
-	"github.com/pocketbase/pocketbase/core"
-	"github.com/pocketbase/pocketbase/tools/types"
+	"github.com/Phloraxx/payment-api/internal/store"
 )
 
 const defaultStaleAfter = time.Hour
@@ -19,6 +20,10 @@ type HeartbeatInput struct {
 	DeviceModel                string `json:"deviceModel"`
 	NotificationAccess         bool   `json:"notificationAccess"`
 	ListenerConnected          bool   `json:"listenerConnected"`
+	BatteryOptimizationExempt  *bool  `json:"batteryOptimizationExempt"`
+	PowerSaveMode              *bool  `json:"powerSaveMode"`
+	BackgroundRestricted       *bool  `json:"backgroundRestricted"`
+	ForegroundService          *bool  `json:"foregroundService"`
 	PendingCount               int    `json:"pendingCount"`
 	FailedCount                int    `json:"failedCount"`
 	LastSuccessfulDeliveryAtMs int64  `json:"lastSuccessfulDeliveryAtMs"`
@@ -32,45 +37,52 @@ type HeartbeatResult struct {
 }
 
 type DeviceStatus struct {
-	ID                   string `json:"id"`
-	DeviceID             string `json:"deviceId"`
-	Name                 string `json:"name"`
-	Enabled              bool   `json:"enabled"`
-	AppVersion           string `json:"appVersion"`
-	AndroidVersion       string `json:"androidVersion"`
-	DeviceModel          string `json:"deviceModel"`
-	LastSeenAt           any    `json:"lastSeenAt"`
-	LastHeartbeatAt      any    `json:"lastHeartbeatAt"`
-	HeartbeatGraceUntil  any    `json:"heartbeatGraceUntil"`
-	NotificationAccess   bool   `json:"notificationAccess"`
-	ListenerConnected    bool   `json:"listenerConnected"`
-	PendingCount         int    `json:"pendingCount"`
-	FailedCount          int    `json:"failedCount"`
-	LastClientError      string `json:"lastClientError,omitempty"`
-	LastDeliveryAt       any    `json:"lastDeliveryAt"`
-	LastEventAt          any    `json:"lastEventAt"`
-	LastMatchedAt        any    `json:"lastMatchedAt"`
-	LastMatchedPaymentID string `json:"lastMatchedPaymentId,omitempty"`
-	RecentErrorCount     int64  `json:"recentErrorCount"`
-	Active               bool   `json:"active"`
+	ID                        string `json:"id"`
+	DeviceID                  string `json:"deviceId"`
+	Name                      string `json:"name"`
+	Enabled                   bool   `json:"enabled"`
+	AppVersion                string `json:"appVersion"`
+	AndroidVersion            string `json:"androidVersion"`
+	DeviceModel               string `json:"deviceModel"`
+	LastSeenAt                any    `json:"lastSeenAt"`
+	LastHeartbeatAt           any    `json:"lastHeartbeatAt"`
+	HeartbeatGraceUntil       any    `json:"heartbeatGraceUntil"`
+	NotificationAccess        bool   `json:"notificationAccess"`
+	ListenerConnected         bool   `json:"listenerConnected"`
+	PowerHealthReported       bool   `json:"powerHealthReported"`
+	BatteryOptimizationExempt bool   `json:"batteryOptimizationExempt"`
+	PowerSaveMode             bool   `json:"powerSaveMode"`
+	BackgroundRestricted      bool   `json:"backgroundRestricted"`
+	ForegroundService         bool   `json:"foregroundService"`
+	PowerHealthy              bool   `json:"powerHealthy"`
+	PendingCount              int    `json:"pendingCount"`
+	FailedCount               int    `json:"failedCount"`
+	LastClientError           string `json:"lastClientError,omitempty"`
+	LastDeliveryAt            any    `json:"lastDeliveryAt"`
+	LastEventAt               any    `json:"lastEventAt"`
+	LastMatchedAt             any    `json:"lastMatchedAt"`
+	LastMatchedPaymentID      string `json:"lastMatchedPaymentId,omitempty"`
+	RecentErrorCount          int64  `json:"recentErrorCount"`
+	Active                    bool   `json:"active"`
 }
 
 type Status struct {
-	Ready              bool  `json:"ready"`
-	EnabledDevices     int   `json:"enabledDevices"`
-	ActiveDevices      int   `json:"activeDevices"`
-	LegacyGraceDevices int   `json:"legacyGraceDevices"`
-	StaleAfterSeconds  int64 `json:"staleAfterSeconds"`
-	LastSeenAt         any   `json:"lastSeenAt"`
-	LastHeartbeatAt    any   `json:"lastHeartbeatAt"`
-	LastEventAt        any   `json:"lastEventAt"`
-	LastMatchedAt      any   `json:"lastMatchedAt"`
-	RecentErrorCount   int64 `json:"recentErrorCount"`
-	PendingQueueCount  int   `json:"pendingQueueCount"`
-	FailedQueueCount   int   `json:"failedQueueCount"`
+	Ready                 bool  `json:"ready"`
+	EnabledDevices        int   `json:"enabledDevices"`
+	ActiveDevices         int   `json:"activeDevices"`
+	LegacyGraceDevices    int   `json:"legacyGraceDevices"`
+	StaleAfterSeconds     int64 `json:"staleAfterSeconds"`
+	LastSeenAt            any   `json:"lastSeenAt"`
+	LastHeartbeatAt       any   `json:"lastHeartbeatAt"`
+	LastEventAt           any   `json:"lastEventAt"`
+	LastMatchedAt         any   `json:"lastMatchedAt"`
+	RecentErrorCount      int64 `json:"recentErrorCount"`
+	PendingQueueCount     int   `json:"pendingQueueCount"`
+	FailedQueueCount      int   `json:"failedQueueCount"`
+	PowerUnhealthyDevices int   `json:"powerUnhealthyDevices"`
 }
 
-func (s *Service) Heartbeat(device *core.Record, in HeartbeatInput) (HeartbeatResult, error) {
+func (s *Service) Heartbeat(device *domain.RelayDevice, in HeartbeatInput) (HeartbeatResult, error) {
 	if device == nil {
 		return HeartbeatResult{}, domain.New("UNKNOWN_RELAY_DEVICE", "relay device is not enrolled or is disabled", 401)
 	}
@@ -84,52 +96,70 @@ func (s *Service) Heartbeat(device *core.Record, in HeartbeatInput) (HeartbeatRe
 		return HeartbeatResult{}, domain.New("INVALID_RELAY_HEARTBEAT", "last successful delivery time is invalid", 400)
 	}
 	now := s.now()
-	if in.LastSuccessfulDeliveryAtMs > 0 {
-		lastDelivery := time.UnixMilli(in.LastSuccessfulDeliveryAtMs)
-		if lastDelivery.After(now.Add(5 * time.Minute)) {
-			return HeartbeatResult{}, domain.New("INVALID_RELAY_HEARTBEAT", "last successful delivery time is in the future", 400)
+	var result HeartbeatResult
+	err := s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		current, err := uow.Relay().Get(device.ID)
+		if err != nil || current == nil || !current.Enabled {
+			return domain.New("UNKNOWN_RELAY_DEVICE", "relay device is not enrolled or is disabled", 401)
 		}
-		device.Set("last_client_delivery_at", lastDelivery)
-	}
-	device.Set("app_version", trimMax(in.AppVersion, 64))
-	device.Set("android_version", trimMax(in.AndroidVersion, 64))
-	device.Set("device_model", trimMax(in.DeviceModel, 255))
-	device.Set("notification_access", in.NotificationAccess)
-	device.Set("listener_connected", in.ListenerConnected)
-	device.Set("pending_count", in.PendingCount)
-	device.Set("failed_count", in.FailedCount)
-	device.Set("last_client_error", trimMax(in.LastClientError, 1024))
-	device.Set("last_heartbeat_at", now)
-	device.Set("last_seen_at", now)
-	if err := s.App.Save(device); err != nil {
-		return HeartbeatResult{}, err
-	}
-	return HeartbeatResult{DeviceID: device.GetString("device_id"), Enabled: device.GetBool("enabled"), ServerTime: now.Format(time.RFC3339Nano)}, nil
+		if in.LastSuccessfulDeliveryAtMs > 0 {
+			lastDelivery := time.UnixMilli(in.LastSuccessfulDeliveryAtMs)
+			if lastDelivery.After(now.Add(5 * time.Minute)) {
+				return domain.New("INVALID_RELAY_HEARTBEAT", "last successful delivery time is in the future", 400)
+			}
+			current.LastClientDeliveryAt = lastDelivery
+		}
+		current.AppVersion = trimMax(in.AppVersion, 64)
+		current.AndroidVersion = trimMax(in.AndroidVersion, 64)
+		current.DeviceModel = trimMax(in.DeviceModel, 255)
+		current.NotificationAccess = in.NotificationAccess
+		current.ListenerConnected = in.ListenerConnected
+		if in.BatteryOptimizationExempt != nil {
+			current.BatteryOptimizationExempt = *in.BatteryOptimizationExempt
+		}
+		if in.PowerSaveMode != nil {
+			current.PowerSaveMode = *in.PowerSaveMode
+		}
+		if in.BackgroundRestricted != nil {
+			current.BackgroundRestricted = *in.BackgroundRestricted
+		}
+		if in.ForegroundService != nil {
+			current.ForegroundServiceActive = *in.ForegroundService
+		}
+		current.PowerHealthReported = in.BatteryOptimizationExempt != nil && in.PowerSaveMode != nil && in.BackgroundRestricted != nil && in.ForegroundService != nil
+		current.PendingCount = in.PendingCount
+		current.FailedCount = in.FailedCount
+		current.LastClientError = trimMax(in.LastClientError, 1024)
+		current.LastHeartbeatAt = now
+		current.LastSeenAt = now
+		if err := uow.Relay().Save(current); err != nil {
+			return err
+		}
+		result = HeartbeatResult{DeviceID: current.DeviceID, Enabled: current.Enabled, ServerTime: now.Format(time.RFC3339Nano)}
+		return nil
+	})
+	return result, err
 }
 
 func (s *Service) Ready(staleAfter time.Duration) (bool, error) {
-	return s.ReadyInApp(s.App, staleAfter)
+	var ready bool
+	err := s.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		var err error
+		ready, err = s.ReadyUoW(uow, staleAfter)
+		return err
+	})
+	return ready, err
 }
 
-func (s *Service) ReadyInApp(app core.App, staleAfter time.Duration) (bool, error) {
+func (s *Service) ReadyUoW(uow store.UnitOfWork, staleAfter time.Duration) (bool, error) {
 	staleAfter = normalizeStaleAfter(staleAfter)
 	now := s.now()
-	cutoff := now.Add(-staleAfter)
-	devices, err := app.FindRecordsByFilter("relay_devices", "enabled = true", "-last_seen_at", 100, 0)
+	devices, err := uow.Relay().EnabledDevices(100)
 	if err != nil {
 		return false, err
 	}
 	for _, device := range devices {
-		heartbeat := device.GetDateTime("last_heartbeat_at").Time()
-		if heartbeat.IsZero() {
-			graceUntil := device.GetDateTime("heartbeat_grace_until").Time()
-			if !graceUntil.IsZero() && now.Before(graceUntil) {
-				return true, nil
-			}
-			continue
-		}
-		seen := device.GetDateTime("last_seen_at").Time()
-		if !seen.IsZero() && !seen.Before(cutoff) && device.GetBool("notification_access") && device.GetBool("listener_connected") {
+		if device.Ready(now, staleAfter) {
 			return true, nil
 		}
 	}
@@ -139,138 +169,129 @@ func (s *Service) ReadyInApp(app core.App, staleAfter time.Duration) (bool, erro
 func (s *Service) Status(staleAfter time.Duration) (Status, error) {
 	staleAfter = normalizeStaleAfter(staleAfter)
 	now := s.now()
-	cutoff := now.Add(-staleAfter)
-	devices, err := s.App.FindRecordsByFilter("relay_devices", "enabled = true", "-last_seen_at", 0, 0)
-	if err != nil {
-		return Status{}, err
-	}
-	status := Status{EnabledDevices: len(devices), StaleAfterSeconds: int64(staleAfter / time.Second)}
-	for _, device := range devices {
-		seen := device.GetDateTime("last_seen_at").Time()
-		heartbeat := device.GetDateTime("last_heartbeat_at").Time()
-		if status.LastSeenAt == nil && !seen.IsZero() {
-			status.LastSeenAt = timeValue(seen)
+	var status Status
+	err := s.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		devices, err := uow.Relay().All(100)
+		if err != nil {
+			return err
 		}
-		if status.LastHeartbeatAt == nil && !heartbeat.IsZero() {
-			status.LastHeartbeatAt = timeValue(heartbeat)
-		}
-		// Existing v0.2 devices get a bounded migration grace so API deployment
-		// cannot strand checkout before the phone is upgraded. New enrollments do
-		// not get this grace. Once any heartbeat is received, normal stale/listener
-		// readiness applies immediately.
-		if heartbeat.IsZero() {
-			graceUntil := device.GetDateTime("heartbeat_grace_until").Time()
-			if !graceUntil.IsZero() && now.Before(graceUntil) {
+		status.StaleAfterSeconds = int64(staleAfter / time.Second)
+		for _, device := range devices {
+			if !device.Enabled {
+				continue
+			}
+			status.EnabledDevices++
+			if status.LastSeenAt == nil && !device.LastSeenAt.IsZero() {
+				status.LastSeenAt = timeValue(device.LastSeenAt)
+			}
+			if status.LastHeartbeatAt == nil && !device.LastHeartbeatAt.IsZero() {
+				status.LastHeartbeatAt = timeValue(device.LastHeartbeatAt)
+			}
+			health := device.Health()
+			if health.LegacyGraceActive(now) || health.PowerTelemetryGraceActive(now, staleAfter) {
 				status.ActiveDevices++
 				status.LegacyGraceDevices++
+			} else if health.CurrentReady(now, staleAfter) {
+				status.ActiveDevices++
 			}
-		} else if !seen.IsZero() && !seen.Before(cutoff) && device.GetBool("notification_access") && device.GetBool("listener_connected") {
-			status.ActiveDevices++
+			if !health.PowerReady() {
+				status.PowerUnhealthyDevices++
+			}
+			status.PendingQueueCount += device.PendingCount
+			status.FailedQueueCount += device.FailedCount
 		}
-		status.PendingQueueCount += device.GetInt("pending_count")
-		status.FailedQueueCount += device.GetInt("failed_count")
-	}
-	status.Ready = status.ActiveDevices > 0
-
-	if latest, findErr := s.App.FindRecordsByFilter("relay_events", "", "-created", 1, 0); findErr == nil && len(latest) == 1 {
-		status.LastEventAt = timeValue(latest[0].GetDateTime("created").Time())
-	} else if findErr != nil {
-		return Status{}, findErr
-	}
-	if matched, findErr := s.App.FindRecordsByFilter("relay_events", "matched_payment != ''", "-created", 1, 0); findErr == nil && len(matched) == 1 {
-		status.LastMatchedAt = timeValue(matched[0].GetDateTime("created").Time())
-	} else if findErr != nil {
-		return Status{}, findErr
-	}
-	errorCutoff := filterDate(now.Add(-24 * time.Hour))
-	errorCount, err := s.App.CountRecords("relay_events", dbx.NewExp("processing_status = 'error' AND created >= {:cutoff}", dbx.Params{"cutoff": errorCutoff}))
-	if err != nil {
-		return Status{}, err
-	}
-	status.RecentErrorCount = errorCount
-	return status, nil
+		status.Ready = status.ActiveDevices > 0
+		if latest, err := uow.RelayEvents().Latest(""); err == nil {
+			status.LastEventAt = timeValue(latest.CreatedAt)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if matched, err := uow.RelayEvents().LatestMatched(""); err == nil {
+			status.LastMatchedAt = timeValue(matched.CreatedAt)
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		count, err := uow.RelayEvents().CountErrorsSince("", now.Add(-24*time.Hour))
+		if err != nil {
+			return err
+		}
+		status.RecentErrorCount = count
+		return nil
+	})
+	return status, err
 }
 
 func (s *Service) Devices(staleAfter time.Duration) ([]DeviceStatus, error) {
 	staleAfter = normalizeStaleAfter(staleAfter)
-	cutoff := s.now().Add(-staleAfter)
-	records, err := s.App.FindRecordsByFilter("relay_devices", "", "-last_seen_at,-created", 100, 0)
-	if err != nil {
-		return nil, err
-	}
-	result := make([]DeviceStatus, 0, len(records))
-	for _, record := range records {
-		seen := record.GetDateTime("last_seen_at").Time()
-		heartbeat := record.GetDateTime("last_heartbeat_at").Time()
-		graceUntil := record.GetDateTime("heartbeat_grace_until").Time()
-		legacyGraceActive := heartbeat.IsZero() && !graceUntil.IsZero() && s.now().Before(graceUntil)
-		listenerOK := !heartbeat.IsZero() && record.GetBool("notification_access") && record.GetBool("listener_connected")
-		lastEventAt, lastMatchedAt, lastMatchedPaymentID, recentErrorCount, statusErr := s.deviceEventStatus(record.Id, s.now())
-		if statusErr != nil {
-			return nil, statusErr
+	now := s.now()
+	var result []DeviceStatus
+	err := s.Store.View(context.Background(), func(uow store.UnitOfWork) error {
+		devices, err := uow.Relay().All(100)
+		if err != nil {
+			return err
 		}
-		result = append(result, DeviceStatus{
-			ID: record.Id, DeviceID: record.GetString("device_id"), Name: record.GetString("name"), Enabled: record.GetBool("enabled"),
-			AppVersion: record.GetString("app_version"), AndroidVersion: record.GetString("android_version"), DeviceModel: record.GetString("device_model"),
-			LastSeenAt: timeValue(seen), LastHeartbeatAt: timeValue(heartbeat), HeartbeatGraceUntil: timeValue(graceUntil), NotificationAccess: record.GetBool("notification_access"), ListenerConnected: record.GetBool("listener_connected"),
-			PendingCount: record.GetInt("pending_count"), FailedCount: record.GetInt("failed_count"), LastClientError: record.GetString("last_client_error"),
-			LastDeliveryAt: timeValue(record.GetDateTime("last_client_delivery_at").Time()),
-			LastEventAt:    lastEventAt, LastMatchedAt: lastMatchedAt, LastMatchedPaymentID: lastMatchedPaymentID, RecentErrorCount: recentErrorCount,
-			Active: record.GetBool("enabled") && (legacyGraceActive || (!seen.IsZero() && !seen.Before(cutoff) && listenerOK)),
-		})
-	}
-	return result, nil
+		result = make([]DeviceStatus, 0, len(devices))
+		for _, device := range devices {
+			stats, err := relayEventStatus(uow, device.ID, now)
+			if err != nil {
+				return err
+			}
+			health := device.Health()
+			result = append(result, DeviceStatus{ID: device.ID, DeviceID: device.DeviceID, Name: device.Name, Enabled: device.Enabled, AppVersion: device.AppVersion, AndroidVersion: device.AndroidVersion, DeviceModel: device.DeviceModel, LastSeenAt: timeValue(device.LastSeenAt), LastHeartbeatAt: timeValue(device.LastHeartbeatAt), HeartbeatGraceUntil: timeValue(device.HeartbeatGraceUntil), NotificationAccess: device.NotificationAccess, ListenerConnected: device.ListenerConnected, PowerHealthReported: device.PowerHealthReported, BatteryOptimizationExempt: device.BatteryOptimizationExempt, PowerSaveMode: device.PowerSaveMode, BackgroundRestricted: device.BackgroundRestricted, ForegroundService: device.ForegroundServiceActive, PowerHealthy: health.PowerReady(), PendingCount: device.PendingCount, FailedCount: device.FailedCount, LastClientError: device.LastClientError, LastDeliveryAt: timeValue(device.LastClientDeliveryAt), LastEventAt: timeValue(stats.LastEventAt), LastMatchedAt: timeValue(stats.LastMatchedAt), LastMatchedPaymentID: stats.LastMatchedPaymentID, RecentErrorCount: stats.RecentErrorCount, Active: health.Ready(now, staleAfter)})
+		}
+		return nil
+	})
+	return result, err
 }
 
-func (s *Service) deviceEventStatus(deviceRecordID string, now time.Time) (lastEventAt any, lastMatchedAt any, lastMatchedPaymentID string, recentErrorCount int64, err error) {
-	params := dbx.Params{"device": deviceRecordID}
-	latest, err := s.App.FindRecordsByFilter("relay_events", "device = {:device}", "-created", 1, 0, params)
+func relayEventStatus(uow store.UnitOfWork, deviceRecordID string, now time.Time) (domain.RelayEventStats, error) {
+	var stats domain.RelayEventStats
+	if latest, err := uow.RelayEvents().Latest(deviceRecordID); err == nil {
+		stats.LastEventAt = latest.CreatedAt
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return stats, err
+	}
+	if matched, err := uow.RelayEvents().LatestMatched(deviceRecordID); err == nil {
+		stats.LastMatchedAt = matched.CreatedAt
+		stats.LastMatchedPaymentID = matched.MatchedPaymentID
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return stats, err
+	}
+	count, err := uow.RelayEvents().CountErrorsSince(deviceRecordID, now.Add(-24*time.Hour))
 	if err != nil {
-		return nil, nil, "", 0, err
+		return stats, err
 	}
-	if len(latest) == 1 {
-		lastEventAt = timeValue(latest[0].GetDateTime("created").Time())
-	}
-	matched, err := s.App.FindRecordsByFilter("relay_events", "device = {:device} && matched_payment != ''", "-created", 1, 0, params)
-	if err != nil {
-		return nil, nil, "", 0, err
-	}
-	if len(matched) == 1 {
-		lastMatchedAt = timeValue(matched[0].GetDateTime("created").Time())
-		lastMatchedPaymentID = matched[0].GetString("matched_payment")
-	}
-	errorCutoff := filterDate(now.Add(-24 * time.Hour))
-	recentErrorCount, err = s.App.CountRecords("relay_events", dbx.NewExp("device = {:device} AND processing_status = 'error' AND created >= {:cutoff}", dbx.Params{"device": deviceRecordID, "cutoff": errorCutoff}))
-	if err != nil {
-		return nil, nil, "", 0, err
-	}
-	return lastEventAt, lastMatchedAt, lastMatchedPaymentID, recentErrorCount, nil
+	stats.RecentErrorCount = count
+	return stats, nil
 }
 
-func (s *Service) SetEnabled(recordID string, enabled bool) (*core.Record, error) {
-	return s.SetEnabledInApp(s.App, recordID, enabled)
+func (s *Service) SetEnabled(recordID string, enabled bool) (*domain.RelayDevice, error) {
+	var result *domain.RelayDevice
+	err := s.Store.Write(context.Background(), func(uow store.UnitOfWork) error {
+		var err error
+		result, err = s.SetEnabledUoW(uow, recordID, enabled)
+		return err
+	})
+	return result, err
 }
 
-func (s *Service) SetEnabledInApp(app core.App, recordID string, enabled bool) (*core.Record, error) {
+func (s *Service) SetEnabledUoW(uow store.UnitOfWork, recordID string, enabled bool) (*domain.RelayDevice, error) {
 	recordID = strings.TrimSpace(recordID)
 	if recordID == "" {
 		return nil, domain.New("INVALID_RELAY_DEVICE_ID", "relay device id is required", 400)
 	}
-	record, err := app.FindRecordById("relay_devices", recordID)
+	device, err := uow.Relay().Get(recordID)
 	if err != nil {
 		return nil, domain.New("RELAY_DEVICE_NOT_FOUND", "relay device was not found", 404)
 	}
-	if record.GetBool("enabled") != enabled {
-		// Operator state changes revoke migration-only compatibility. A device
-		// that is explicitly disabled and later re-enabled must prove current
-		// health with a v0.3 heartbeat rather than inheriting old rollout grace.
-		record.Set("heartbeat_grace_until", "")
+	if device.Enabled != enabled {
+		device.HeartbeatGraceUntil = time.Time{}
 	}
-	record.Set("enabled", enabled)
-	if err := app.Save(record); err != nil {
+	device.Enabled = enabled
+	if err := uow.Relay().Save(device); err != nil {
 		return nil, err
 	}
-	return record, nil
+	return device, nil
 }
 
 func normalizeStaleAfter(value time.Duration) time.Duration {
@@ -285,12 +306,4 @@ func timeValue(value time.Time) any {
 		return nil
 	}
 	return value.UTC().Format(time.RFC3339Nano)
-}
-
-func filterDate(value time.Time) string {
-	parsed, err := types.ParseDateTime(value.UTC())
-	if err != nil {
-		return value.UTC().Format(time.RFC3339Nano)
-	}
-	return parsed.String()
 }
