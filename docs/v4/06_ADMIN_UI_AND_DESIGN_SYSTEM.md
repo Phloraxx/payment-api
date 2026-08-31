@@ -150,13 +150,13 @@ Persist filter state in URL query parameters on web.
 Example:
 
 ```text
-₹101.37                                    PAID
+₹100.37                                    PAID
 Sourav P Bijoy
 pay_01J...
 
 Event ID          evt_hardware_security_2026
 Requested         ₹100.00
-Payable/Paid      ₹101.37
+Payable/Paid      ₹100.37
 Adjustment        ₹1.37
 Actual payer      Bijoy P
 Payer UPI ID      bijoy@okaxis
@@ -172,7 +172,7 @@ If payer data is unavailable, show `Not provided by notification` rather than in
 Timeline:
 
 ```text
-12:30:00 Payment created · Paytm · ₹101.37 reserved
+12:30:00 Payment created · Paytm · ₹100.37 reserved
 12:33:08 Incoming Paytm payment detected
 12:33:08 Payment marked paid
 12:33:09 payment.paid webhook delivered · 200
@@ -188,7 +188,7 @@ Preferred wording:
 
 ```text
 Requested     ₹100.00
-Pay exactly   ₹101.37
+Pay exactly   ₹100.37
 Adjustment    +₹1.37
 ```
 
@@ -240,7 +240,7 @@ Activity represents everything around money without forcing implementation vocab
 Examples:
 
 ```text
-Payment detected · Paytm · ₹101.37 · matched to Sourav P Bijoy
+Payment detected · Paytm · ₹100.37 · matched to Sourav P Bijoy
 Payment detected · Kotak · ₹501.42 · unmatched
 Payment updated · pay_... · operator
 Webhook delivered · payment.paid · 200

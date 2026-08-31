@@ -22,57 +22,70 @@ payable_amount_paise
 adjustment_paise
 ```
 
-Example:
+Normal example:
 
 ```text
-requested = ₹100.00
-payable   = ₹101.37
-adjustment = ₹1.37
+requested  = ₹100.00
+payable    = ₹100.37
+adjustment = ₹0.37
 ```
+
+A `₹101.xx` payable amount is used only after every free `₹100.01…₹100.99` candidate is unavailable.
 
 The frontend must say clearly that the customer must pay the **exact PayGate amount** and display the adjustment whenever non-zero.
 
-## Candidate pool
+## Ordered random candidate buckets
 
-For a whole-rupee request, v4 may use more than one rupee of decimal space.
+For a whole-rupee request, v4 uses up to two ordered 99-value buckets by default.
 
-Default `MAX_ADJUSTMENT_PAISE = 199` gives these candidates for ₹100:
+For ₹100:
 
 ```text
-₹100.01 … ₹100.99
-₹101.01 … ₹101.99
+Bucket 0 (always try first): ₹100.01 … ₹100.99
+Bucket 1 (overflow only):    ₹101.01 … ₹101.99
 ```
 
 Rules:
 
 - `.00` is never generated;
+- **never choose from Bucket 1 while any free candidate exists in Bucket 0**;
+- randomness is used only to choose among free candidates inside the current bucket;
 - final payable values are unique among currently reserved values on the same collection profile;
-- adjacent requested amounts may have overlapping candidate ranges, so uniqueness is enforced on the **final payable value**, not requested amount;
-- the maximum adjustment is bounded and configurable; PayGate never silently keeps increasing the amount without limit.
+- adjacent requested amounts may still overlap once overflow is used, so uniqueness is enforced on the **final payable value**, not requested amount;
+- default maximum adjustment is `₹1.99`; PayGate never silently keeps increasing the amount without limit.
 
-## Randomized free-pool allocator
+## Randomized bucket allocator
 
-Do **not** allocate `.01`, `.02`, `.03` sequentially.
+Do **not** allocate `.01`, `.02`, `.03` sequentially, but also do **not** randomize across both rupees at once.
 
-Sequential allocation makes recently reused amounts predictable and increases the chance that a very delayed notification happens to collide with the newest payment using the same value.
+The goal is:
 
-Use a cryptographically randomized selection from the currently free candidate pool.
+1. keep the customer inside the requested rupee whenever capacity exists;
+2. make suffix reuse unpredictable inside that rupee;
+3. use the next rupee only as overflow capacity.
 
 Pseudo-flow:
 
 ```text
 BEGIN IMMEDIATE
   release reservations whose hard reuse_after <= now
-  build bounded candidate set
-  remove every .00 candidate
-  remove candidates currently reserved on this profile
 
-  preferred = free candidates not used in the soft recent-use horizon
-  pool = preferred if preferred is non-empty else all free candidates
-  cryptographically choose one candidate from pool
+  for bucket in [requested_rupee, requested_rupee + 1]:
+      free = all .01… .99 values in this bucket
+             minus currently reserved values on this profile
 
-  create payment + active amount reservation atomically
-COMMIT
+      if free is empty:
+          continue to next bucket
+
+      preferred = free values not used in the soft recent-use horizon
+      pool = preferred if preferred is non-empty else free
+      cryptographically choose one candidate from pool
+      create payment + active amount reservation atomically
+      COMMIT
+      return candidate
+
+  ROLLBACK
+  return PAYMENT_CAPACITY_TEMPORARILY_UNAVAILABLE
 ```
 
 Use Go `crypto/rand`, not `math/rand`, for the candidate choice.

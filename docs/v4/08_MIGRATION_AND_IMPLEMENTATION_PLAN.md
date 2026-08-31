@@ -21,8 +21,8 @@ Before implementation, confirm these product rules:
 - PayGate returns UPI URI string; frontend renders QR;
 - no hosted checkout requirement;
 - no UTR/RRN matching dependency;
-- randomized bounded amount allocation;
-- default max adjustment initially ₹1.99 unless explicitly changed;
+- ordered randomized amount buckets: `₹N.01…₹N.99` first, then `₹(N+1).01…₹(N+1).99` only on base-bucket exhaustion;
+- default max adjustment `₹1.99`; randomness is inside the active bucket, not across both buckets;
 - 5m active + 5m grace + 5m hard quarantine;
 - soft recent-use avoidance after hard release;
 - direct SQLite only; no PocketBase runtime;
@@ -116,6 +116,7 @@ Use Go `crypto/rand`.
 - adjacent requested amounts cannot collide;
 - concurrent creates cannot receive same profile+amount;
 - random selection retries safely if DB uniqueness is hit;
+- overflow bucket is never used while any base-bucket candidate is free;
 - soft recent-use avoidance prefers older free values;
 - recent values remain usable if pool pressure requires them;
 - hard reservation release timing exact;
@@ -485,7 +486,7 @@ If meaningful v4 payments occurred, never blindly replace v4 DB with old v3 stat
 ## Suggested implementation PRs
 
 1. direct SQLite connection/schema/migrations/backups
-2. collection profiles + amount reservations + randomized allocator
+2. collection profiles + amount reservations + ordered randomized bucket allocator
 3. payment domain/idempotency/history
 4. merchant API + UPI URI contract
 5. webhook outbox
@@ -509,7 +510,7 @@ V4 is done only when:
 - event ID is not treated as unique/idempotent;
 - caller cannot select Paytm/Kotak;
 - frontend renders QR from server UPI URI;
-- randomized reservation allocator is collision-safe under concurrency;
+- ordered randomized bucket allocator is collision-safe under concurrency and never overflows early;
 - delayed/reused-amount ambiguity fails closed;
 - Paytm + Kotak both flow through one Android app;
 - server libgm is gone;

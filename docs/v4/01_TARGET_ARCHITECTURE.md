@@ -193,7 +193,8 @@ BEGIN IMMEDIATE
        |
        +--> resolve active profile
        +--> release due amount reservations
-       +--> choose randomized free payable amount
+       +--> choose random free `.01…₹N.99` amount in base bucket
+       +--> only if base bucket exhausted, choose random free `₹(N+1).01…₹(N+1).99`
        +--> insert payment
        +--> insert reservation
        +--> insert idempotency result
@@ -209,8 +210,8 @@ build canonical UPI URI from payment snapshot
 A payable amount may exist simultaneously on different profiles:
 
 ```text
-Paytm -> ₹101.37
-Kotak -> ₹101.37
+Paytm -> ₹100.37
+Kotak -> ₹100.37
 ```
 
 That is safe because notification source/parser identifies the collection profile.
@@ -221,13 +222,13 @@ The uniqueness is enforced by SQLite, not just by Go queries.
 
 ## Overlapping requested ranges
 
-Different requested amounts can produce overlapping final candidate values.
+Different requested amounts can still produce overlapping final candidate values **after overflow is used**.
 
 Example:
 
 ```text
-₹100 request candidates include ₹101.37
-₹101 request candidates also include ₹101.37
+₹100 request: ₹101.37 is possible only after every free ₹100.xx value is unavailable
+₹101 request: ₹101.37 is a normal base-bucket candidate
 ```
 
 Therefore reservation uniqueness is based on:

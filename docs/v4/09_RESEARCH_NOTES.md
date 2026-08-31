@@ -75,7 +75,7 @@ The first v4 planning draft accidentally changed this into a deterministic small
 V4 restores and generalizes the useful property:
 
 ```text
-cryptographically random choice among bounded free values
+cryptographically random choice among free values **inside the lowest available rupee bucket**
 ```
 
 while expanding the pool beyond one rupee and adding database-enforced active reservations.
@@ -153,7 +153,7 @@ This improves stale-collision resistance without creating artificial capacity ex
 
 ### Cross-rupee pool
 
-With default max adjustment ₹1.99 and a whole-rupee requested amount, candidate values include 198 non-`.00` amounts.
+With the default two-bucket design, a whole-rupee request has up to 198 non-`.00` candidates, but they are not one flat random pool: PayGate uses the 99 same-rupee values first and unlocks the 99 next-rupee values only after the first bucket is exhausted.
 
 Adjacent requested amounts overlap, so active uniqueness must be based on final profile+payable amount, not requested amount.
 
@@ -325,7 +325,7 @@ https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.ht
 PayGate server
   -> direct SQLite
   -> server-owned active profile
-  -> randomized bounded amount reservations
+  -> ordered randomized amount buckets
   -> server notification parsers
   -> timestamp-aware matching
   -> durable signed webhooks

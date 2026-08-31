@@ -277,7 +277,7 @@ A 401/expired operator session signs the UI out but does not stop relay/backgrou
 Example:
 
 ```text
-₹101.37              PAID
+₹100.37              PAID
 Sourav P Bijoy
 Event: evt_hardware_security_2026
 
@@ -310,7 +310,7 @@ Immutable:
 ## Activity examples
 
 ```text
-Paytm payment detected · ₹101.37 · matched to Sourav P Bijoy
+Paytm payment detected · ₹100.37 · matched to Sourav P Bijoy
 Kotak payment detected · ₹500.42 · unmatched
 Payment updated · operator
 Webhook delivered · 200

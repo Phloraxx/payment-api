@@ -170,7 +170,7 @@ Their future addition must be a parser/profile extension, not another relay arch
 
 PayGate deliberately generates a non-`.00` exact amount and reserves that amount within the receiving profile.
 
-V4 selection is randomized across the bounded free pool rather than sequential `.01`, `.02`, `.03` assignment.
+V4 uses **ordered random buckets**. For a ₹N request, PayGate randomly selects from free `₹N.01…₹N.99` values. Only when that whole bucket is unavailable may it randomly select from `₹(N+1).01…₹(N+1).99`. This avoids predictable sequential suffixes without charging an extra rupee while any same-rupee decimal remains free.
 
 A short hard lifecycle plus soft recent-use avoidance protects against delayed notifications without a 24-hour capacity lock.
 

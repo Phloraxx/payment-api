@@ -37,8 +37,8 @@ A create request contains context such as:
 6. Server parses source-specific wording, infers Paytm/Kotak, validates incoming-credit semantics and performs matching.
 7. Target v4 has no server-side Google Messages/libgm connector. Kotak arrives through the phone's Google Messages notification.
 8. UTR/RRN is not part of v4 matching.
-9. Payable amounts are selected **cryptographically at random from the bounded free pool**, not sequentially from `.01` upward.
-10. Default candidate space may span requested amount through `+₹1.99`, skipping every `.00`; exact cap stays configurable.
+9. Payable amounts use **ordered random buckets**: for a ₹N request, PayGate randomly chooses among free `₹N.01…₹N.99` values first. It only considers `₹(N+1).01…₹(N+1).99` when the entire base-rupee bucket is unavailable.
+10. The default v4.0 capacity is therefore two 99-value buckets (maximum adjustment `₹1.99`), always skipping `.00`. Randomness applies **inside the current bucket**, never across both buckets at once.
 11. The allocator combines 5m active + 5m grace + 5m hard quarantine with **soft recent-use avoidance** after release. Recent values are avoided when alternatives exist but remain available under pressure.
 12. Exact profile+payable active ownership is database-enforced in SQLite.
 13. Admin UX is rebuilt around **Overview / Payments / Activity / Settings** rather than Review/Evidence/Reconciliation products.

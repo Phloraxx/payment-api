@@ -64,29 +64,39 @@ The Android cheap filter relies on this property, so allocator and prefilter tes
 
 ### Random means cryptographic, not pseudo-random seed/time
 
-Use Go `crypto/rand` to select from the free pool.
+Use Go `crypto/rand` to select among free values inside the **current lowest bucket**.
 
 Do not seed `math/rand` with current time and call it sufficient.
+
+### Base bucket must be exhausted before overflow
+
+For a ₹100 request:
+
+```text
+first bucket:  ₹100.01…₹100.99
+overflow:      ₹101.01…₹101.99
+```
+
+If even one eligible ₹100.xx value is free, PayGate must not allocate ₹101.xx.
 
 ### Random selection must still be unique
 
 Randomness does not enforce ownership. SQLite active-reservation uniqueness does.
 
-### Adjacent base amounts overlap
+### Adjacent base amounts overlap only when overflow is used
 
-A ₹100 request and ₹101 request can both have ₹101.xx in their candidate sets.
-
-Only final `(profile, payable_amount)` uniqueness matters.
+A ₹100 request can reach ₹101.xx only when its ₹100.xx bucket is exhausted. A ₹101 request normally uses ₹101.xx directly. Final `(profile, payable_amount)` uniqueness is therefore still authoritative.
 
 ### Pool pressure
 
-When preferred old/unrecent candidates are exhausted:
+Within the current bucket, when preferred old/unrecent candidates are exhausted:
 
-1. include recently released but currently free candidates;
+1. include recently released but currently free candidates in **that same bucket**;
 2. randomize among them;
-3. only fail when the entire configured candidate pool is actively unavailable.
+3. only move to the next rupee when the current bucket has no free candidate at all;
+4. fail only when both configured buckets are actively unavailable.
 
-Soft recent-use avoidance must never create fake capacity exhaustion.
+Soft recent-use avoidance must never create fake bucket exhaustion or force premature overflow.
 
 ### Config cap changed downward
 
@@ -503,7 +513,7 @@ Always render as escaped text. Never inject raw notification content into dashbo
 2. `name` and event `external_id` never match money and are never unique identity assumptions.
 3. Merchant cannot choose collection profile.
 4. Payment snapshots destination/profile at creation.
-5. Automated payable amount is bounded, non-`.00`, randomized and actively unique within profile.
+5. Automated payable amount is bounded, non-`.00`, randomized within the lowest available bucket, and actively unique within profile.
 6. Randomness supplements; it does not replace hard reservation and fail-closed timestamp rules.
 7. Android amount hint is never trusted as authoritative.
 8. One signed relay event cannot produce duplicate payment transitions.

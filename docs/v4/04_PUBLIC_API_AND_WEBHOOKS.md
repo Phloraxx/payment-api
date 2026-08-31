@@ -120,8 +120,8 @@ Example only; the actual payable amount is randomized from the server-owned free
   "status": "pending",
   "currency": "INR",
   "requested_amount": "100.00",
-  "payable_amount": "101.37",
-  "adjustment": "1.37",
+  "payable_amount": "100.37",
+  "adjustment": "0.37",
   "upi_uri": "upi://pay?pa=merchant%40paytm&pn=Merchant&am=101.37&cu=INR",
   "created_at": "2026-09-01T00:30:00+05:30",
   "expires_at": "2026-09-01T00:35:00+05:30",
@@ -172,7 +172,7 @@ Paid response additionally contains best-effort notification-derived payer infor
   "external_id": "evt_hardware_security_2026",
   "status": "paid",
   "requested_amount": "100.00",
-  "payable_amount": "101.37",
+  "payable_amount": "100.37",
   "paid_at": "2026-09-01T00:33:11+05:30",
   "payer": {
     "name": "Bijoy P",
@@ -276,7 +276,7 @@ Example:
       "external_id": "evt_hardware_security_2026",
       "status": "paid",
       "requested_amount": "100.00",
-      "payable_amount": "101.37",
+      "payable_amount": "100.37",
       "paid_at": "...",
       "payer": {
         "name": "Bijoy P",
