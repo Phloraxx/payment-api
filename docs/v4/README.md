@@ -1,29 +1,51 @@
 # PayGate v4 — Unified Payment Gateway Redesign
 
-Status: architecture and implementation plan only. This branch must not change production behavior.
+Status: architecture/research/implementation plan only. This branch must not change production behavior.
 
 ## Product definition
 
-PayGate is the payment gateway. It consists of one server product and one Android app:
+PayGate consists of two first-class runtime artifacts:
 
-- **PayGate server** — payment creation, collection-profile selection, UPI URI generation, payment matching, admin dashboard, API, webhooks, persistence and operations.
-- **PayGate Android** — operator UI plus the background notification relay. It is one APK and one product, not a separate Relay app.
-- **PayGate Frontend** — remains a separate integration/testing playground. It is not part of the PayGate product architecture and must not own routing, profile selection or matching logic.
+- **PayGate server** — developer API, payment creation, collection-profile selection, randomized payable-amount reservation, matching, admin dashboard, webhooks, direct SQLite persistence and operations.
+- **PayGate Android** — operator UI plus background notification relay in the same APK/product.
+- **PayGate Frontend** — separate integration/testing playground. It renders QR from PayGate's UPI URI and polls status, but it is not part of the PayGate runtime architecture.
+
+## Correct merchant field semantics
+
+A create request contains context such as:
+
+```json
+{
+  "amount": 100,
+  "name": "Sourav P Bijoy",
+  "external_id": "evt_hardware_security_2026"
+}
+```
+
+- `name` is the merchant-supplied person/payee identifier for the payment. It is not the event name and is not used for matching.
+- `external_id` is the merchant/event-side **event ID**. It is deliberately non-unique because one event can have many payments.
+- PayGate's own payment ID + `Idempotency-Key` provide payment/request identity.
+- notification-derived `payer_name`/`payer_upi_id` are separate and may differ from `name`.
 
 ## v4 decisions
 
-1. The caller asks PayGate to create a payment using an amount, a human name/alias and optional external metadata. It does **not** select Paytm, Kotak or another collection route.
-2. PayGate owns the active **collection profile**. v4.0 launches with Paytm and Kotak. GPay and Slice are future profiles/sources.
-3. PayGate returns a canonical `upi://pay?...` URI string. The consuming frontend is free to render that string as a QR code. PayGate does not need to return SVG/PNG QR files.
-4. The Android relay does not know which collection profile is active. It only observes allowlisted phone notifications that look like incoming PayGate payments and sends a minimal signed snapshot to the server.
-5. v4.0 ingestion sources are **Paytm for Business notifications** and **Kotak credit SMS notifications as surfaced by Google Messages**. There is no server-side Google Messages/libgm connector in the target architecture.
-6. The server parses source-specific notification wording, infers the collection profile, normalizes a payment observation and performs the match.
-7. UTR/RRN is not required by the v4 matching model. The primary identity is reserved payable amount + collection profile + occurrence time + unique relay event ID.
-8. Amount allocation can move beyond the requested rupee while preserving non-zero paise. The allocator always prefers the smallest free adjustment.
-9. The lifecycle is 5 minutes active + 5 minutes grace + 5 minutes quarantine before a payable amount can be reused.
-10. Admin UX is rebuilt around **Overview / Payments / Activity / Settings**. Manual Review, Evidence and Reconciliation are not first-class product concepts.
-11. Web and Android use a Razorpay-inspired dark navy + blue visual language, without copying Razorpay screens or branding.
-12. The target persistence layer is **direct SQLite owned by one Go server process**. PocketBase is removed from the target architecture; PostgreSQL is deferred until PayGate actually needs multiple database writers or horizontal scaling.
+1. Caller never selects Paytm/Kotak. PayGate owns the active **collection profile** for new payments.
+2. v4.0 supports Paytm and Kotak. GPay and Slice are deferred.
+3. PayGate snapshots profile/destination onto each payment, so switching the active profile never changes existing sessions.
+4. PayGate returns the canonical `upi://pay?...` string. The frontend renders the QR; PayGate does not need SVG/PNG/hosted-checkout output.
+5. Android does not know the active profile or expected payment. It relays a minimal signed notification snapshot from allowlisted packages when it contains a plausible non-`.00` money value.
+6. Server parses source-specific wording, infers Paytm/Kotak, validates incoming-credit semantics and performs matching.
+7. Target v4 has no server-side Google Messages/libgm connector. Kotak arrives through the phone's Google Messages notification.
+8. UTR/RRN is not part of v4 matching.
+9. Payable amounts are selected **cryptographically at random from the bounded free pool**, not sequentially from `.01` upward.
+10. Default candidate space may span requested amount through `+₹1.99`, skipping every `.00`; exact cap stays configurable.
+11. The allocator combines 5m active + 5m grace + 5m hard quarantine with **soft recent-use avoidance** after release. Recent values are avoided when alternatives exist but remain available under pressure.
+12. Exact profile+payable active ownership is database-enforced in SQLite.
+13. Admin UX is rebuilt around **Overview / Payments / Activity / Settings** rather than Review/Evidence/Reconciliation products.
+14. Web and Android use a Razorpay-inspired dark navy + blue design language.
+15. Authentication is password-only for the singleton operator; merchant API keys, webhook secrets and Android device keys remain separate credentials.
+16. Persistence is **direct SQLite only** through Go/`database/sql` + `modernc.org/sqlite`. PocketBase is removed from the target runtime.
+17. Production keeps one PayGate process, one local SQLite database, WAL, `synchronous=FULL`, foreign keys, bounded busy timeout, database constraints and SQLite Online Backup API.
 
 ## Documents
 
@@ -37,18 +59,23 @@ PayGate is the payment gateway. It consists of one server product and one Androi
 - [07_DATA_STORAGE_SECURITY_OPERATIONS.md](07_DATA_STORAGE_SECURITY_OPERATIONS.md)
 - [08_MIGRATION_AND_IMPLEMENTATION_PLAN.md](08_MIGRATION_AND_IMPLEMENTATION_PLAN.md)
 - [09_RESEARCH_NOTES.md](09_RESEARCH_NOTES.md)
+- [10_EDGE_CASES_AND_INVARIANTS.md](10_EDGE_CASES_AND_INVARIANTS.md)
 
 ## Non-goals
 
-- No hosted customer checkout in PayGate v4. The standalone PayGate Frontend remains the test/integration surface.
-- No WebSocket requirement. Polling remains the default status mechanism.
-- No GPay auto-matching in v4.0.
-- No Slice support in v4.0.
-- No direct Android SMS permission request.
-- No multi-user/role system.
-- No PostgreSQL migration unless scale requires it.
-- No attempt to preserve PocketBase as a public product surface.
+- no hosted customer checkout in PayGate v4;
+- no WebSocket requirement;
+- no GPay or Slice auto-matching in v4.0;
+- no direct Android SMS permission;
+- no UTR/RRN dependency;
+- no multi-user/role system;
+- no PostgreSQL;
+- no PocketBase runtime;
+- no server-rendered QR images;
+- no merchant-controlled collection-profile selection.
 
 ## Safety rule for implementation
 
-The v4 rewrite must be introduced beside v3, tested against production-shaped data and cut over only after parity. The existing payment-verification invariants and current production service must remain available for rollback until the final migration is verified.
+V4 is built beside v3 and cut over only after deterministic migration, parser parity, SQLite backup/restore testing, Android in-place upgrade testing and end-to-end payment acceptance.
+
+The final design should be simpler than v3, but migration must not sacrifice payment correctness or rollbackability.
