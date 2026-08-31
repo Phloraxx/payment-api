@@ -2,9 +2,11 @@
 
 ## API philosophy
 
-The merchant integration asks PayGate for a payment. PayGate decides the collection profile, payable amount and destination.
+The merchant asks PayGate for a payment. PayGate decides the collection profile, exact payable amount and destination UPI instruction.
 
-The API must never require a merchant to choose Paytm/Kotak or understand relay/matching internals.
+The merchant does **not** choose Paytm/Kotak and does not know relay/matching internals.
+
+The frontend/test application receives the canonical UPI URI string and renders the QR itself.
 
 ## Create payment
 
@@ -20,37 +22,107 @@ Request:
 ```json
 {
   "amount": 100,
-  "name": "IEEE workshop registration",
-  "external_id": "reg_284",
+  "name": "Sourav P Bijoy",
+  "external_id": "evt_hardware_security_2026",
   "metadata": {
-    "event_id": "evt_12"
+    "registration_id": "reg_284"
   }
 }
 ```
 
-### Request semantics
+## Exact field semantics
 
-- `amount` — requested whole INR amount. v4 continues the current whole-rupee contract so PayGate owns paise for matching.
-- `name` — human-readable alias shown in PayGate and returned to the integration. Required, trimmed, recommended max 120 Unicode characters.
-- `external_id` — caller's ID. Optional but strongly recommended.
-- `metadata` — optional bounded JSON object.
+### `amount`
 
-The request contains no payment-account/profile field.
+Requested whole-INR amount for the initial v4 contract.
+
+PayGate owns the paise/verification adjustment and returns the exact payable amount.
+
+Rules:
+
+- must be positive;
+- parsed as an integer, never floating point;
+- server applies a configured upper bound to prevent abuse/overflow;
+- requested paise support is a future explicit design, not an implicit float feature.
+
+### `name`
+
+Required merchant-supplied **human/payee/person identifier** for this payment.
+
+Typical examples:
+
+```text
+Sourav P Bijoy
+Rahul Kumar
+Team Phoenix
+```
+
+It is **not** the event name and is **not** assumed to equal the actual bank/UPI sender name.
+
+The notification-derived sender is returned separately as `payer.name` when available.
+
+`name` is display/context data only. It does not participate in matching or uniqueness.
+
+### `external_id`
+
+The merchant/event-side **event ID**.
+
+Example:
+
+```text
+evt_hardware_security_2026
+```
+
+Many payments may legitimately share the same `external_id` because many people can pay for one event.
+
+Therefore:
+
+- `external_id` is not unique;
+- it is not an idempotency key;
+- it is not used for matching;
+- it is useful for filtering, reporting and webhooks.
+
+If the integrating system has a registration/order/member-specific ID, it may include that in `metadata` and should store the returned PayGate payment ID in its own record.
+
+### `metadata`
+
+Optional bounded JSON object for integration context.
+
+Examples:
+
+```json
+{
+  "registration_id": "reg_284",
+  "department": "CSE"
+}
+```
+
+Do not use metadata as part of the payment-matching algorithm.
+
+### `Idempotency-Key`
+
+This is the request-uniqueness mechanism.
+
+A frontend/backend retry with the same key and exact same request returns the original payment. Reusing the same key with different request content returns a conflict.
+
+`name` and `external_id` may repeat; the idempotency key is what prevents accidental duplicate creation.
 
 ## Create response
+
+Example only; the actual payable amount is randomized from the server-owned free pool:
 
 ```json
 {
   "id": "pay_01J...",
   "object": "payment",
-  "name": "IEEE workshop registration",
-  "external_id": "reg_284",
+  "name": "Sourav P Bijoy",
+  "external_id": "evt_hardware_security_2026",
   "status": "pending",
   "currency": "INR",
   "requested_amount": "100.00",
-  "payable_amount": "100.37",
-  "adjustment": "0.37",
-  "upi_uri": "upi://pay?pa=merchant%40paytm&pn=PayGate&am=100.37&cu=INR",
+  "payable_amount": "101.37",
+  "adjustment": "1.37",
+  "upi_uri": "upi://pay?pa=merchant%40paytm&pn=Merchant&am=101.37&cu=INR",
   "created_at": "2026-09-01T00:30:00+05:30",
   "expires_at": "2026-09-01T00:35:00+05:30",
   "grace_until": "2026-09-01T00:40:00+05:30",
@@ -58,66 +130,84 @@ The request contains no payment-account/profile field.
 }
 ```
 
-Do not return the active profile label to normal merchant/customer integrations. The UPI URI is the only payment-destination instruction they need.
+The response does not need to expose the active profile label to a normal merchant/customer integration. The UPI URI is the canonical payment instruction.
 
-The frontend is responsible for rendering `upi_uri` as a QR code.
+## QR boundary
 
-## Why return strings for money
+PayGate returns only the UPI URI string.
 
-JSON floating point values are easy to mishandle. Public monetary responses should use fixed two-decimal strings.
+It does **not** need:
+
+```text
+/payments/{id}/qr.svg
+/payments/{id}/qr.png
+hosted checkout URL
+```
+
+The consuming frontend turns `upi_uri` into a QR code and may also use the same URI for UPI intent/open-app behavior where appropriate.
+
+## Money representation
+
+Public response money fields use fixed two-decimal strings.
 
 Internal storage uses integer paise.
 
-The request remains whole INR for the initial v4 contract because the current PayGate matching model reserves paise. If future merchant use cases require requested paise, redesign the allocator explicitly rather than accepting floats silently.
+Never use binary floating point for money or amount-allocation decisions.
 
 ## Get payment
-
-Authenticated merchant request:
 
 ```http
 GET /v1/payments/{id}
 Authorization: Bearer <merchant-api-key>
 ```
 
-Pending response includes creation fields.
+Pending response contains the original merchant context and payment instruction.
 
-Paid response additionally includes best-effort payer information:
+Paid response additionally contains best-effort notification-derived payer information:
 
 ```json
 {
   "id": "pay_01J...",
-  "name": "IEEE workshop registration",
-  "external_id": "reg_284",
+  "name": "Sourav P Bijoy",
+  "external_id": "evt_hardware_security_2026",
   "status": "paid",
   "requested_amount": "100.00",
-  "payable_amount": "100.37",
+  "payable_amount": "101.37",
   "paid_at": "2026-09-01T00:33:11+05:30",
   "payer": {
-    "name": "Rahul Kumar",
-    "upi_id": "rahul@okaxis"
+    "name": "Bijoy P",
+    "upi_id": "bijoy@okaxis"
+  },
+  "metadata": {
+    "registration_id": "reg_284"
   }
 }
 ```
 
+This example intentionally shows `name != payer.name`; somebody else may pay for the named person.
+
 `payer.name` and `payer.upi_id` are nullable independently.
 
-## Lightweight status polling
+## Status polling
 
-The testing frontend should continue to poll instead of requiring WebSockets.
+The separate testing frontend should continue to use polling rather than WebSockets.
 
 Recommended behavior:
 
-- around 2 seconds while page is visible and payment is pending;
-- immediate refresh when page regains visibility;
-- stop on `paid`, `expired` or `cancelled`;
-- exponential slowdown after connectivity errors.
+- roughly every 2 seconds while the page is visible and payment is pending;
+- immediate refresh on visibility regain;
+- stop on `paid`, `expired`, or `cancelled`;
+- slow down after repeated network errors.
 
-For public browser polling, two options are acceptable:
+No payment correctness depends on the browser staying open.
 
-1. frontend backend proxies the authenticated PayGate request (preferred for real merchant integrations); or
-2. a limited public status endpoint keyed by the high-entropy payment ID returns only non-sensitive status fields.
+## Public browser status
 
-If option 2 is retained, it must never expose payer identity or merchant metadata without merchant authentication.
+For real merchant integrations, prefer merchant-backend proxying/authenticated status reads.
+
+If a public status endpoint is retained for the test frontend, return only minimal non-sensitive fields and require a high-entropy unguessable payment identifier/token.
+
+Never expose merchant metadata or notification-derived payer identity publicly without authorization.
 
 ## Cancel payment
 
@@ -127,11 +217,11 @@ Authorization: Bearer <merchant-api-key>
 Idempotency-Key: <key>
 ```
 
-Cancellation ends customer use immediately but keeps the payable amount reserved until the lifecycle's `reuse_after` boundary.
+Cancellation prevents continued customer use but does not immediately release the reserved payable amount. Reservation release follows the matching lifecycle.
 
 ## Admin APIs
 
-Admin routes are separate from merchant API keys, for example:
+Representative routes:
 
 ```text
 POST  /admin/session
@@ -148,21 +238,19 @@ GET   /admin/devices
 DELETE /admin/devices/{id}
 ```
 
-Exact route names can change during implementation; the product boundary should not.
+Exact route names may change; the product boundary should not.
 
 ## Merchant API keys
 
-Merchant API keys remain separate from the one admin password.
+Merchant API keys remain separate from the singleton admin password and Android device key.
 
-Store only a keyed/hash representation sufficient for verification; show the plaintext key only when created/rotated.
+Store a verifier/hash, not plaintext. Plaintext is shown only at creation/rotation.
 
-Initial v4 can keep one merchant API key if that is all current integrations require. Do not build organizations, roles or OAuth.
+Do not build organizations, OAuth or role hierarchies for v4.0 unless a real use case appears.
 
 ## Webhooks
 
-Webhooks remain a core integration mechanism.
-
-Minimal event vocabulary:
+Minimal useful event vocabulary:
 
 ```text
 payment.created
@@ -172,9 +260,9 @@ payment.cancelled
 payment.updated
 ```
 
-`payment.updated` is for meaningful operator corrections that do not fit another state-transition event.
+A webhook should contain merchant context plus best-effort payer information after payment.
 
-## Webhook envelope
+Example:
 
 ```json
 {
@@ -184,27 +272,29 @@ payment.updated
   "data": {
     "payment": {
       "id": "pay_01J...",
-      "name": "IEEE workshop registration",
-      "external_id": "reg_284",
+      "name": "Sourav P Bijoy",
+      "external_id": "evt_hardware_security_2026",
       "status": "paid",
       "requested_amount": "100.00",
-      "payable_amount": "100.37",
+      "payable_amount": "101.37",
       "paid_at": "...",
       "payer": {
-        "name": "Rahul Kumar",
-        "upi_id": "rahul@okaxis"
+        "name": "Bijoy P",
+        "upi_id": "bijoy@okaxis"
       },
       "metadata": {
-        "event_id": "evt_12"
+        "registration_id": "reg_284"
       }
     }
   }
 }
 ```
 
+The merchant should key its payment handling on PayGate payment ID/webhook event ID, not on `external_id`, because one event ID may have many payments.
+
 ## Webhook signing
 
-Use a simple HMAC-SHA256 scheme with timestamped payload signing.
+Use HMAC-SHA256 over timestamp + exact raw body.
 
 Example headers:
 
@@ -220,39 +310,30 @@ Canonical bytes:
 <timestamp>.<raw-request-body>
 ```
 
-Consumers verify HMAC with the webhook secret and reject timestamps outside a reasonable replay window.
+Consumers verify signature in constant time and reject stale timestamps according to the documented replay window.
 
-## Outbox/retry behavior
+## Durable outbox
 
-Webhook rows live in a durable outbox table.
+Insert payment state mutation/history and outbound webhook row in the **same SQLite transaction**.
+
+Delivery happens after commit.
 
 Requirements:
 
-- insert payment state change and webhook row in the same database transaction;
-- deliver asynchronously after commit;
-- retry network errors/5xx with bounded exponential backoff;
-- preserve response status and last error for admin Activity;
-- never block payment matching while an integration endpoint is down;
-- event ID makes consumer processing idempotent;
-- operator can retry one exhausted webhook from the payment/activity detail if necessary, not a blind global bulk replay.
+- network failure never rolls back a paid payment;
+- retry network errors and retryable 5xx using bounded exponential backoff;
+- retain last HTTP status/error for Activity;
+- event ID lets consumers dedupe;
+- do not blindly replay every exhausted historical webhook;
+- manual retry operates on one explicit event/payment.
 
-## Idempotency
+## Idempotency edge cases
 
-Payment creation and other merchant writes accept `Idempotency-Key`.
+Required behavior:
 
-Store the request fingerprint and resulting response/payment ID. Reusing a key with a different request returns a conflict; exact replay returns the original result.
-
-Reference pattern: https://docs.stripe.com/api/idempotent_requests
-
-## No QR/image API requirement
-
-PayGate does not need endpoints such as:
-
-```text
-/payments/{id}/qr.svg
-/payments/{id}/qr.png
-```
-
-The UPI URI string is canonical. The frontend/test application owns QR rendering.
-
-This keeps PayGate transport/API responsibilities separate from presentation.
+- same key + same normalized request -> same payment/response;
+- same key + changed amount -> conflict;
+- same key + changed `name` -> conflict;
+- same key + changed `external_id` -> conflict;
+- different idempotency keys may create multiple legitimate payments for the same `name` and same event `external_id`;
+- an idempotency record and created payment are committed atomically.
