@@ -11,17 +11,17 @@
                          +------------------+
                          |     PayGate      |
                          |------------------|
-                         | Payment service  |
-                         | Profile service  |
-                         | Observation      |
-                         | parsers          |
-                         | Match engine     |
+                         | Payments         |
+                         | Profiles         |
+                         | Amount allocator |
+                         | Relay verifier   |
+                         | Parsers          |
+                         | Matcher          |
                          | Admin dashboard  |
                          | Webhook outbox   |
-                         | Auth/devices     |
                          +---------+--------+
                                    |
-                                SQLite
+                              direct SQLite
                                    ^
                                    |
                          signed relay events
@@ -37,204 +37,284 @@
                          +------------------+
 ```
 
-There is no server-side Google Messages connector in the target architecture.
+The separate payment frontend remains a test/reference consumer. It is not merged into PayGate and it does not select profiles or perform matching.
+
+There is no server-side Google Messages/libgm connector in the target architecture.
 
 ## Server modules
 
-The server remains one process and one deployable image, but code is separated into small domain modules:
+The server is one Go process/image with small domain modules.
 
 ### `payments`
 
-Owns payment creation, status transitions, amount reservations and payment edits.
+Owns:
+
+- payment creation;
+- merchant context (`name`, event `external_id`, metadata);
+- product status transitions;
+- operator edits;
+- immutable payment history integration.
+
+`name` is the merchant-supplied person/payee identifier. `external_id` is the merchant/event ID and is not unique.
 
 ### `profiles`
 
-Owns collection profiles and the single active profile used for **new** payments.
+Owns Paytm/Kotak collection profiles and one active profile for **new** payments.
 
-A payment snapshots its selected profile/destination when created. Switching the active profile never changes existing payments.
+Each created payment snapshots:
+
+```text
+collection_profile_id
+upi_id_snapshot
+payee_name_snapshot
+```
+
+Switching the active profile never changes existing payments or old matching eligibility.
+
+### `allocator`
+
+Owns bounded randomized payable-amount allocation.
+
+Responsibilities:
+
+- build candidate values from requested amount through configured max adjustment;
+- never use `.00`;
+- remove active profile+amount reservations;
+- prefer free values outside the soft recent-use horizon;
+- cryptographically select a candidate;
+- create payment + active reservation atomically inside one SQLite write transaction;
+- return capacity failure rather than exceeding the configured cap.
 
 ### `relay`
 
-Owns device pairing, enrolled public keys, signed relay request verification, heartbeat and event deduplication.
+Owns:
+
+- short-lived QR pairing sessions;
+- enrolled Android public key;
+- signed request verification;
+- one active relay-device policy for v4.0;
+- heartbeat/device health;
+- event deduplication.
 
 ### `observations`
 
-Owns normalization of incoming notification snapshots into payment observations.
-
-A normalized observation contains only payment-relevant data:
+Parses signed notification snapshots into source-neutral payment observations.
 
 ```text
 id
+relay_event_id
 source
-collection_profile
-amount
+collection_profile_id
+amount_paise
 payer_name?
 payer_upi_id?
 occurred_at
-received_at
-source_event_id
-notification_excerpt?
+occurred_at_source
+notification_posted_at
+server_received_at
 matched_payment_id?
+match_result
 ```
 
-UTR/RRN is not a required field in v4.
+UTR/RRN is not required.
 
 ### `matching`
 
-Matches normalized observations against reserved payments by:
+Matches normalized observations using:
 
-- inferred collection profile
-- exact payable amount
-- payment/observation time windows
-- unique observation identity
+```text
+inferred profile
++ exact payable amount
++ historical reservation/lifecycle
++ trustworthy occurrence time
++ unique relay-event identity
+```
+
+The current active profile is not used for matching.
 
 ### `webhooks`
 
-Durable outbox for merchant events. Payment creation and webhook scheduling occur transactionally so a paid payment cannot lose its outbound event.
+Durable SQLite outbox.
+
+Externally meaningful payment transition and webhook row are committed in one database transaction. Network delivery occurs after commit.
 
 ### `admin`
 
-Password-only operator authentication, dashboard APIs, payment editing, profile settings, device settings and webhook settings.
+Owns:
+
+- password-only singleton operator session;
+- Overview/Payments/Activity/Settings APIs;
+- direct payment correction;
+- profile switch;
+- device pairing/replacement/revoke;
+- webhook and operational settings.
 
 ### `storage`
 
-Small repository layer over SQLite. The domain does not expose database table/record objects to handlers.
+Small explicit repository/query layer using `database/sql` + `modernc.org/sqlite`.
+
+No PocketBase Records or PocketBase lifecycle hooks appear in the v4 domain model.
 
 ## Collection profiles
 
-Initial table/model:
+Initial profiles:
 
 ```text
-collection_profiles
--------------------
-id                    paytm / kotak
-label                 Paytm / Kotak
-enabled               true/false
-upi_id                 destination VPA
-payee_name             UPI payee name
-parser                 paytm_notification / kotak_sms
-active                 exactly one enabled row is active
+paytm
+kotak
+```
+
+Representative fields:
+
+```text
+id
+label
+upi_id
+payee_name
+parser
+enabled
+active
 created_at
 updated_at
 ```
 
-The API never accepts a `paymentAccount`/profile selector from normal payment-creation clients.
+The server enforces one active enabled profile.
 
-Creation sequence:
+Creation flow:
 
 ```text
-POST payment
-    |
-    v
-read active profile
-    |
-    v
-reserve payable amount inside that profile
-    |
-    v
-snapshot destination/profile on payment
-    |
-    v
-build canonical UPI URI
+POST /v1/payments
+       |
+       v
+validate amount/name/event context
+       |
+       v
+BEGIN IMMEDIATE
+       |
+       +--> resolve active profile
+       +--> release due amount reservations
+       +--> choose randomized free payable amount
+       +--> insert payment
+       +--> insert reservation
+       +--> insert idempotency result
+       |
+     COMMIT
+       |
+       v
+build canonical UPI URI from payment snapshot
 ```
 
-A profile switch is atomic and applies to subsequent creations only.
+## Profile-scoped amount ownership
 
-## Why profile-scoped amount reservation
+A payable amount may exist simultaneously on different profiles:
 
-The same exact payable amount can safely exist simultaneously on different collection destinations because incoming observations identify/infer the destination profile.
+```text
+Paytm -> ₹101.37
+Kotak -> ₹101.37
+```
+
+That is safe because notification source/parser identifies the collection profile.
+
+Within one profile, only one unreleased reservation may own an exact payable amount.
+
+The uniqueness is enforced by SQLite, not just by Go queries.
+
+## Overlapping requested ranges
+
+Different requested amounts can produce overlapping final candidate values.
 
 Example:
 
 ```text
-Paytm  -> ₹100.37
-Kotak  -> ₹100.37
+₹100 request candidates include ₹101.37
+₹101 request candidates also include ₹101.37
 ```
 
-These are not ambiguous because the Paytm app notification and Kotak bank-message notification normalize to different profile IDs.
+Therefore reservation uniqueness is based on:
 
-Within one profile, however, an unexpired reservation must own a payable amount exclusively.
+```text
+(collection_profile_id, payable_amount_paise)
+```
+
+not requested amount.
 
 ## Android/server responsibility split
 
 ### Android
 
-- package allowlist
-- generic decimal-money prefilter
-- notification snapshot capture
-- local durable delivery queue
-- request signing
-- heartbeat/background survival
+- package allowlist;
+- cheap generic decimal-money prefilter;
+- capture notification package/key/text/post time;
+- stable local event ID;
+- local durable retry queue;
+- ECDSA request signing;
+- heartbeat/background survival.
 
 ### Server
 
-- source-specific parsing
-- incoming-vs-outgoing interpretation
-- profile inference
-- amount extraction validation
-- payer extraction
-- payment matching
-- status mutation
+- source-specific incoming-credit parsing;
+- profile inference;
+- authoritative amount parse;
+- timestamp confidence;
+- payer extraction;
+- matching;
+- payment mutation/history/webhook scheduling.
 
-This split is deliberate. Notification wording changes should usually require a server parser update, not an APK update.
+The server never trusts Android `amount_hint` as payment authority.
 
 ## PayGate Frontend boundary
 
-The separate frontend remains a test/reference integration and can continue to have its own deployment/repo.
+The separate frontend's v4 job is only:
 
-Its correct v4 job is:
-
-1. ask its backend to create a PayGate payment;
-2. receive the PayGate response;
-3. render `upi_uri` as a QR;
-4. display requested/payable amount and expiry;
-5. poll PayGate status;
-6. demonstrate paid/expired UX.
+1. send amount + person `name` + event `external_id` through its backend;
+2. receive PayGate payment response;
+3. render `upi_uri` as QR;
+4. prominently show the exact payable amount/adjustment;
+5. poll status;
+6. render paid/expired/cancelled result.
 
 It must not:
 
-- list collection profiles to the customer;
-- choose Paytm/Kotak;
-- derive a UPI destination itself;
-- apply matching logic;
-- know whether the source is notification or SMS.
+- fetch/profile-select Paytm/Kotak;
+- derive UPI destination itself;
+- infer verification source;
+- match notifications;
+- depend on UTR/RRN.
 
 ## Deployment
 
-Production target remains deliberately small:
-
 ```text
-Docker/Swarm host
-  PayGate service: 1 replica, stop-first
-  SQLite file: local durable volume
-  host backup/export job
+Oracle/Docker host
+  PayGate: 1 replica, stop-first
+  local paygate.db + WAL/SHM
+  completed-backup exporter
 
-Android
+Android phone
   one PayGate APK
 ```
 
-The one-server-writer rule remains until the database is intentionally migrated to a client/server DB.
+Production invariant remains one PayGate process owning the live SQLite database.
 
-## What is removed from the target architecture
+## What disappears from final v4
 
-- browser-side profile selection
-- `/api/payment-accounts` as a merchant decision endpoint
-- server libgm/Google Messages session
-- Google Messages pairing/reauth UI
-- source-specific relay toggles in normal Android UX
-- manual-review subsystem as a product workflow
-- reconciliation subsystem as a primary UI workflow
-- separate PayGate Relay product identity
-- RRN/UTR as a match requirement
-- PocketBase record objects as the domain model
+- merchant/browser profile selector;
+- `/api/payment-accounts` decision surface;
+- server-side libgm Google Messages runtime;
+- Google session cookies/reauth pairing;
+- separate Relay product identity;
+- PocketBase runtime/domain records;
+- UTR/RRN matching requirement;
+- Manual Review/Reconciliation as primary product workflows;
+- server-rendered QR images;
+- hosted checkout requirement.
 
-## Future extension rule
+## Future-source extension rule
 
-Adding GPay or Slice later must be possible by adding:
+Adding GPay/Slice later should require only:
 
-1. an allowlisted Android package only if a new app package is needed;
-2. one server parser;
-3. one collection profile/source mapping;
-4. tests with captured sanitized notification fixtures.
+1. allowlist a new Android package if necessary;
+2. add server parser + sanitized fixtures;
+3. map parser to a collection profile/source;
+4. pass the same observation/matching pipeline.
 
-It must not require redesigning payment creation or the Android/server protocol.
+It must not require changing merchant payment creation or Android/server ownership boundaries.
