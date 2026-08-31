@@ -4,18 +4,16 @@
 
 The Android application is simply **PayGate**.
 
-It has two responsibilities inside one APK:
+One APK has two responsibilities:
 
 1. operator UI;
-2. background notification relay.
+2. background payment-notification relay.
 
-There must not be a second separately installed “Relay” app.
+There is no separately installed Relay product.
 
-Preserve the existing Android application ID and signing lineage during the redesign so production can update in place without uninstalling, clearing data or re-pairing.
+Preserve the existing package/application ID, signing certificate, app data and device-key lineage so production upgrades in place.
 
 ## Navigation
-
-Target primary navigation:
 
 ```text
 Overview
@@ -26,75 +24,82 @@ Settings
 
 No primary tab named Action, Review, Reconciliation or Health.
 
-### Overview
+## Overview
 
-Show:
+Show useful payment information first:
 
-- collected today
-- paid transaction count
-- pending count
-- recent payments
-- active collection profile
-- one compact monitoring-state indicator
+- collected today;
+- paid count;
+- pending count;
+- recent payments;
+- active collection profile for new payments;
+- one compact phone-monitor status.
 
-Do not lead with internal alert counts.
+Do not make internal diagnostics the hero of the product.
 
-### Payments
+## Payments
 
-- search
-- filter
-- payment rows with amount/name/status/time
-- payment detail
-- direct edit for allowed fields
-- history timeline
+Search/filter/detail should use the same semantic fields as web:
 
-### Activity
+```text
+Name/person      merchant-supplied identifier
+Event ID         external_id; may repeat
+Actual payer     notification-derived identity
+Requested
+Payable/Paid
+Status
+Created/Paid time
+```
 
-A chronological operational stream:
+`name` must never be mislabeled as the event title.
 
-- incoming payment observations
-- matched/unmatched notifications
-- payment state changes
-- operator edits
-- webhook success/failure
-- device connect/disconnect events when useful
+## Activity
 
-Technical details can live behind an expandable row.
+Chronological stream for:
 
-### Settings
+- Paytm/Kotak payment detection;
+- matched/unmatched notifications;
+- payment state changes;
+- operator edits;
+- webhook success/failure;
+- profile/device changes;
+- diagnostics behind expandable detail.
 
-Sections:
+No separate review subsystem.
+
+## Settings
 
 ```text
 Collection
-  Active profile
-  Paytm destination
-  Kotak destination
+  active Paytm/Kotak profile
+  destination configuration
+
+Amount allocation
+  maximum adjustment
+  reservation/soft reuse policy (advanced)
 
 Integrations
-  Merchant API key
-  Webhook URL/secret
+  merchant API key
+  webhook URL/secret
 
 PayGate device
-  Monitoring status
-  Notification access
-  Battery/background status
-  Last server contact
-  Re-pair / revoke
+  monitoring status
+  notification access
+  background/battery state
+  last server contact
+  Connect / Replace / Revoke
 
 Security
-  Change admin password
+  change admin password
 
 Advanced
-  local failed relay deliveries
+  failed local relay deliveries
   app/server version
 ```
 
-## Theme
+## Visual system
 
-Dark-only initial design, matching the web dashboard's Razorpay-inspired navy/blue system.
-
-Suggested Android tokens:
+Dark-only initial product UI, shared with web.
 
 ```text
 background       #07111F
@@ -102,7 +107,6 @@ surface          #0C1728
 surface_elevated #12213A
 border           #213653
 primary          #2F80FF
-primary_hover    #4A91FF
 text             #F7FAFF
 text_muted       #8FA4C1
 success          #2DCB8A
@@ -110,26 +114,24 @@ warning          #F5B84B
 danger           #F0616A
 ```
 
-These are PayGate tokens, not copied Razorpay source values.
+Razorpay is inspiration for financial density/blue identity, not a component copy.
 
-Use large monetary typography, compact secondary metadata and restrained cards rather than the current oversized lime warning hero.
+Use large money typography, clear hierarchy and restrained surfaces instead of the current oversized lime warning style.
 
-## Relay lifecycle remains independent of operator login
+## Relay is independent of operator login
 
-Background payment observation must continue when:
+Payment monitoring must continue when:
 
 - admin session expires;
-- user closes the PayGate UI;
-- screen is locked;
-- device is in Doze;
-- Android process is recreated;
-- network temporarily disappears.
+- app UI closes;
+- screen locks;
+- device enters Doze;
+- Android recreates the process;
+- network disappears and returns.
 
-Operator authentication controls dashboard access only.
+Operator auth controls management UI only.
 
-## Notification access
-
-Continue using `NotificationListenerService`.
+## NotificationListenerService
 
 Initial allowlist:
 
@@ -138,34 +140,41 @@ com.paytm.business
 com.google.android.apps.messaging
 ```
 
-The service should capture only notifications passing the generic decimal-money prefilter described in `02_NOTIFICATION_INGESTION_AND_PAIRING.md`.
+GPay/Slice are deferred.
+
+Phone applies only the generic non-`.00` decimal-money prefilter. It does not decide incoming-credit semantics/profile/payment match.
 
 Do not request direct SMS permissions.
 
-## Local storage
+## Stable capture identity
 
-The Android app needs only a small local database for relay delivery state and recent diagnostics.
+The same Android notification can be seen repeatedly because of listener reconnects/rescans/updates.
 
-Suggested tables:
+Android must retain one stable local event identity for equivalent payment-relevant content.
+
+Suggested local fields:
 
 ```text
-relay_events
-  event_id
-  package_name
-  posted_at
-  title/text/big_text (bounded)
-  amount_hint
-  state
-  attempts
-  last_http_status
-  last_error
-  created_at
-  delivered_at
+event_id
+package_name
+notification_key
+posted_at_ms
+content_fingerprint
+title/text/big_text (bounded)
+amount_hint
+state
+attempts
+last_http_status
+last_error
+created_at
+delivered_at
 ```
 
-Do not locally mirror the PayGate payments database. Operator payment data comes from the server.
+A retry keeps the original `event_id` and `posted_at_ms`.
 
-## Queue state
+A genuinely changed payment-relevant notification update creates a new immutable version/fingerprint rather than rewriting a delivered event.
+
+## Local queue
 
 ```text
 pending
@@ -174,133 +183,179 @@ failed
 delivered
 ```
 
-A new notification that passes the prefilter is inserted before network delivery. This makes process death safe.
+Insert before network delivery.
 
-Delivery is idempotent by event ID.
+Requirements:
+
+- durable across reboot/process death;
+- bounded exponential retry;
+- event delivery idempotent;
+- 4xx device-auth failures visible rather than retried forever;
+- successful delivered rows pruned on short retention;
+- failed rows inspectable without blind bulk retry;
+- raw notification content retained briefly.
+
+Do not mirror the server payments DB locally. Operator screens fetch server data.
 
 ## Background reliability
 
-Keep the proven v0.4.x model:
+Keep the proven v0.4.x mechanisms until a simpler alternative proves equally reliable:
 
-- notification listener
-- foreground runtime service
-- WorkManager fallback
-- 15-minute `AlarmManager.setAndAllowWhileIdle()` heartbeat/watchdog
-- bounded wake lock only around real delivery work
-- boot recovery
-- battery-optimization exemption status
+- NotificationListenerService;
+- foreground runtime service;
+- WorkManager fallback;
+- 15-minute `AlarmManager.setAndAllowWhileIdle()` watchdog;
+- bounded wake lock only around real delivery;
+- boot recovery;
+- battery-optimization exemption monitoring.
 
-Do not add a permanent aggressive wake lock.
+No permanent aggressive wake lock.
 
-## Pairing UX
+## QR/App-Link pairing
 
 ### New phone
 
-1. Install/open PayGate.
-2. Intro screen explains that notification access is required to detect incoming payments.
-3. User scans the QR generated from PayGate web Settings using the phone's normal camera.
-4. Android App Link opens PayGate with the one-time token.
-5. PayGate generates its device signing key in Android Keystore if one does not exist.
-6. App enrolls public key with the one-time token.
-7. App guides the user to enable notification access.
-8. App checks/request battery optimization exemption.
-9. Monitoring state becomes Active.
+1. Open PayGate web Settings -> Device -> Connect phone.
+2. Server creates a short-lived single-use pairing token and dashboard shows QR.
+3. Scan QR with normal phone camera.
+4. HTTPS App Link opens PayGate Android.
+5. App generates/reuses P-256 ECDSA key in Android Keystore.
+6. App submits token + public key + device metadata.
+7. Server atomically consumes token and enrolls device.
+8. App guides notification-listener access.
+9. App verifies battery/background readiness.
+10. Monitoring becomes Active.
 
-No server URL, pairing secret or device ID should normally be typed by the user.
+No manual server URL/device ID/pairing secret in normal UX.
 
-### Existing production phone
+## One active phone
 
-Migration must preserve:
+V4.0 assumes one payment-notification phone.
 
-- existing ECDSA private key
-- device ID
-- notification-listener grant
-- battery exemption
-- local pending/failed event database
-- app data
+Pairing another should be a **Replace phone** action:
 
-If a v4 migration can reuse the current enrolled public key, it must do so rather than forcing QR re-pairing.
+- new phone enrolls successfully first;
+- server activates new device and revokes/disables old one atomically or in one controlled flow;
+- old historical device record remains for audit;
+- avoid two active devices delivering the same payment stream.
 
-## Device credential storage
+## Existing production phone
 
-Keep the ECDSA private key non-exportable in Android Keystore. The server stores the public key.
+Upgrade must preserve:
 
-Do not configure the relay signing key to require an unlock for every signature; background delivery has to function while the device is locked. The operator UI can optionally use biometrics later, but relay signing must remain background-capable.
+- ECDSA private key;
+- device ID;
+- notification-listener grant;
+- battery exemption;
+- local pending/failed queue;
+- signing lineage;
+- app data.
 
-## Operator authentication
+No uninstall/clear-data/re-pair workaround.
 
-Login screen contains only:
+## Device credential
+
+Private ECDSA key remains non-exportable in Android Keystore and usable while locked for background signing.
+
+Server stores public key only.
+
+Admin login/token is separate from relay-device credential.
+
+## Operator login
+
+Single field:
 
 ```text
 Password
 [ Continue ]
 ```
 
-Internally the server has one fixed administrator identity.
+A 401/expired operator session signs the UI out but does not stop relay/background enrollment.
 
-The Android app stores the returned operator session credential using platform-protected app storage. Operator token expiry must sign the UI out without touching relay enrollment.
+## Payment detail
 
-## Payment detail editing
+Example:
 
-Use the same fields/rules as web:
+```text
+₹101.37              PAID
+Sourav P Bijoy
+Event: evt_hardware_security_2026
+
+Requested       ₹100.00
+Adjustment      +₹1.37
+Actual payer    Bijoy P
+UPI             bijoy@okaxis
+Collection      Paytm
+```
+
+If actual payer is unavailable, show that the notification did not provide it.
 
 Editable:
 
-- status
-- name
-- external ID
-- payer name
-- payer UPI ID
-- paid time
-- metadata/note
+- status;
+- name/person;
+- event `external_id`;
+- payer fields;
+- paid time;
+- metadata/note.
 
 Immutable:
 
-- PayGate ID
-- created time
-- requested amount
-- payable amount
-- collection-profile/destination snapshot
+- PayGate ID;
+- created time;
+- requested amount;
+- generated payable amount;
+- profile/destination snapshot.
 
-Destructive/status edits should use a confirmation sheet with a concise description of resulting webhook behavior.
-
-## Activity detail for an incoming notification
-
-Operator-facing language:
+## Activity examples
 
 ```text
-Kotak payment detected
-₹100.37
-Rahul / rahul@upi
-00:33
-Matched to pay_...
+Paytm payment detected · ₹101.37 · matched to Sourav P Bijoy
+Kotak payment detected · ₹500.42 · unmatched
+Payment updated · operator
+Webhook delivered · 200
+Phone replaced
 ```
 
-or:
-
-```text
-Incoming payment not matched
-₹100.37
-Kotak
-00:33
-```
-
-Do not expose terms such as `evidence_reference`, `processing_status` or `reconciliation` in the primary UI.
+Primary UI should not expose implementation words such as `evidence_reference`, `processing_status` or `reconciliation`.
 
 ## Tests
 
-- package allowlist
-- generic non-zero decimal-money filter
-- `.00` notification rejected by prefilter
-- unrelated Google Messages notification never queued
-- event persisted before delivery
-- duplicate event ID remains one local row
-- listener/service recovery after reboot
-- heartbeat alarm re-arm/cancel
-- pairing App Link parsing
-- one-time enrollment success/failure
-- existing key is reused across app upgrade
-- operator logout does not stop relay
-- dark theme screens render without light-theme fallback
-- server unreachable -> retry -> recovery
-- 401 device auth -> visible failed state, no infinite retry
+### Notification/queue
+
+- allowlist Paytm + Google Messages only;
+- decimal money with non-zero paise passes;
+- `.00` is filtered;
+- unrelated personal message never queues;
+- duplicate listener rescan remains one row;
+- retry preserves event ID/post time;
+- content update versioning behaves deterministically;
+- queue survives reboot/process death;
+- auth 4xx fails visibly without infinite retry.
+
+### Pairing/security
+
+- valid one-time App Link enrollment;
+- expired/used token rejected;
+- existing key reused after app upgrade;
+- Replace phone leaves one active relay device;
+- revoke blocks signed relay requests;
+- operator logout does not stop relay.
+
+### Reliability
+
+- locked + Doze heartbeat;
+- Battery Saver;
+- listener rebind;
+- network loss/recovery;
+- server restart;
+- watchdog schedule/re-arm/cancel;
+- no light-theme fallback.
+
+### UX semantics
+
+- `name` displayed as person/payee identifier;
+- event `external_id` displayed separately;
+- actual payer displayed separately and may differ;
+- random payable adjustment clearly visible;
+- immutable amount/profile fields cannot be edited.
