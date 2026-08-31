@@ -1,133 +1,230 @@
 # 03 — Payment Lifecycle and Matching
 
-## Goals
+## Core rule
 
-The matching model should be easy to explain:
+PayGate matches a payment using a server-reserved payable amount, collection profile, trusted time window and unique relay-event identity.
 
-1. PayGate chooses one unique payable amount on the active collection profile.
-2. The customer pays exactly that amount.
-3. The phone reports an incoming decimal-money notification.
-4. PayGate infers the profile and exact amount from the notification.
-5. One eligible payment owns that profile+amount+time window, so PayGate marks it paid.
+No UTR/RRN is required.
 
-No UTR/RRN dependency is required.
+The merchant-facing `name` and `external_id` are context only and are **never matching keys**:
 
-## Amounts
+- `name` = merchant-supplied human/payee identifier (for example the registrant/person name);
+- `external_id` = merchant/event identifier (for example the event ID) and may repeat across many payments;
+- `payer_name` = actual sender/payer name observed later from a payment notification and may differ from `name`.
 
-Each payment stores two monetary values:
+## Amount model
+
+Each payment stores integer paise values:
 
 ```text
-requested_amount
-payable_amount
+requested_amount_paise
+payable_amount_paise
+adjustment_paise
 ```
 
 Example:
 
 ```text
-requested_amount = ₹100.00
-payable_amount   = ₹100.37
-adjustment       = ₹0.37
+requested = ₹100.00
+payable   = ₹101.37
+adjustment = ₹1.37
 ```
 
-The API/UI must always display both requested and payable amount when they differ and explicitly identify the difference as the PayGate verification adjustment.
+The frontend must say clearly that the customer must pay the **exact PayGate amount** and display the adjustment whenever non-zero.
 
-## Expand beyond one rupee's paise
+## Candidate pool
 
-The existing v3 allocator only has `.01` through `.99` for one requested rupee amount. v4 can move into the next rupee while keeping non-zero paise.
+For a whole-rupee request, v4 may use more than one rupee of decimal space.
 
-Allocation order for a ₹100 request:
+Default `MAX_ADJUSTMENT_PAISE = 199` gives these candidates for ₹100:
 
 ```text
-₹100.01 ... ₹100.99
-₹101.01 ... ₹101.99
+₹100.01 … ₹100.99
+₹101.01 … ₹101.99
 ```
 
-Never allocate `.00`.
+Rules:
 
-The default v4 maximum adjustment is therefore **₹1.99**.
+- `.00` is never generated;
+- final payable values are unique among currently reserved values on the same collection profile;
+- adjacent requested amounts may have overlapping candidate ranges, so uniqueness is enforced on the **final payable value**, not requested amount;
+- the maximum adjustment is bounded and configurable; PayGate never silently keeps increasing the amount without limit.
 
-This gives up to 198 candidate payable values around one requested amount while bounding the customer's adjustment to less than ₹2.
+## Randomized free-pool allocator
 
-The maximum adjustment should be configurable, but increasing it is an operator choice, not an automatic emergency behavior.
+Do **not** allocate `.01`, `.02`, `.03` sequentially.
 
-## Smallest-free allocator
+Sequential allocation makes recently reused amounts predictable and increases the chance that a very delayed notification happens to collide with the newest payment using the same value.
 
-Do not randomize the customer's adjustment unless there is a demonstrated reason.
+Use a cryptographically randomized selection from the currently free candidate pool.
 
-Algorithm:
+Pseudo-flow:
 
 ```text
-profile = active profile
-for candidate from requested+₹0.01 upward in ₹0.01 steps:
-    skip every candidate ending in .00
-    stop at requested+configured_max_adjustment
-    if candidate is not reserved on this profile:
-        reserve it
-        return candidate
-return PAYMENT_CAPACITY_TEMPORARILY_UNAVAILABLE
+BEGIN IMMEDIATE
+  release reservations whose hard reuse_after <= now
+  build bounded candidate set
+  remove every .00 candidate
+  remove candidates currently reserved on this profile
+
+  preferred = free candidates not used in the soft recent-use horizon
+  pool = preferred if preferred is non-empty else all free candidates
+  cryptographically choose one candidate from pool
+
+  create payment + active amount reservation atomically
+COMMIT
 ```
 
-This minimizes the extra amount during normal load.
+Use Go `crypto/rand`, not `math/rand`, for the candidate choice.
 
-### Global uniqueness is profile-scoped
+### Why retain a short hard quarantine if allocation is random?
 
-An amount is unavailable when another payment on the **same collection profile** has that payable amount and `reuse_after > now`.
+Randomization reduces reuse probability; it does not make reuse impossible.
 
-The same payable amount may exist on Paytm and Kotak simultaneously because source/profile inference distinguishes them.
+Therefore v4 keeps a short deterministic reservation window and combines it with random allocation. The two mechanisms protect different failure modes:
 
-### Overlap between requested amounts is safe
+- hard reservation prevents immediate reuse while a normal/delayed notification is expected;
+- random allocation makes reuse after release unpredictable;
+- soft recent-use avoidance lowers the chance of quickly selecting the same released amount without blocking capacity.
 
-Example:
+### Soft recent-use avoidance
+
+This is **not** another hard quarantine.
+
+A released amount remains available if capacity is tight, but while many other free values exist PayGate should prefer values that have not been used recently.
+
+Recommended initial soft horizon: configurable, default around a few hours. It affects selection preference only; it never makes creation fail by itself.
+
+This gives most of the safety benefit of a long quarantine without holding the entire decimal pool for 24 hours.
+
+## Database-enforced reservation
+
+Use a dedicated `amount_reservations` table with a uniqueness constraint for active reservations:
 
 ```text
-Payment A requested ₹100 -> candidate ₹101.01
-Payment B requested ₹101 -> ₹101.01 is already reserved, so it receives another free candidate
+UNIQUE(collection_profile_id, payable_amount_paise)
+WHERE released_at IS NULL
 ```
 
-The allocator checks the final payable amount globally within the profile, not just within the same requested amount.
+Allocation and payment creation happen inside one SQLite write transaction. If two requests arrive concurrently, only one can own a candidate.
 
-## 5 / 5 / 5 lifecycle
+Do not rely only on an application-level `SELECT` followed by `INSERT` outside one transaction.
 
-Every payment gets three server timestamps:
+## 5 / 5 / 5 hard lifecycle
+
+Initial v4 lifecycle:
 
 ```text
 created_at
-expires_at   = created_at + 5 minutes
-grace_until  = created_at + 10 minutes
-reuse_after  = created_at + 15 minutes
+expires_at   = created_at + 5m
+grace_until  = created_at + 10m
+reuse_after  = created_at + 15m
 ```
 
-### Phase 1 — Active (0–5 min)
+### Active — 0–5 minutes
 
-- status: `pending`
-- frontend shows QR/payment instructions
-- customer is expected to pay
-- valid matching observation marks payment `paid`
+- payment status is `pending`;
+- customer is expected to pay;
+- QR/UPI instruction is valid;
+- matching observation resolves payment as `paid`.
 
-### Phase 2 — Grace (5–10 min)
+### Grace — 5–10 minutes
 
-- frontend should say the normal payment window has ended and discourage a new payment
-- PayGate still accepts an observation whose transaction/notification occurrence is in this grace period
-- this handles a customer who was already completing the UPI flow as the timer ended
+- frontend stops encouraging a new payment and says the normal window ended;
+- PayGate still accepts a payment whose trustworthy occurrence time falls inside this phase;
+- a successful grace match is simply `paid`, optionally with an internal `paid_after_expiry` history flag.
 
-A grace-period match still resolves the payment as `paid`. `paid_after_expiry=true` can be retained internally if useful; it does not need to become a public status named `late`.
+### Quarantine — 10–15 minutes
 
-### Phase 3 — Quarantine (10–15 min)
+- customer should not initiate payment using the old QR;
+- the payable value remains reserved;
+- a delayed relay delivery may still be attached to the old payment only when its occurrence time is trustworthy and proves it belongs to that payment;
+- otherwise the observation stays unmatched in Activity rather than guessing.
 
-- customer must not initiate payment using this old session
-- a new PayGate payment cannot reuse the payable amount
-- PayGate may still accept a **delayed relay delivery** only when the observation has a trustworthy occurrence time at or before `grace_until`
-- if occurrence time is not trustworthy, fail closed and show the observation as unmatched Activity
+### Reusable — 15+ minutes
 
-### Reusable (15+ min)
+The hard reservation may be released and the value returns to the random free pool.
 
-The payable amount can return to the allocation pool.
+The payment row and historical reservation are retained, so PayGate can reason about previous use when evaluating a delayed observation.
 
-An observation received after reuse must never be auto-matched to an old reservation unless its occurrence timestamp proves unambiguously which reservation it belongs to. The default simple behavior is to leave such an event unmatched rather than guess.
+## Timestamp confidence
+
+The server must distinguish **when money likely moved** from **when PayGate received the relay request**.
+
+Normalized observations should record:
+
+```text
+occurred_at
+occurred_at_source
+notification_posted_at
+server_received_at
+```
+
+Suggested `occurred_at_source` values:
+
+```text
+message_text
+notification_posted
+server_received
+```
+
+Preference:
+
+1. source-specific transaction time parsed from trusted notification/message text;
+2. Android notification `postTime`;
+3. server receive time only as a last-resort diagnostic value.
+
+`server_received` time alone must not be sufficient to auto-match a delayed event after an amount has been reused.
+
+## Reuse/collision safety rule
+
+If a payable value has only one historical reservation compatible with the trusted occurrence time, it may match that reservation.
+
+If the same value has been reused and the observation time is missing, implausible or too low-confidence to distinguish the reservations:
+
+```text
+DO NOT AUTO-MATCH
+```
+
+Store the observation as unmatched/ambiguous Activity. The operator can correct the payment directly if necessary.
+
+This is the final defense against extremely delayed SMS/notification delivery.
+
+## Auto-match algorithm
+
+For normalized observation `O`:
+
+```text
+1. dedupe signed relay event
+2. parse source and infer collection profile P
+3. validate incoming-credit semantics
+4. validate amount > 0 and paise != 00
+5. derive occurred_at + confidence/source
+6. find historical payments on P with exact payable amount
+7. restrict candidates to payments whose lifecycle can contain O.occurred_at
+8. if exactly one candidate is safe:
+      mark paid
+      attach observation
+      copy payer enrichment when present
+      append payment history
+      enqueue payment.paid webhook in same transaction
+9. if zero candidates:
+      save unmatched Activity
+10. if multiple/uncertain candidates:
+      fail closed; save ambiguous Activity
+```
+
+The **currently active collection profile is irrelevant to matching**. A Paytm observation can still pay an older Paytm payment after the operator has switched new payment creation to Kotak.
+
+## Relay amount hint is not trusted
+
+Android may send an `amount_hint` because it already found a decimal-looking token for its cheap prefilter.
+
+The server parser must re-parse and validate the notification text. `amount_hint` is never authoritative for marking a payment paid.
 
 ## Payment statuses
 
-Public/product statuses:
+Public/product statuses remain:
 
 ```text
 pending
@@ -136,134 +233,106 @@ expired
 cancelled
 ```
 
-Avoid exposing `late`, `review`, `reconciled`, `evidence_pending`, etc. as product states.
+Do not expose `late`, `review`, `reconciled`, `evidence_pending`, etc. as product states.
 
-Internal flags/history can record how the status was reached.
+## Expiry behavior
 
-### Expiry
+A customer-facing timer ends at `expires_at` (5m).
 
-A payment becomes `expired` after `grace_until` if still pending.
+The server may keep the payment internally eligible through `grace_until` (10m), then transitions unresolved `pending` payments to `expired`.
 
-The QR/frontend can visually end at `expires_at` (5 min), while the server waits until the grace window ends before declaring final expiry.
+The amount reservation survives until `reuse_after` (15m).
 
-This distinction preserves a customer-friendly timer without losing payments that complete at the boundary.
+## Cancellation
 
-## Observation eligibility
+Cancellation stops customer use immediately but does **not** free the amount immediately.
 
-A normalized observation must have:
+Keep the reservation until at least its original `reuse_after`, because a customer may already have scanned the QR or a delayed notification may still arrive.
 
-- supported/inferred collection profile
-- exact positive amount with non-zero paise
-- unique source event ID
-- occurrence/notification time
-- incoming-credit semantics confirmed by the source parser
+## Profile switch
 
-Payer name and UPI ID are useful enrichment but are not required for matching.
+Switching Paytm ↔ Kotak affects new payment creation only.
 
-## Auto-match algorithm
+Existing payments retain:
 
-Given observation `O`:
+- collection profile snapshot;
+- destination UPI ID snapshot;
+- payee-name snapshot;
+- reservation.
 
-```text
-1. dedupe O by device/source event identity
-2. parse/infer profile P
-3. find payments where:
-       collection_profile = P
-       payable_amount = O.amount
-       created_at <= O.occurred_at
-       O.occurred_at <= grace_until
-       reuse_after > safe_reference_time
-4. if exactly one eligible payment exists:
-       mark paid
-       attach observation
-       set payer fields when available
-       enqueue payment.paid webhook
-5. if none:
-       store Activity as unmatched
-6. if more than one:
-       do not guess; store Activity as ambiguous
-```
-
-With correct profile-scoped amount reservation, step 6 should be exceptional and indicates a lifecycle/migration bug or insufficient occurrence-time confidence.
-
-## No UTR/RRN requirement
-
-v4 removes UTR/RRN from the matching contract.
-
-If a parser happens to expose a bank reference in the future it may be stored as optional transaction metadata, but:
-
-- creation does not depend on it;
-- matching does not depend on it;
-- the admin UI does not require it;
-- integrations do not receive a promise that it exists.
-
-The actual dedupe boundary is the signed relay event identity.
+Disabled/inactive profiles must remain parseable/matchable for historical in-flight payments until their lifecycle has settled.
 
 ## Payer information
 
-When available from notification text, store:
+When available, store separately from merchant-supplied `name`:
 
 ```text
 payer_name
 payer_upi_id
-paid_at / occurred_at
+paid_at
 ```
 
-Never fabricate a missing field.
+Never overwrite `name` automatically with the notification payer name. A parent/friend may pay for the named attendee.
 
-A Paytm notification may provide only a payer name. A Kotak SMS may provide a UPI ID and/or name depending on wording. Null is valid.
+## No UTR/RRN requirement
 
-## Operator edits
+UTR/RRN is absent from the v4 matching contract and UI requirements.
 
-The operator can directly correct a payment without a separate Manual Review subsystem.
-
-Editable:
-
-- status
-- name/alias
-- external ID
-- payer name
-- payer UPI ID
-- paid timestamp
-- metadata
-- internal note
-
-Immutable after creation:
-
-- PayGate payment ID
-- original created timestamp
-- requested amount
-- generated payable amount
-- collection-profile snapshot / destination UPI ID
-
-Changing one of those immutable monetary/identity fields would invalidate the QR and amount reservation. Correct workflow is cancel + create a replacement.
-
-Every edit creates a payment-history entry and schedules the appropriate webhook only when the externally meaningful state actually changes.
+If a future parser happens to expose a bank reference, it may be stored as optional opaque metadata, but matching, creation, webhooks and admin correction must not depend on it.
 
 ## Capacity behavior
 
-If no payable amount is available within the configured maximum adjustment, creation fails cleanly with a retryable capacity error.
+If no free candidate exists inside the configured adjustment cap, fail creation with a retryable capacity error.
 
-Do not silently charge an arbitrarily larger amount.
+Do not:
 
-The dashboard should show current allocator pressure by profile so an operator can see whether the amount space is approaching saturation before increasing the configured cap.
+- reuse an active reservation;
+- allocate `.00`;
+- increase the adjustment above the configured cap automatically;
+- fall back to another collection profile without an explicit product decision.
 
-## Tests required before cutover
+## Required edge-case tests
 
-- first candidate is smallest free non-zero-paise amount
-- `.00` is never allocated
-- allocator advances into next rupee after `.99`
-- max adjustment is enforced
-- uniqueness is profile-scoped
-- adjacent requested amounts cannot collide
-- active/grace/quarantine timestamps are correct
-- profile switch does not change existing reservations
-- on-time Paytm match
-- grace Paytm match
-- delayed-in-quarantine match with trustworthy occurrence time
-- delayed event after reuse fails closed
-- Kotak Messages notification normalizes/matches
-- duplicate relay event is idempotent
-- unmatched event cannot mutate payment
-- ambiguous match fails closed
-- operator status edit produces history/webhook once
+### Allocation/concurrency
+
+- random candidate is always within the bounded pool;
+- `.00` is never generated;
+- repeated allocations are not deterministic sequential increments;
+- active reservation uniqueness is database-enforced;
+- two concurrent create requests cannot receive the same profile+payable value;
+- adjacent requested amounts cannot collide;
+- soft recent-use avoidance prefers older values but never causes artificial exhaustion;
+- hard capacity exhaustion returns a clean retryable error;
+- crash/rollback between candidate selection and commit leaves no orphan reservation.
+
+### Identity/context
+
+- duplicate `name` values are allowed;
+- duplicate `external_id` event IDs are allowed;
+- neither `name` nor `external_id` participates in matching;
+- idempotency key replay returns the original payment;
+- same idempotency key with changed request conflicts.
+
+### Lifecycle/time
+
+- active/grace/quarantine boundaries are exact;
+- cancellation does not release the amount early;
+- delayed relay delivery with original notification post time matches the old reservation;
+- reused amount + low-confidence delayed timestamp fails closed;
+- future/skewed device timestamps are clamped/rejected according to policy;
+- server restart does not lose reservation state.
+
+### Source/profile
+
+- Paytm observation matches only Paytm-profile reservations;
+- Kotak observation matches only Kotak-profile reservations;
+- profile switch does not alter existing payments;
+- unrelated decimal Paytm/Google Messages notification becomes ignored/unmatched, never paid;
+- duplicate relay event is idempotent;
+- unsupported GPay/Slice cannot auto-match in v4.0.
+
+### Operator/webhook
+
+- operator correction creates immutable history;
+- externally meaningful state transition enqueues exactly one webhook event;
+- webhook failure cannot roll back an already committed payment.
