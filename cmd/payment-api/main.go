@@ -22,6 +22,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/paymentemail"
 	"github.com/Phloraxx/payment-api/internal/payments"
 	"github.com/Phloraxx/payment-api/internal/paytmnotification"
+	"github.com/Phloraxx/payment-api/internal/processlock"
 	"github.com/Phloraxx/payment-api/internal/razorpaylive"
 	"github.com/Phloraxx/payment-api/internal/razorpaytest"
 	"github.com/Phloraxx/payment-api/internal/reconciliation"
@@ -50,6 +51,15 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	processLock, err := processlock.Acquire(filepath.Clean(cfg.DataDir))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() {
+		if err := processLock.Release(); err != nil {
+			log.Printf("release process lock: %v", err)
+		}
+	}()
 	app := pocketbase.NewWithConfig(pocketbase.Config{
 		DefaultDataDir:  filepath.Clean(cfg.DataDir),
 		HideStartBanner: false,
