@@ -2,19 +2,20 @@
 
 ## UX goal
 
-The web dashboard and Android app should feel like two views of the same PayGate product.
+Web dashboard and Android app are two views of the same PayGate product.
 
-The operator should be able to answer these questions immediately:
+The operator should immediately answer:
 
 - How much money came in today?
-- How many payments succeeded?
-- Which payments are pending/expired?
-- Who paid a specific payment, when, and for how much?
-- Which collection profile is active now?
-- Is the Android payment monitor connected?
+- How many payments succeeded/pending/expired?
+- Which person/payment is this?
+- Who actually paid it, when and for how much?
+- Which event does it belong to?
+- Which collection profile is active for new payments?
+- Is the PayGate phone connected?
 - Did a webhook fail?
 
-Everything else is secondary detail.
+Everything else is secondary.
 
 ## Primary navigation
 
@@ -25,28 +26,25 @@ Activity
 Settings
 ```
 
-This replaces the current collection of operational pages around Reviews, Reconciliation, SMS/Email records and connector-specific state.
+No primary products named Review, Reconciliation, Evidence, SMS Events or Connector Management.
 
 ## Visual direction
 
-Use a Razorpay-inspired **dark navy + blue** financial interface:
+Razorpay-inspired **dark navy + blue** financial UI:
 
-- deep navy, not pure black;
-- clear blue primary actions;
-- high-contrast white financial values;
-- blue-gray secondary text;
-- small-radius dense data tables on desktop;
-- responsive card/list equivalents on Android/mobile;
-- restrained use of gradients;
-- status colors used only where status matters.
+- deep navy rather than pure black;
+- clear electric-blue actions;
+- high-contrast white monetary typography;
+- blue-gray metadata;
+- dense desktop financial tables;
+- responsive mobile cards;
+- restrained gradients/status colors.
 
-Do not copy Razorpay logos, illustrations, wording or exact screens.
+Do not copy Razorpay logos, wording or exact screens.
 
-Razorpay's own product surfaces emphasize configurable branded color and a strongly blue financial identity; use that as visual inspiration rather than as a component library.
+Reference inspiration: https://razorpay.com/docs/payments/dashboard/account-settings/checkout-styling/
 
-Reference: https://razorpay.com/docs/payments/dashboard/account-settings/checkout-styling/
-
-## Proposed color tokens
+## Color tokens
 
 ```text
 --pg-bg:             #07111F
@@ -66,148 +64,148 @@ Reference: https://razorpay.com/docs/payments/dashboard/account-settings/checkou
 --pg-danger:         #F0616A
 ```
 
-Use blue as the product accent. Retire the current lime as the primary brand color for v4.
-
 ## Typography
 
-Use a clean system-first sans stack to avoid font-loading fragility:
+Use a robust system-first sans stack:
 
 ```text
 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif
 ```
 
-Monetary values use tabular numerals where possible.
-
-Hierarchy:
-
-- amount/KPI: large, heavy, tight tracking
-- page title: medium-large
-- table primary value: 14–16px semibold
-- metadata: 12–14px muted
-- labels: compact, not all-caps everywhere
-
-## Desktop shell
-
-```text
-+---------------------------------------------------------------+
-| PayGate | Overview | Payments | Activity | Settings           |
-+---------------------------------------------------------------+
-|                                                               |
-| page content                                                  |
-|                                                               |
-+---------------------------------------------------------------+
-```
-
-Prefer a compact top/side navigation with enough room for data. Avoid oversized marketing-style hero cards inside an operator dashboard.
+Use tabular numerals for money/timestamps where possible.
 
 ## Overview
 
-Top row:
+Suggested first row:
 
 ```text
 Collected today      Payments today      Pending      Expired
 ₹48,240.63           119                 3            2
 ```
 
-Second row:
+Then:
 
-- volume trend by hour/day;
-- success/pending/expired breakdown;
-- active collection profile chip.
+- volume trend;
+- status breakdown;
+- active collection profile;
+- recent payments.
 
-Then recent payments table.
-
-A small status strip at the bottom/right can show:
+Small operational strip:
 
 ```text
 PayGate phone: Connected · last seen 1m ago
 Webhook: Healthy
-Backup: Last verified 6h ago
+Backup: Verified 6h ago
 ```
 
-Do not turn system-health messages into the largest visual object on the page unless the system is actually unable to collect payments.
+Operational health should not dominate the page unless collection is actually impaired.
 
 ## Payments table
 
-Columns:
+Suggested columns:
 
 ```text
-Payment
-Name
+Person / Name
+Payment ID
+Event ID
 Requested
-Paid/Payable
+Payable/Paid
 Status
-Payer
+Actual payer
 Created
 Paid
 ```
 
-Desktop table supports column sorting where useful.
+Important semantics:
 
-Search field should search:
+- **Person / Name** = merchant-supplied `name`, e.g. `Sourav P Bijoy`;
+- **Event ID** = merchant-supplied `external_id`, e.g. `evt_hardware_security_2026`;
+- **Actual payer** = notification-derived payer name and may be a different person.
 
-- PayGate payment ID
-- external ID
-- name/alias
-- payer name
-- payer UPI ID
-- exact amount
-- metadata text where indexed safely
+Search should cover:
+
+- PayGate payment ID;
+- person/name;
+- event `external_id`;
+- optional metadata such as registration ID;
+- payer name;
+- payer UPI ID;
+- exact requested/payable amount;
+- status/date/profile.
 
 Filters:
 
-- status
-- date range
-- requested/payable amount range
-- collection profile
+- status;
+- date range;
+- requested/payable amount range;
+- event ID;
+- collection profile.
 
-Persist filter state in URL query parameters for shareable/reloadable admin views.
+Event ID is not unique; filtering one event should naturally show many payments.
+
+Persist filter state in URL query parameters on web.
 
 ## Payment detail
 
-Header:
+Example:
 
 ```text
-₹100.37                                  PAID
-IEEE workshop registration
+₹101.37                                    PAID
+Sourav P Bijoy
 pay_01J...
+
+Event ID          evt_hardware_security_2026
+Requested         ₹100.00
+Payable/Paid      ₹101.37
+Adjustment        ₹1.37
+Actual payer      Bijoy P
+Payer UPI ID      bijoy@okaxis
+Paid at           1 Sep, 12:33 AM
+Created           1 Sep, 12:30 AM
+Collection        Paytm
 ```
 
-Summary grid:
+The interface should make `name` versus actual payer visually unambiguous.
 
-```text
-Requested        ₹100.00
-Payable/Paid     ₹100.37
-Adjustment       ₹0.37
-Payer            Rahul Kumar
-UPI ID           rahul@okaxis
-Paid at          1 Sep, 12:33 AM
-Created          1 Sep, 12:30 AM
-Collection       Paytm
-External ID      reg_284
-```
+If payer data is unavailable, show `Not provided by notification` rather than inventing a value.
 
 Timeline:
 
 ```text
-12:30:00 Payment created
+12:30:00 Payment created · Paytm · ₹101.37 reserved
 12:33:08 Incoming Paytm payment detected
 12:33:08 Payment marked paid
-12:33:09 Webhook delivered (200)
+12:33:09 payment.paid webhook delivered · 200
 ```
 
-Technical notification text should be inside an expandable Activity entry, not clutter the payment summary.
+Technical raw notification text belongs in an expandable Activity/detail section, not the primary summary.
+
+## Random payable amount UX
+
+The operator and test frontend must make the exact amount understandable without exposing allocator jargon.
+
+Preferred wording:
+
+```text
+Requested     ₹100.00
+Pay exactly   ₹101.37
+Adjustment    +₹1.37
+```
+
+Do not call the random amount a fee unless the business actually treats it as a fee.
+
+Settings may expose allocator configuration such as maximum adjustment, but normal Payments screens should simply show what was requested and what was payable.
 
 ## Edit payment
 
-One edit drawer/modal instead of a separate manual-review workflow.
+Use one edit drawer/modal rather than a manual-review subsystem.
 
-Editable fields:
+Editable:
 
 ```text
 Status
 Name
-External ID
+Event ID (external_id)
 Payer name
 Payer UPI ID
 Paid at
@@ -215,43 +213,51 @@ Metadata
 Internal note
 ```
 
-When status changes, display exactly what will happen:
+Immutable:
 
 ```text
-Changing status from Pending to Paid will create a payment.paid webhook event.
+PayGate payment ID
+Created time
+Requested amount
+Generated payable amount
+Profile/destination snapshot
 ```
 
-Always append an immutable history record recording old/new values and timestamp.
+Changing immutable monetary identity would invalidate the issued payment instruction. Correct flow is cancel + replacement payment.
+
+When status changes, preview the side effect:
+
+```text
+Pending -> Paid will append history and queue payment.paid webhook.
+```
+
+Every admin edit appends immutable history.
 
 ## Activity
 
-Activity is the home for everything that happened around money without forcing the operator to learn implementation terms.
+Activity represents everything around money without forcing implementation vocabulary.
 
-Rows can be:
+Examples:
 
 ```text
-Payment detected · Paytm · ₹100.37 · matched
+Payment detected · Paytm · ₹101.37 · matched to Sourav P Bijoy
 Payment detected · Kotak · ₹501.42 · unmatched
 Payment updated · pay_... · operator
 Webhook delivered · payment.paid · 200
 Webhook failed · payment.expired · 404
 Device connected · Edge 60 Stylus
+Profile changed · Paytm -> Kotak
 ```
 
-Filters can expose type/source/status when needed.
-
-An unmatched payment observation is not a “Review Case”. It is simply an Activity item. The operator can inspect it and edit the relevant payment if necessary.
+An ambiguous/unmatched observation is an Activity item, not a separate Review product.
 
 ## Settings
 
 ### Collection
 
-Show two profile cards initially:
-
 ```text
 Paytm                  ACTIVE
 UPI: ...
-[Make active disabled]
 
 Kotak
 UPI: ...
@@ -260,17 +266,27 @@ UPI: ...
 
 Switch confirmation:
 
-> New payments will use Kotak. Existing Paytm payments keep their current destination and remain matchable.
+> New payments will use Kotak. Existing Paytm payments keep their destination and remain matchable.
 
-The active profile change must be one click + concise confirmation.
+### Amount allocation
+
+Expose only settings that are operationally meaningful:
+
+```text
+Maximum adjustment        ₹1.99
+Hard reservation          15 minutes
+Soft recent-use avoidance configurable
+```
+
+Avoid exposing random seeds/pool internals.
 
 ### Integrations
 
-- merchant API key: create/rotate
-- webhook destination URL
-- webhook secret: create/rotate
-- last successful webhook
-- retry one selected failed delivery
+- merchant API key create/rotate;
+- webhook URL;
+- webhook signing secret rotate;
+- latest webhook health;
+- retry one selected exhausted event.
 
 ### Device
 
@@ -279,24 +295,36 @@ PayGate Android        Connected
 Last seen              1 minute ago
 Notification access    Enabled
 Background             Unrestricted
-App version            0.x / v4
+App version            ...
 ```
 
 Actions:
 
-- Connect phone (shows pairing QR)
-- Revoke device
+- Connect/Replace phone -> pairing QR;
+- Revoke device.
 
-No Google Messages connector pairing section in target v4.
+No Google Messages connector pairing section in final v4.
+
+### Storage / backup
+
+Show human-level health only:
+
+```text
+Database               Healthy
+Last backup            ...
+Last verified backup   ...
+```
+
+Do not expose WAL checkpoint controls in the normal product UI.
 
 ### Security
 
-- Change admin password
-- Active admin sessions with revoke-all (optional if trivial)
+- change admin password;
+- revoke active sessions if needed.
 
 ## Login
 
-Only one field:
+One field:
 
 ```text
 PayGate
@@ -307,34 +335,39 @@ Password
 Continue
 ```
 
-No username/email selector because the deployment has one operator identity.
-
-Rate-limited failure messages remain generic.
+No username/email.
 
 ## Responsive behavior
 
-The web dashboard must be genuinely usable from a phone even though Android is the preferred mobile operator surface.
+Web dashboard must remain usable on a phone:
 
-- tables collapse to transaction cards under narrow widths;
-- filters become a bottom sheet/drawer;
-- payment actions remain reachable without horizontal scrolling;
-- keep amounts/status visible in the first card row.
+- tables become payment cards;
+- filters become drawer/sheet;
+- amount/status/name stay visible without horizontal scrolling;
+- actions remain reachable.
+
+Android remains the preferred mobile operator client.
 
 ## Accessibility
 
-- maintain WCAG-level text contrast across dark surfaces;
-- visible keyboard focus ring in blue/white;
-- status must not be communicated by color alone;
-- tables expose semantic headers;
-- interactive rows must still have explicit buttons/links for keyboard/screen-reader access;
-- respect reduced-motion preference.
+- WCAG-level contrast on dark surfaces;
+- visible keyboard focus;
+- status not color-only;
+- semantic table headers;
+- explicit controls rather than click-only rows;
+- reduced-motion support;
+- monetary values readable at large text sizes.
 
-## Anti-patterns to avoid
+## Anti-patterns
 
-- giant “35 things need attention” hero as the first dashboard object;
-- internal names such as `evidence_reference`, `relay processing status`, `reconciliation item`;
-- excessive rounded cards around every line of data;
-- decorative gradients behind dense tables;
-- separate screens for each notification source;
-- exposing Paytm/Kotak choice to merchant/customer checkout;
-- light-theme fallback on Android.
+Avoid:
+
+- giant attention hero cards;
+- light-theme fallback for the product UI;
+- internal terms such as evidence reference/reconciliation state;
+- a separate page per notification source;
+- treating event `external_id` as unique;
+- labeling merchant `name` as an event title;
+- hiding the random payable adjustment;
+- letting the admin edit the already-issued payable amount;
+- exposing Paytm/Kotak routing to customer/merchant checkout.
