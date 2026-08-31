@@ -2,114 +2,189 @@
 
 ## One product, two runtime artifacts
 
-The name **PayGate** refers to the complete payment gateway, not only an HTTP API.
+**PayGate** is the payment gateway, not merely an HTTP API.
 
-The finished system has only two first-class runtime artifacts:
+The final system has two first-class runtime artifacts:
 
 1. **PayGate server**
 2. **PayGate Android app**
 
-The server contains the developer API, admin dashboard, payment state machine, collection-profile configuration, notification normalization, matching, webhooks and persistence.
+The server owns developer API, payment state, collection profiles, amount reservation, notification parsing, matching, direct SQLite persistence, admin dashboard and webhooks.
 
-The Android app is simultaneously the operator client and the background phone-notification relay. There must not be a separately managed “PayGate Relay” product.
+The Android app is both operator client and background phone-notification sensor. There is no separately managed Relay product.
 
-The existing **payment-frontend** repo remains an integration playground used to test the PayGate API and customer QR/status UX. It is intentionally outside the product boundary.
+The existing **payment-frontend** remains a separate integration/testing playground and is intentionally outside the PayGate product boundary.
+
+## Merchant-facing mental model
+
+The integrating system asks:
+
+> Create a ₹100 PayGate payment for this person, related to this event.
+
+Example:
+
+```json
+{
+  "amount": 100,
+  "name": "Sourav P Bijoy",
+  "external_id": "evt_hardware_security_2026"
+}
+```
+
+PayGate answers with:
+
+- PayGate payment ID;
+- requested amount;
+- randomly reserved exact payable amount;
+- adjustment;
+- canonical UPI URI;
+- status/lifecycle timestamps;
+- payer details later when a notification exposes them.
+
+## `name` is not the event name
+
+`name` is the merchant-supplied **human/payee/person identifier** attached to the payment.
+
+It is not used to decide whether money was received.
+
+Actual notification-derived sender data is separate:
+
+```text
+name        = person the merchant associates with the payment
+payer_name  = person/account name observed from the actual payment notification
+```
+
+They may differ. For example, a parent may pay for a student's registration.
+
+## `external_id` is the event ID
+
+`external_id` is the event identifier supplied by the integrating system.
+
+It may repeat across many PayGate payments because one event can have many attendees/payers.
+
+Therefore it is context/filtering data, not:
+
+- a primary key;
+- a unique constraint;
+- an idempotency key;
+- a matching key.
+
+The integration stores the returned PayGate payment ID for each payment. `Idempotency-Key` prevents accidental duplicate creation.
 
 ## What the integrating application should know
 
-An integrating backend should know only:
+It should know only:
 
-- requested amount
-- a human-readable payment name/alias
-- its own external ID
-- optional metadata
-- PayGate payment ID
-- requested and payable amount
-- canonical UPI URI
-- payment status
-- payer details after payment, when available
-- timestamps
+- amount;
+- person/payee `name`;
+- event `external_id`;
+- optional metadata;
+- PayGate payment ID;
+- requested/payable amount and adjustment;
+- canonical UPI URI;
+- payment status;
+- payer details after payment when available;
+- timestamps.
 
 It must not know:
 
-- whether Paytm or Kotak is active
-- how phone notifications are captured
-- whether the match originated from Paytm or Google Messages
-- any relay-device identifier
-- parser names
-- reconciliation/evidence concepts
+- whether Paytm or Kotak is currently active;
+- which Android package produced confirmation;
+- parser/relay concepts;
+- amount-pool state;
+- Google Messages internals.
 
-## What the customer-facing frontend should know
+## Frontend responsibility
 
-The frontend receives the canonical UPI URI and renders the QR itself. QR generation is a presentation concern.
-
-Example boundary:
+PayGate returns the canonical UPI string.
 
 ```text
-Frontend/merchant backend
-        |
-        | amount=100, name="Workshop registration"
-        v
-      PayGate
-        |
-        | id, payable=100.37, upi_uri, timestamps
-        v
-Frontend renders QR and polls status
+merchant/test frontend
+       |
+       | amount + name + event ID
+       v
+    PayGate
+       |
+       | payment ID + exact payable + upi_uri
+       v
+frontend renders QR and polls payment status
 ```
 
-The frontend never chooses a collection profile.
+The frontend never chooses the collection profile and never constructs a destination UPI ID itself.
 
-## What the Android app should know
+## Android responsibility
 
-The Android background relay is intentionally dumb.
+The phone is a trustworthy sensor, not the payment engine.
 
-It should know:
+It knows:
 
-- which Android packages are allowed to be observed
-- whether a notification contains a plausible incoming money amount with non-zero paise
-- the notification package, unique local event identity, timestamp and minimum text fields
-- how to persist/retry a delivery
-- how to sign requests to PayGate
+- allowed notification packages;
+- a cheap generic decimal-money prefilter;
+- notification package/key/text/post time;
+- durable local queue/retry;
+- device request signing;
+- heartbeat/background survival.
 
-It should not know:
+It does **not** know:
 
-- the currently active Paytm/Kotak collection profile
-- which payment is expected
-- PayGate amount allocation state
-- payment matching rules
-- source-specific business rules beyond the generic prefilter
+- active profile;
+- payment candidates;
+- amount reservation state;
+- payment matching rules;
+- whether a particular notification ultimately pays anything.
 
-Keeping the phone dumb means most parser changes are server releases instead of APK releases.
-
-## v4.0 supported collection sources
+## v4.0 sources
 
 ### Paytm
 
-- Receiving profile: Paytm
-- Observation source: `com.paytm.business`
-- Server parser: Paytm incoming-credit notification parser
+```text
+Paytm for Business notification
+-> PayGate Android
+-> signed relay event
+-> PayGate server Paytm parser
+-> profile paytm
+```
 
 ### Kotak
 
-- Receiving profile: Kotak
-- Observation source: Google Messages notification (`com.google.android.apps.messaging`)
-- Server parser: Kotak bank-credit SMS parser
+```text
+Kotak bank credit SMS
+-> Google Messages notification
+-> PayGate Android
+-> signed relay event
+-> PayGate server Kotak parser
+-> profile kotak
+```
 
-Google Messages is only the Android notification surface. The target server does not log in to Google Messages and does not run libgm.
+There is no final server-side Google Messages/libgm login.
 
 ### Deferred
 
-- GPay notifications
-- Slice
-- additional banks/payment apps
+- Google Pay matching;
+- Slice;
+- other banks/payment apps.
 
-The ingestion architecture must make adding these a parser/profile addition rather than an Android architecture change.
+Their future addition must be a parser/profile extension, not another relay architecture.
+
+## Amount identity principle
+
+PayGate deliberately generates a non-`.00` exact amount and reserves that amount within the receiving profile.
+
+V4 selection is randomized across the bounded free pool rather than sequential `.01`, `.02`, `.03` assignment.
+
+A short hard lifecycle plus soft recent-use avoidance protects against delayed notifications without a 24-hour capacity lock.
+
+Matching uses:
+
+```text
+profile + exact payable amount + trustworthy occurrence time + unique relay event
+```
+
+not merchant name, event ID or UTR/RRN.
 
 ## Admin product principles
 
-The operator should think in terms of payments, not reconciliation machinery.
-
-Primary information architecture:
+Primary navigation:
 
 ```text
 Overview
@@ -118,43 +193,40 @@ Activity
 Settings
 ```
 
-The operator must be able to:
+Operator should be able to:
 
-- see total collections and transaction counts
-- search every payment quickly
-- filter by status/date/amount/profile
-- open one payment and understand its full history
-- edit allowed payment fields directly
-- switch the active collection profile for future payments
-- see incoming payment activity that did not match
-- configure webhook delivery
-- pair/revoke the Android device
-- see whether notification monitoring is healthy
+- see collection totals and payment counts;
+- search/filter every payment;
+- open one payment and understand it immediately;
+- edit allowed fields directly;
+- switch the active collection profile for future payments;
+- inspect unmatched incoming payment activity;
+- pair/replace/revoke the Android phone;
+- see relay/webhook/backup health.
 
-The operator should not need dedicated pages named Manual Review, Reconciliation, SMS Evidence, Paytm Evidence or Connector Management.
+The operator should not have to understand separate products called Manual Review, Reconciliation, Evidence or Google Messages Connector.
 
 ## Visual direction
 
-The new interface should use a **Razorpay-inspired dark financial UI**:
+Use a Razorpay-inspired dark financial interface:
 
-- deep navy background
-- layered blue-black surfaces
-- clear electric-blue primary actions
-- white/high-contrast monetary typography
-- compact tables and transaction detail panels
-- restrained status colors
-- minimal decorative gradients
+- deep navy/blue-black base;
+- vivid blue primary action;
+- white high-contrast money typography;
+- dense but readable transaction tables;
+- restrained status colors;
+- minimal decoration.
 
-The design is inspiration, not a screen-for-screen Razorpay clone.
+Use Razorpay as information/visual inspiration, not as a copied brand or screen design.
 
 ## Simplicity tests
 
-Every proposed v4 component must pass these questions:
+Every v4 feature must answer:
 
-1. Does the merchant/customer need to know this exists?
-2. Does it eliminate real ambiguity or failure?
-3. Can it live inside an existing component instead?
-4. Can this be a normal payment/activity field rather than a separate subsystem/UI?
-5. Does it reduce or increase the number of things that must be deployed, paired or monitored?
+1. Does payment correctness require it?
+2. Does merchant/operator UX require it?
+3. Can SQLite enforce this invariant instead of custom recovery code?
+4. Can this be a field/history event instead of another subsystem?
+5. Does it reduce deployed/pairing/operational moving parts?
 
-If a feature fails those tests, omit it unless production evidence requires it.
+If not, omit it until a real production use case proves otherwise.
