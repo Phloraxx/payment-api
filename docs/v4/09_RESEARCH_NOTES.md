@@ -1,83 +1,36 @@
 # 09 — Research Notes
 
-This document records the concrete evidence behind the v4 design so future implementation does not have to rediscover why the architecture changed.
+This file records why the v4 plan changed so implementation does not have to rediscover the same conclusions.
 
 ## Current-code findings
 
-### The current frontend selects the payment account
+### Current frontend chooses payment account
 
-Current file:
+`payment-frontend/src/server/paygate.ts` currently sends `paymentAccount` to PayGate.
 
-```text
-payment-frontend/src/server/paygate.ts
-```
+V4 removes that merchant/frontend responsibility.
 
-`createPayment(...)` currently accepts a `paymentAccount` and sends it to `/api/payments`.
+### Current API accepts payment account
 
-That means the caller/frontend currently participates in Paytm/Kotak/Slice routing. v4 removes this parameter from normal payment creation.
+`payment-api/internal/api/api.go` contains `paymentAccount` in the create body and exposes `/api/payment-accounts`.
 
-### The current API also accepts `paymentAccount`
+V4 replaces that public decision with one server-owned active collection profile for new payments.
 
-Current file:
+### Current API already builds canonical UPI URI
 
-```text
-payment-api/internal/api/api.go
-```
+`payment-api/internal/payments/service.go` builds `upi://pay?...` from account destination + payable amount.
 
-`createPaymentBody` contains:
+That responsibility stays server-side.
 
-```text
-paymentAccount
-```
+### Current frontend already renders QR
 
-and the API exposes `/api/payment-accounts`.
+`payment-frontend/src/client/pages/PaymentPage.tsx` uses `QRCodeCanvas` on the server-returned URI.
 
-v4 replaces that with a server-owned active collection profile.
+That presentation boundary is retained. V4 does not need server QR image endpoints or hosted checkout.
 
-### The current API already generates the canonical UPI URI
+### Current Android already observes required notification surfaces
 
-Current file:
-
-```text
-payment-api/internal/payments/service.go
-```
-
-`CreateResponse(...)` constructs `upi://pay?...` from the selected account and payable amount.
-
-This responsibility stays on PayGate.
-
-### The current frontend renders the QR
-
-Current file:
-
-```text
-payment-frontend/src/client/pages/PaymentPage.tsx
-```
-
-The page uses `QRCodeCanvas` and renders the server-returned UPI URI.
-
-This is already the desired presentation boundary. v4 keeps QR generation in the frontend and removes the frontend's account/verification branching.
-
-### The current frontend leaks internal payment route concepts
-
-`PaymentPage.tsx` currently branches on fields such as:
-
-- `paymentAccount`
-- `paymentFlow`
-- `verificationMethod`
-- Paytm/Kotak/Slice labels
-
-v4 removes these from the customer/test UX.
-
-### The Android app already receives all relevant phone notification surfaces
-
-Current file:
-
-```text
-paygate-relay-android/app/src/main/java/io/github/phloraxx/paygaterelay/RelayConfig.java
-```
-
-The current relay recognizes:
+Current relay recognizes:
 
 ```text
 com.paytm.business
@@ -86,223 +39,319 @@ com.google.android.apps.nbu.paisa.merchant
 com.google.android.apps.messaging
 ```
 
-Therefore a separate server-side Google Messages login is not required merely to obtain Google Messages-visible bank SMS notifications.
-
-For v4.0 the allowlist should be narrowed to Paytm Business + Google Messages. GPay matching and Slice are deferred.
-
-### The server currently treats non-Paytm Android notifications as observation-only
-
-Current file:
+V4.0 narrows matching rollout to:
 
 ```text
-payment-api/internal/androidrelay/service.go
+Paytm Business
+Google Messages -> Kotak
 ```
 
-The current code routes only Paytm notification events into Paytm matching; other allowlisted app notifications are saved as `observed_only`.
+GPay/Slice are deferred.
 
-This confirms that promoting Kotak/Google Messages into the unified parser/matcher is a well-defined change rather than inventing a new transport.
+### Current server routes non-Paytm Android events observation-only
 
-### The current server contains a separate libgm Google Messages subsystem
+`internal/androidrelay/service.go` currently sends only Paytm notification events into Paytm matching; other allowlisted Android notifications are `observed_only`.
 
-Current file:
+Promoting Kotak-via-Google-Messages into the unified server parser/matcher is therefore an extension of the existing transport, not a new relay.
+
+### Current server duplicates Google Messages transport through libgm
+
+`internal/gmessages/manager.go` handles Google account/session pairing, cookies, reconnect, reauth and message ingestion.
+
+Once Android Google Messages notification parity is proven for Kotak, this duplicate server-side transport can be removed.
+
+### Current bank SMS matching requires RRN, Paytm does not
+
+Current SMS matching requires amount + RRN. Paytm notification matching already proves idempotency can instead use unique notification evidence identity.
+
+V4 therefore removes UTR/RRN from the required matching contract.
+
+### Current amount allocator is already partially randomized
+
+Current `payments.Service` picks a cryptographically random suffix start using Go `crypto/rand`, then scans the 99 suffixes for a free candidate.
+
+The first v4 planning draft accidentally changed this into a deterministic smallest-free allocator. That was the wrong direction.
+
+V4 restores and generalizes the useful property:
 
 ```text
-payment-api/internal/gmessages/manager.go
+cryptographically random choice among bounded free values
 ```
 
-The manager handles:
+while expanding the pool beyond one rupee and adding database-enforced active reservations.
 
-- libgm session state
-- Google pairing
-- cookies/reauthentication
-- reconnect behavior
-- Google Messages client events
-- filtering bank-credit messages
+### Current default quarantine is 24h
 
-This is substantial duplicated transport responsibility once Android notification delivery is proven for Kotak.
-
-### Current matching is more RRN-dependent than v4 needs
-
-Current bank SMS matching requires amount + RRN, while current Paytm notification matching already demonstrates a different idempotency model using notification evidence identity.
-
-v4 uses signed relay event identity for deduplication and profile+amount+time for matching. UTR/RRN is removed from the required contract.
-
-### Current decimal pool is only `.01` to `.99`
-
-Current `payment-api/internal/payments/service.go` iterates 99 suffixes and adds one of them to the requested paise value.
-
-v4 generalizes this to the next whole rupee while still skipping `.00` and preferring the smallest free candidate.
-
-### Current lifecycle defaults are 5m + 24h quarantine
-
-Current `.env.example` contains:
+`.env.example` currently has:
 
 ```text
 PAYMENT_TTL=5m
 PAYMENT_QUARANTINE=24h
 ```
 
-v4 replaces this conservative amount hold with explicit 5m active + 5m grace + 5m quarantine, because profile+amount+time matching and the bounded relay-delivery window make a 24-hour payable-amount lock unnecessary for the target flow.
+V4 targets a short 5m active + 5m grace + 5m hard quarantine, then random reuse with soft recent-use avoidance.
 
-This change must be proven with delayed-notification tests before production.
+This must be validated specifically against delayed phone notifications before production.
 
-### Existing relay authentication is already strong
+### Existing relay authentication is strong
 
-Current `payment-api/internal/androidrelay/service.go` validates ECDSA signatures against an enrolled device public key. Device identity is tied to the public key fingerprint and requests include timestamp/body integrity.
+Current Android relay service validates ECDSA signatures against an enrolled device public key and binds identity to the public-key fingerprint.
 
-v4 keeps this security model. QR pairing only improves enrollment UX.
+V4 keeps this model and changes only enrollment UX to one-time QR/App-Link pairing.
 
-## Android platform research
+## Merchant identity semantics discovered during design review
 
-### NotificationListenerService is the correct primitive
+The merchant `name` field is not an event label. It identifies the person/payee/subject attached to this payment.
 
-Android documents `NotificationListenerService` as the system service that receives notification posted/removed callbacks after the user grants notification-listener access.
+`external_id` is the merchant's event ID.
 
-Reference:
+That means `external_id` is intentionally **non-unique**: one event can have many PayGate payments.
+
+Consequences:
+
+- never make `external_id` UNIQUE in SQLite;
+- never use it as idempotency identity;
+- never use it for matching;
+- merchant/test frontend stores returned PayGate payment ID per registration/payment;
+- `Idempotency-Key` is the duplicate-create boundary;
+- actual notification-derived payer identity remains separate from merchant `name`.
+
+## Randomized amount-allocation research/conclusions
+
+### Why sequential amounts are undesirable
+
+Sequential `.01`, `.02`, `.03` allocation makes reuse predictable and repeatedly concentrates traffic on the same low suffixes after reservations expire.
+
+That is unnecessary because PayGate does not need human-predictable decimals.
+
+### Why randomization is not enough by itself
+
+Random allocation only lowers the probability that a newly created payment reuses the exact amount belonging to a very delayed old notification.
+
+It cannot make that probability zero.
+
+Therefore final design combines:
+
+1. 5m active;
+2. 5m grace;
+3. 5m hard no-reuse quarantine;
+4. cryptographic random candidate selection after release;
+5. soft recent-use avoidance when alternatives exist;
+6. occurrence-time reasoning against historical reservations;
+7. fail-closed behavior when reused amount + timestamp ambiguity cannot be resolved.
+
+### Why soft recent-use avoidance is useful
+
+A long 24h quarantine reduces usable amount capacity whether or not old notifications actually exist.
+
+A soft horizon changes only **preference**:
+
+- old/unrecent free values are preferred;
+- recently released values remain usable if the pool is pressured.
+
+This improves stale-collision resistance without creating artificial capacity exhaustion.
+
+### Cross-rupee pool
+
+With default max adjustment ₹1.99 and a whole-rupee requested amount, candidate values include 198 non-`.00` amounts.
+
+Adjacent requested amounts overlap, so active uniqueness must be based on final profile+payable amount, not requested amount.
+
+## Android research
+
+### NotificationListenerService is the right primitive
+
+Android provides `NotificationListenerService` for notification posted/removed callbacks after user-granted notification access.
 
 https://developer.android.com/reference/android/service/notification/NotificationListenerService.html
 
-This supports PayGate's existing model of observing Paytm and Google Messages notifications without becoming the user's SMS app.
+### Direct SMS permissions add unnecessary policy complexity
 
-### Direct SMS permissions would make the product more complicated
-
-Google Play treats SMS permissions as highly sensitive and generally requires the app to be the active default SMS/Phone/Assistant handler for those permissions.
-
-References:
+Google Play heavily restricts SMS/Call Log permissions and generally expects eligible/default handlers.
 
 https://support.google.com/googleplay/android-developer/answer/16558241
 
-https://support.google.com/googleplay/android-developer/answer/10208820
+PayGate does not need to become an SMS client to observe the Google Messages notification that already exists.
 
-Therefore v4 should **not** replace notification capture with `READ_SMS`/`RECEIVE_SMS`.
+### Device key storage
 
-### Android Keystore remains appropriate for device keys
-
-OWASP Mobile guidance recommends platform/hardware-backed Android Keystore for cryptographic key material.
-
-Reference:
+Keep Android Keystore for the ECDSA private key.
 
 https://mas.owasp.org/MASTG/knowledge/android/MASVS-STORAGE/MASTG-KNOW-0047/
 
-The current ECDSA private key should remain non-exportable in Android Keystore.
-
 ## UPI research
 
-Razorpay's current UPI documentation notes that UPI Collect/manual VPA entry has been deprecated for most normal use cases effective 28 February 2026 and directs integrations toward UPI Intent or QR.
+Current UPI product direction favors QR/Intent rather than legacy manual-collect flows.
 
-Reference:
+PayGate's server-generated canonical UPI URI + frontend QR rendering remains aligned with that model.
 
-https://razorpay.com/docs/payments/payment-methods/upi/
+Razorpay references used during planning:
 
-PayGate's canonical UPI URI + frontend-rendered QR model therefore remains aligned with current UPI payment UX.
+- https://razorpay.com/docs/payments/payment-methods/upi/
+- https://razorpay.com/docs/payments/payment-methods/upi/upi-intent/
 
-Razorpay's UPI Intent documentation also describes pre-populating the payment details in the UPI app and using QR on desktop flows:
+## SQLite research
 
-https://razorpay.com/docs/payments/payment-methods/upi/upi-intent/
+### SQLite is the database; PocketBase is a framework above it
 
-PayGate does not need to copy Razorpay's SDK; the relevant design lesson is that the server supplies canonical payment instructions while presentation chooses QR/intent appropriately.
+Current PayGate effectively has:
 
-## Razorpay visual research
+```text
+Go + PocketBase + SQLite
+```
 
-Razorpay's products consistently use a strong blue financial identity and allow checkout branding/background color customization.
+Target is:
 
-Reference:
+```text
+Go + database/sql + modernc.org/sqlite + SQLite
+```
 
-https://razorpay.com/docs/payments/dashboard/account-settings/checkout-styling/
+The current repository already depends directly on:
 
-The v4 design takes the **dark navy + vivid blue + dense financial data** direction as inspiration but defines independent PayGate tokens and does not copy Razorpay's branding/assets/screens.
+```text
+modernc.org/sqlite v1.54.0
+modernc.org/libc v1.74.1
+```
 
-## Database research
+So removing PocketBase does not require introducing a different database engine.
 
-### PocketBase is SQLite plus a backend framework
+`modernc.org/sqlite` is CGO-free and exposes SQLite's online Backup API. Its v1.54.0 release upgraded the embedded SQLite engine to SQLite 3.53.3.
 
-PocketBase describes itself as an open-source backend containing embedded SQLite, auth management, realtime subscriptions, dashboard UI and REST-ish APIs.
+References:
 
-It also currently warns that it remains under active development before v1 and is not recommended for production-critical applications unless the operator accepts migration/changelog work.
+- https://pkg.go.dev/modernc.org/sqlite
+- https://gitlab.com/cznic/sqlite/-/blob/v1.54.0/driver.go
 
-Reference:
+### One application server is a documented SQLite use case
 
-https://pocketbase.io/docs/
-
-For v4, the extra framework is no longer providing enough value to justify remaining in the payment-critical runtime.
-
-### SQLite is suitable for the current server shape
-
-SQLite's own guidance explicitly lists server-side databases as an appropriate use when application-specific requests go through one application server. It cautions primarily when many independent writers or multiple networked servers need simultaneous direct writes.
-
-Reference:
+SQLite says a server-side application database is appropriate when SQL is executed by the application server on the same machine as the database file, even though end users are remote.
 
 https://www.sqlite.org/whentouse.html
 
-That maps closely to PayGate's production invariant of one API/server process owning the database.
+That maps directly to PayGate's one-server-process architecture.
 
-### WAL fits PayGate's reader/writer pattern
+### WAL does not mean multiple writers
 
-SQLite WAL allows concurrent readers and a writer, while still retaining one writer at a time and requiring same-host database access.
-
-Reference:
+WAL lets readers continue while a writer is active, but SQLite still serializes writers.
 
 https://www.sqlite.org/wal.html
 
-This is appropriate for one PayGate service on the Oracle VM.
+That is fine for PayGate because writes are short payment/event transactions rather than long analytical jobs.
 
-### Backups should use SQLite-aware APIs
+### `BEGIN IMMEDIATE` is useful for critical writes
 
-SQLite documents its online Backup API for consistent backups of a running database.
+SQLite documents that `BEGIN IMMEDIATE` acquires the write transaction up front, so contention appears before business logic has performed a read-then-write upgrade.
 
-Reference:
+https://sqlite.org/lang_transaction.html
+
+Use it for allocation/matching/profile-switch/pairing mutations while normal reads remain simple/deferred.
+
+### Bounded busy timeout
+
+SQLite provides a busy timeout so short lock contention can wait rather than immediately return `SQLITE_BUSY`.
+
+https://sqlite.org/c3ref/busy_timeout.html
+
+This is a bounded resilience mechanism, not permission to hold long write transactions.
+
+### `synchronous=FULL` is the safer payment setting
+
+SQLite's PRAGMA documentation explains that WAL + `synchronous=FULL` adds an extra WAL sync after each commit and provides stronger durability across power loss than NORMAL.
+
+https://www.sqlite.org/pragma.html#pragma_synchronous
+
+PayGate should prefer this durability unless measured production performance proves it unacceptable.
+
+### STRICT tables reduce accidental SQLite type flexibility
+
+SQLite supports per-table STRICT typing.
+
+https://www.sqlite.org/stricttables.html
+
+V4 should use STRICT domain tables plus CHECK/UNIQUE/foreign-key constraints so bugs fail at the database boundary.
+
+### Partial unique indexes fit active state
+
+SQLite partial indexes apply only to rows satisfying a WHERE clause.
+
+https://www.sqlite.org/partialindex.html
+
+Useful invariants:
+
+```text
+one active collection profile
+one unreleased reservation per profile+payable amount
+```
+
+### Online Backup API is the correct live-backup primitive
+
+SQLite's Backup API copies a consistent snapshot while source read locks are held only during page copying.
 
 https://www.sqlite.org/backup.html
 
-The v4 backup plan therefore has the already-running PayGate process create the consistent backup, with the host exporter copying only the completed artifact. This prevents a repeat of the earlier second-process/live-database incident.
+This avoids raw-copying a changing DB/WAL pair and avoids launching a second PayGate runtime against live storage.
+
+### `PRAGMA optimize` is current planner-maintenance guidance
+
+SQLite 3.46+ recommends `PRAGMA optimize` instead of broad manual ANALYZE scheduling.
+
+https://www.sqlite.org/pragma.html#pragma_optimize
+
+### SQLite PRAGMA gotcha
+
+Unknown PRAGMA names may be silently ignored.
+
+Therefore PayGate startup should query/verify critical effective settings rather than merely execute strings and assume success.
+
+https://www.sqlite.org/pragma.html
 
 ## Authentication/session research
 
-OWASP recommends opaque, unpredictable session identifiers with at least 128 bits of entropy and Secure/HttpOnly/SameSite cookie protections.
+Singleton password-only operator UX can remain secure if the hidden implementation separates credentials:
 
-Reference:
+- Argon2id admin password hash;
+- opaque admin session token;
+- merchant API key;
+- Android device private key;
+- webhook signing secret.
+
+OWASP session guidance:
 
 https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html
 
-This supports a simple password-only singleton admin login without inventing JWT/account-role complexity.
-
-## Design conclusions from the research
-
-The simplest architecture that still preserves PayGate's safety properties is:
+## Final research-derived architecture
 
 ```text
-one PayGate server
+PayGate server
   -> direct SQLite
-  -> server-owned collection profile
-  -> server-owned amount allocator
-  -> server-owned matching/parsers
-  -> signed webhooks
+  -> server-owned active profile
+  -> randomized bounded amount reservations
+  -> server notification parsers
+  -> timestamp-aware matching
+  -> durable signed webhooks
 
-one PayGate Android APK
-  -> NotificationListenerService
-  -> generic decimal-money prefilter
+PayGate Android
+  -> Paytm + Google Messages notifications
+  -> cheap decimal-money prefilter
+  -> stable local event ID
   -> durable queue
-  -> ECDSA-signed events
+  -> ECDSA signed relay
   -> operator UI
 ```
 
-The standalone payment frontend remains only a test/reference consumer.
-
-The following are intentionally excluded from v4.0:
+Excluded from v4.0:
 
 ```text
+PocketBase runtime
 server libgm
-GPay auto matching
+GPay auto-match
 Slice
-merchant-selected payment account
-browser-owned UPI routing
-RRN/UTR requirement
-manual-review product workflow
-reconciliation product workflow
+merchant profile selection
+hosted checkout
+server QR images
+UTR/RRN requirement
+manual-review/reconciliation products
 PostgreSQL
 multi-user roles
 WebSockets
-server-rendered QR images
 ```
-
-Each excluded feature can be reconsidered only after a concrete use case appears.
