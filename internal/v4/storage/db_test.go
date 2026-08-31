@@ -280,8 +280,8 @@ func TestWithImmediateTxCommitsAndRollsBack(t *testing.T) {
 	ctx := context.Background()
 	now := int64(1_788_200_000_000)
 
-	if err := db.WithImmediateTx(ctx, func(conn *sql.Conn) error {
-		_, err := conn.ExecContext(ctx, `INSERT INTO collection_profiles(id,label,upi_id,parser,enabled,active,created_at,updated_at)
+	if err := db.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO collection_profiles(id,label,upi_id,parser,enabled,active,created_at,updated_at)
             VALUES('paytm','Paytm','merchant@paytm','paytm_notification',1,1,?,?)`, now, now)
 		return err
 	}); err != nil {
@@ -289,8 +289,8 @@ func TestWithImmediateTxCommitsAndRollsBack(t *testing.T) {
 	}
 
 	wantErr := sql.ErrNoRows
-	err := db.WithImmediateTx(ctx, func(conn *sql.Conn) error {
-		if _, err := conn.ExecContext(ctx, `INSERT INTO settings(key,value,updated_at) VALUES('should_rollback','yes',?)`, now); err != nil {
+	err := db.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key,value,updated_at) VALUES('should_rollback','yes',?)`, now); err != nil {
 			return err
 		}
 		return wantErr

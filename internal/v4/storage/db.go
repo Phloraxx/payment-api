@@ -21,10 +21,28 @@ type DB struct {
 	SQL *sql.DB
 }
 
+// ImmediateTx is a short BEGIN IMMEDIATE transaction. It deliberately exposes
+// only SQL execution primitives, not the underlying pooled connection.
+type ImmediateTx struct {
+	conn *sql.Conn
+}
+
+func (tx *ImmediateTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	return tx.conn.ExecContext(ctx, query, args...)
+}
+
+func (tx *ImmediateTx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
+	return tx.conn.QueryContext(ctx, query, args...)
+}
+
+func (tx *ImmediateTx) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return tx.conn.QueryRowContext(ctx, query, args...)
+}
+
 // WithImmediateTx runs fn inside BEGIN IMMEDIATE on a dedicated pooled connection.
 // Use it for short payment-critical write transactions. Network calls must never
 // happen inside fn. Ordinary reads should use DB.SQL directly.
-func (db *DB) WithImmediateTx(ctx context.Context, fn func(*sql.Conn) error) (err error) {
+func (db *DB) WithImmediateTx(ctx context.Context, fn func(*ImmediateTx) error) (err error) {
 	conn, err := db.SQL.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire sqlite connection: %w", err)
@@ -41,7 +59,7 @@ func (db *DB) WithImmediateTx(ctx context.Context, fn func(*sql.Conn) error) (er
 		}
 	}()
 
-	if err := fn(conn); err != nil {
+	if err := fn(&ImmediateTx{conn: conn}); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
