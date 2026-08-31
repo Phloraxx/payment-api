@@ -319,6 +319,9 @@ func TestWebhookExhaustionIsOneAggregateCondition(t *testing.T) {
 	if got := aggregate.GetInt("occurrence_count"); got != 1 {
 		t.Fatalf("aggregate occurrences=%d", got)
 	}
+	if got := aggregate.GetString("severity"); got != "critical" {
+		t.Fatalf("aggregate severity before recovery=%s", got)
+	}
 	for _, delivery := range deliveries {
 		legacy, err := app.FindFirstRecordByData("alerts", "dedupe_key", "webhook:"+delivery.Id)
 		if err != nil {
@@ -334,6 +337,32 @@ func TestWebhookExhaustionIsOneAggregateCondition(t *testing.T) {
 	aggregate, _ = app.FindRecordById("alerts", aggregate.Id)
 	if got := aggregate.GetInt("occurrence_count"); got != 1 {
 		t.Fatalf("aggregate occurrences after repeat scan=%d", got)
+	}
+
+	// A newer successful delivery proves the transport recovered, but historical
+	// exhausted rows still need operator visibility. Downgrade without resolving.
+	remaining, err := app.FindRecordById("webhook_deliveries", deliveries[1].Id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredAt := remaining.GetDateTime("updated").Time().Add(time.Hour)
+	deliveries[0].Set("status", "delivered")
+	deliveries[0].Set("delivered_at", recoveredAt)
+	if err := app.Save(deliveries[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.CheckWebhookExhaustion(); err != nil {
+		t.Fatal(err)
+	}
+	aggregate, _ = app.FindRecordById("alerts", aggregate.Id)
+	if got := aggregate.GetString("status"); got != "open" {
+		t.Fatalf("aggregate status after transport recovery=%s", got)
+	}
+	if got := aggregate.GetString("severity"); got != "warning" {
+		t.Fatalf("aggregate severity after transport recovery=%s", got)
+	}
+	if got := aggregate.GetInt("occurrence_count"); got != 1 {
+		t.Fatalf("aggregate occurrences after severity downgrade=%d", got)
 	}
 
 	for _, delivery := range deliveries {

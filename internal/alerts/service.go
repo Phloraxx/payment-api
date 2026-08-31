@@ -418,6 +418,7 @@ func (s *Service) CheckWebhookExhaustion() error {
 		return err
 	}
 	details := map[string]any{"exhaustedCount": count}
+	severity := "critical"
 	message := fmt.Sprintf("%d outgoing webhook deliveries have exhausted their retry limit", count)
 	if len(exhausted) == 1 {
 		latest := exhausted[0]
@@ -433,12 +434,13 @@ func (s *Service) CheckWebhookExhaustion() error {
 			details["latestDeliveredAt"] = delivered[0].GetDateTime("delivered_at").String()
 			if !latestDeliveredAt.IsZero() && latestDeliveredAt.After(latestExhaustedAt) {
 				details["transportRecovered"] = true
-				message += "; newer webhook deliveries have succeeded"
+				severity = "warning"
+				message = fmt.Sprintf("%d historical outgoing webhook deliveries remain exhausted; newer webhook deliveries have succeeded", count)
 			}
 		}
 	}
 	_, _, err = s.EnsureOpen(Input{
-		Kind: "webhook_exhausted", Severity: "critical", DedupeKey: dedupeKey,
+		Kind: "webhook_exhausted", Severity: severity, DedupeKey: dedupeKey,
 		Message: message, Details: details,
 	})
 	return err
