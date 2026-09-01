@@ -168,7 +168,7 @@ CREATE TABLE payment_observations (
     payer_name TEXT,
     payer_upi_id TEXT,
     occurred_at INTEGER NOT NULL,
-    occurred_at_source TEXT NOT NULL CHECK(occurred_at_source IN ('message','notification','received')),
+    occurred_at_source TEXT NOT NULL CHECK(occurred_at_source IN ('notification_text','notification_posted_at','server_received_at')),
     received_at INTEGER NOT NULL,
     matched_payment_id TEXT REFERENCES payments(id) ON UPDATE RESTRICT ON DELETE SET NULL,
     match_result TEXT NOT NULL CHECK(match_result IN ('matched','unmatched','ambiguous','ignored','error'))

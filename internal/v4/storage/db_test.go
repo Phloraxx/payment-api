@@ -264,6 +264,15 @@ func TestRelayEventAndIdempotencyUniqueness(t *testing.T) {
 	if _, err := db.SQL.Exec(insert, "relay_2", "device_1", "source_1", "com.paytm.business", now, now, "received"); err == nil {
 		t.Fatal("expected duplicate device/source event identity to fail")
 	}
+	if _, err := db.SQL.Exec(`INSERT INTO payment_observations(id,relay_event_id,source,collection_profile_id,amount_paise,occurred_at,occurred_at_source,received_at,matched_payment_id,match_result) VALUES('obs_1','relay_1','paytm_notification','paytm',10037,?,'notification_posted_at',?,'pay_1','matched')`, now, now); err != nil {
+		t.Fatalf("valid observation timestamp source rejected: %v", err)
+	}
+	if _, err := db.SQL.Exec(insert, "relay_3", "device_1", "source_2", "com.paytm.business", now, now, "received"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO payment_observations(id,relay_event_id,source,collection_profile_id,amount_paise,occurred_at,occurred_at_source,received_at,match_result) VALUES('obs_bad','relay_3','paytm_notification','paytm',10037,?,'notification',?,'unmatched')`, now, now); err == nil {
+		t.Fatal("expected vague/unsupported observation timestamp source to fail")
+	}
 
 	keyHash := []byte("same-key")
 	requestHash := []byte("same-request")
