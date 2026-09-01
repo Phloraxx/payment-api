@@ -326,7 +326,11 @@ func insertPayment(ctx context.Context, tx *storage.ImmediateTx, p Payment) erro
 	return nil
 }
 
-func loadPayment(ctx context.Context, tx *storage.ImmediateTx, id string) (Payment, error) {
+type paymentQueryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func loadPayment(ctx context.Context, tx paymentQueryRower, id string) (Payment, error) {
 	var p Payment
 	var metadata string
 	var externalID, payeeName, payerName, payerUPI sql.NullString
@@ -368,10 +372,14 @@ func buildUPIURI(upiID, payeeName string, amountPaise int64) string {
 }
 
 func paymentEventPayload(eventID, eventType string, p Payment) ([]byte, error) {
+	return paymentEventPayloadAt(eventID, eventType, p, p.CreatedAt)
+}
+
+func paymentEventPayloadAt(eventID, eventType string, p Payment, eventAt time.Time) ([]byte, error) {
 	payload := map[string]any{
 		"id":         eventID,
 		"type":       eventType,
-		"created_at": p.CreatedAt.Format(time.RFC3339Nano),
+		"created_at": eventAt.UTC().Format(time.RFC3339Nano),
 		"data": map[string]any{"payment": map[string]any{
 			"id": p.ID, "name": p.Name, "external_id": p.ExternalID, "status": p.Status,
 			"requested_amount": moneyString(p.RequestedAmountPaise), "payable_amount": moneyString(p.PayableAmountPaise),
