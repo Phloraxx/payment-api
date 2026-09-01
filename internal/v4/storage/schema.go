@@ -136,6 +136,7 @@ CREATE UNIQUE INDEX uq_relay_devices_one_enabled ON relay_devices(enabled) WHERE
 CREATE TABLE pairing_sessions (
     id TEXT PRIMARY KEY,
     token_hash BLOB NOT NULL UNIQUE,
+    replace_existing INTEGER NOT NULL DEFAULT 0 CHECK(replace_existing IN (0,1)),
     created_at INTEGER NOT NULL,
     expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
     consumed_at INTEGER,
