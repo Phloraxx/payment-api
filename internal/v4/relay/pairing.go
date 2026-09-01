@@ -48,14 +48,25 @@ type PairDeviceResult struct {
 }
 
 type DeviceInfo struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	Enabled        bool       `json:"enabled"`
-	EnrolledAt     time.Time  `json:"enrolled_at"`
-	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
-	AppVersion     string     `json:"app_version,omitempty"`
-	DeviceModel    string     `json:"device_model,omitempty"`
-	AndroidVersion string     `json:"android_version,omitempty"`
+	ID                        string     `json:"id"`
+	Name                      string     `json:"name"`
+	Enabled                   bool       `json:"enabled"`
+	EnrolledAt                time.Time  `json:"enrolled_at"`
+	LastSeenAt                *time.Time `json:"last_seen_at,omitempty"`
+	LastHeartbeatAt           *time.Time `json:"last_heartbeat_at,omitempty"`
+	AppVersion                string     `json:"app_version,omitempty"`
+	DeviceModel               string     `json:"device_model,omitempty"`
+	AndroidVersion            string     `json:"android_version,omitempty"`
+	NotificationAccess        *bool      `json:"notification_access,omitempty"`
+	ListenerConnected         *bool      `json:"listener_connected,omitempty"`
+	BatteryOptimizationExempt *bool      `json:"battery_optimization_exempt,omitempty"`
+	PowerSaveMode             *bool      `json:"power_save_mode,omitempty"`
+	BackgroundRestricted      *bool      `json:"background_restricted,omitempty"`
+	ForegroundService         *bool      `json:"foreground_service,omitempty"`
+	PendingCount              *int       `json:"pending_count,omitempty"`
+	FailedCount               *int       `json:"failed_count,omitempty"`
+	LastSuccessfulDeliveryAt  *time.Time `json:"last_successful_delivery_at,omitempty"`
+	LastClientError           string     `json:"last_client_error,omitempty"`
 }
 
 func (s *Service) CreatePairing(ctx context.Context, replaceExisting bool) (PairingSession, error) {
@@ -254,12 +265,19 @@ func (s *Service) ActiveDevice(ctx context.Context) (*DeviceInfo, error) {
 		return nil, errors.New("relay storage is required")
 	}
 	var info DeviceInfo
-	var lastSeen sql.NullInt64
-	var appVersion, model, androidVersion sql.NullString
+	var lastSeen, lastHeartbeat, lastDelivered sql.NullInt64
+	var appVersion, model, androidVersion, lastError sql.NullString
+	var notificationAccess, listenerConnected, batteryExempt, powerSave, backgroundRestricted, foregroundService sql.NullInt64
+	var pendingCount, failedCount sql.NullInt64
 	var enrolledAt int64
 	var enabled int
-	err := s.DB.SQL.QueryRowContext(ctx, `SELECT id,COALESCE(name,''),enabled,enrolled_at,last_seen_at,app_version,device_model,android_version
-		FROM relay_devices WHERE enabled=1 LIMIT 1`).Scan(&info.ID, &info.Name, &enabled, &enrolledAt, &lastSeen, &appVersion, &model, &androidVersion)
+	err := s.DB.SQL.QueryRowContext(ctx, `SELECT id,COALESCE(name,''),enabled,enrolled_at,last_seen_at,last_heartbeat_at,
+		app_version,device_model,android_version,notification_access,listener_connected,battery_optimization_exempt,
+		power_save_mode,background_restricted,foreground_service,pending_count,failed_count,last_successful_delivery_at,last_client_error
+		FROM relay_devices WHERE enabled=1 LIMIT 1`).Scan(
+		&info.ID, &info.Name, &enabled, &enrolledAt, &lastSeen, &lastHeartbeat, &appVersion, &model, &androidVersion,
+		&notificationAccess, &listenerConnected, &batteryExempt, &powerSave, &backgroundRestricted, &foregroundService,
+		&pendingCount, &failedCount, &lastDelivered, &lastError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -268,12 +286,39 @@ func (s *Service) ActiveDevice(ctx context.Context) (*DeviceInfo, error) {
 	}
 	info.Enabled = enabled == 1
 	info.EnrolledAt = time.UnixMilli(enrolledAt).UTC()
-	info.AppVersion = appVersion.String
-	info.DeviceModel = model.String
-	info.AndroidVersion = androidVersion.String
-	if lastSeen.Valid {
-		value := time.UnixMilli(lastSeen.Int64).UTC()
-		info.LastSeenAt = &value
-	}
+	info.AppVersion, info.DeviceModel, info.AndroidVersion, info.LastClientError = appVersion.String, model.String, androidVersion.String, lastError.String
+	info.LastSeenAt = nullableTimePointer(lastSeen)
+	info.LastHeartbeatAt = nullableTimePointer(lastHeartbeat)
+	info.LastSuccessfulDeliveryAt = nullableTimePointer(lastDelivered)
+	info.NotificationAccess = nullableBoolPointer(notificationAccess)
+	info.ListenerConnected = nullableBoolPointer(listenerConnected)
+	info.BatteryOptimizationExempt = nullableBoolPointer(batteryExempt)
+	info.PowerSaveMode = nullableBoolPointer(powerSave)
+	info.BackgroundRestricted = nullableBoolPointer(backgroundRestricted)
+	info.ForegroundService = nullableBoolPointer(foregroundService)
+	info.PendingCount = nullableIntPointer(pendingCount)
+	info.FailedCount = nullableIntPointer(failedCount)
 	return &info, nil
+}
+
+func nullableTimePointer(value sql.NullInt64) *time.Time {
+	if !value.Valid {
+		return nil
+	}
+	t := time.UnixMilli(value.Int64).UTC()
+	return &t
+}
+func nullableBoolPointer(value sql.NullInt64) *bool {
+	if !value.Valid {
+		return nil
+	}
+	v := value.Int64 == 1
+	return &v
+}
+func nullableIntPointer(value sql.NullInt64) *int {
+	if !value.Valid {
+		return nil
+	}
+	v := int(value.Int64)
+	return &v
 }

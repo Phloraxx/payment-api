@@ -333,3 +333,56 @@ func TestOrdinaryReadTransactionDoesNotAcquireWriterLock(t *testing.T) {
 		t.Fatalf("ordinary read transaction blocked writer: %v", err)
 	}
 }
+func TestOpenMigratesV1DatabaseToRelayHealthSchema(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "paygate-v1.db")
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL) STRICT;`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, schemaV1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var version int
+	if err := db.SQL.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("schema version=%d want=2", version)
+	}
+	rows, err := db.SQL.QueryContext(ctx, `PRAGMA table_info(relay_devices)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, typ string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "notification_access" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("relay health columns were not added")
+	}
+}

@@ -37,11 +37,39 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 			return fmt.Errorf("record schema v1: %w", err)
 		}
 	}
+	if current < 2 {
+		if err := applyV2(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(2, unixepoch('subsec') * 1000)`); err != nil {
+			return fmt.Errorf("record schema v2: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema migration: %w", err)
 	}
 	return nil
 }
+
+func applyV2(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, schemaV2); err != nil {
+		return fmt.Errorf("apply schema v2: %w", err)
+	}
+	return nil
+}
+
+const schemaV2 = `
+ALTER TABLE relay_devices ADD COLUMN notification_access INTEGER CHECK(notification_access IS NULL OR notification_access IN (0,1));
+ALTER TABLE relay_devices ADD COLUMN listener_connected INTEGER CHECK(listener_connected IS NULL OR listener_connected IN (0,1));
+ALTER TABLE relay_devices ADD COLUMN battery_optimization_exempt INTEGER CHECK(battery_optimization_exempt IS NULL OR battery_optimization_exempt IN (0,1));
+ALTER TABLE relay_devices ADD COLUMN power_save_mode INTEGER CHECK(power_save_mode IS NULL OR power_save_mode IN (0,1));
+ALTER TABLE relay_devices ADD COLUMN background_restricted INTEGER CHECK(background_restricted IS NULL OR background_restricted IN (0,1));
+ALTER TABLE relay_devices ADD COLUMN foreground_service INTEGER CHECK(foreground_service IS NULL OR foreground_service IN (0,1));
+ALTER TABLE relay_devices ADD COLUMN pending_count INTEGER CHECK(pending_count IS NULL OR pending_count >= 0);
+ALTER TABLE relay_devices ADD COLUMN failed_count INTEGER CHECK(failed_count IS NULL OR failed_count >= 0);
+ALTER TABLE relay_devices ADD COLUMN last_successful_delivery_at INTEGER;
+ALTER TABLE relay_devices ADD COLUMN last_client_error TEXT;
+`
 
 func applyV1(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, schemaV1); err != nil {
