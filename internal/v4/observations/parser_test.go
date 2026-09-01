@@ -99,6 +99,8 @@ func TestKotakRequiresKotakMarkerAndIncomingCredit(t *testing.T) {
 		want  error
 	}{
 		{"VM-HDFCBK", "Received Rs.100.37 from Rahul", ErrUnrecognized},
+		{"JD-SBIUPI-S", "A/c credited Rs.100.37 through UPI Ref 123456789012", ErrUnrecognized},
+		{"JK-SBIUPI-S", "A/c credited Rs.100.37 through UPI Ref 123456789012", ErrUnrecognized},
 		{"VM-KOTAKB", "Your OTP is 123456 for Rs.100.37", ErrUnrecognized},
 		{"VM-KOTAKB", "Rs.100.37 debited from your account", ErrUnrecognized},
 		{"VM-KOTAKB", "Cashback of INR 100.37 credited to your account", ErrUnrecognized},

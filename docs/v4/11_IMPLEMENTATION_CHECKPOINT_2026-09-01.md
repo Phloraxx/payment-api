@@ -6,7 +6,7 @@ This is the source-integration checkpoint before v4 staging and production cutov
 
 ## Merged source
 
-- `payment-api/main`: standalone direct-SQLite v4 domain/runtime, merchant/admin/relay APIs, webhooks, migration/corroboration and Digital Asset Links through merge `5fb379c367d871faf61812778e41b8f3a3999428`.
+- `payment-api/main`: standalone direct-SQLite v4 domain/runtime, merchant/admin/relay APIs, webhooks, migration/corroboration, Digital Asset Links and the embedded operator dashboard through merge `501ac1382cf754a0013aa000fdb36a8f59241329`.
 - `paygate-relay-android/main`: unified dark Android v0.5 source through `db061d260b5552de408250abb825513f8ee5b1a5`.
 - `payment-frontend/main`: provider-blind test/customer integration through `a34ef147adeeb56b5227195b288c1a640ababd1f`.
 
@@ -25,7 +25,7 @@ The signer exactly matches the byte-for-byte installed v0.4.2 release lineage. N
 
 ## V4 web dashboard
 
-Branch `v4/web-dashboard` implements a separate React/Vite bundle embedded only by `paygate-v4`:
+PR #60 merged the separate React/Vite operator bundle embedded only by `paygate-v4`:
 
 - Overview;
 - Payments;
@@ -66,6 +66,15 @@ A disposable exact-v4-image runtime smoke with a fresh temporary SQLite DB verif
 - Android `assetlinks.json` package/signer binding;
 - built-in `paygate-v4 healthcheck`;
 - Docker health status = `healthy`.
+
+## Production-shaped parser replay
+
+The verified Sep 1 v3 backup was replayed offline through the v4 observation parser without logging message bodies, payer names, UPI IDs or transaction references.
+
+- Paytm Android notifications: 5/5 previously matched production fixtures parsed with exact amount and Paytm-profile parity.
+- Kotak-branded Google Messages: 109/109 previously matched production fixtures parsed with exact amount and Kotak-profile parity.
+- Four additional v3 rows labeled `kotak` used SBI UPI DLT senders (`JD-SBIUPI-S` / `JK-SBIUPI-S`) and contained no Kotak identity. V3 assigned every SMS ingestion to the Kotak account before matching; v4 correctly rejects these rows instead of inheriting that classification defect.
+- Regression coverage explicitly keeps non-Kotak SBI sender headers out of the Kotak parser even when the message is an incoming credit with a PayGate-shaped decimal amount.
 
 ## Explicit non-actions
 
