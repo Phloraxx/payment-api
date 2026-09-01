@@ -371,3 +371,21 @@ Avoid:
 - hiding the random payable adjustment;
 - letting the admin edit the already-issued payable amount;
 - exposing Paytm/Kotak routing to customer/merchant checkout.
+
+## Implementation checkpoint — 2026-09-01
+
+The standalone v4 web dashboard is now implemented as a separate React/Vite bundle embedded only in `paygate-v4`. It does not replace or alter the legacy v3 PocketBase-facing bundle before cutover.
+
+Implemented operator surfaces:
+
+- password-only login using an HttpOnly web cookie;
+- Overview with money/payment totals, seven-day volume, active profile, phone and webhook health;
+- Payments with search/filter/pagination, complete detail, immutable financial snapshots, safe edits, history and per-delivery webhook retry;
+- Activity with payment, observation and webhook events including `matched`, `corroborated` and `ambiguous`;
+- Settings for collection profiles, webhook endpoint/secret rotation, merchant API keys, phone state/replacement pairing, revocation and admin-password change.
+
+The browser never stores an admin bearer token. Web authentication uses a `Secure`, `HttpOnly`, `SameSite=Strict`, `Path=/admin` cookie. Android continues to use the explicit bearer-token response intended for the mobile client.
+
+The dashboard is deliberately lightweight: no router framework, charting framework or state-management library was added. SPA fallback is handled by the embedded Go static handler, while API routes retain precedence.
+
+The production-shaped disposable-container smoke verified `/health`, dashboard serving, API protection, cookie login, authenticated Overview, `/device/pair/<token>` browser fallback, Android Digital Asset Links and the built-in Docker healthcheck. No production deployment occurred during this validation.

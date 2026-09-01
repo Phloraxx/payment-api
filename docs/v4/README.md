@@ -79,3 +79,4 @@ A create request contains context such as:
 V4 is built beside v3 and cut over only after deterministic migration, parser parity, SQLite backup/restore testing, Android in-place upgrade testing and end-to-end payment acceptance.
 
 The final design should be simpler than v3, but migration must not sacrifice payment correctness or rollbackability.
+- [11 — Implementation checkpoint (2026-09-01)](./11_IMPLEMENTATION_CHECKPOINT_2026-09-01.md)

@@ -19,6 +19,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/v4/relay"
 	"github.com/Phloraxx/payment-api/internal/v4/storage"
 	"github.com/Phloraxx/payment-api/internal/v4/webhooks"
+	"github.com/Phloraxx/payment-api/internal/v4web"
 )
 
 type App struct {
@@ -96,6 +97,7 @@ func New(ctx context.Context, cfg Config) (_ *App, err error) {
 	mux.Handle("/api/v4/relay/", relayHandler)
 	mux.HandleFunc("GET /.well-known/assetlinks.json", app.assetLinks)
 	mux.HandleFunc("GET /health", app.health)
+	mux.Handle("/", v4web.Handler())
 	app.handler = cors(cfg.AllowedOrigins, mux)
 	return app, nil
 }

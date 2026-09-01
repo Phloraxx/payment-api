@@ -47,6 +47,7 @@ func (h *AdminHandler) registerRoutes() {
 	h.mux.HandleFunc("PATCH /admin/payments/{id}", h.editAdminPayment)
 	h.mux.HandleFunc("GET /admin/settings", h.getSettings)
 	h.mux.HandleFunc("PATCH /admin/settings/webhook", h.updateWebhookSettings)
+	h.mux.HandleFunc("PATCH /admin/settings/password", h.changePassword)
 	h.mux.HandleFunc("POST /admin/webhooks/{id}/retry", h.retryWebhook)
 	h.mux.HandleFunc("GET /admin/profiles", h.listProfiles)
 	h.mux.HandleFunc("POST /admin/profiles", h.upsertProfile)
@@ -156,6 +157,36 @@ func (h *AdminHandler) clearAdminCookie(w http.ResponseWriter) {
 		Expires: time.Unix(1, 0), Secure: h.SecureCookies,
 		HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	})
+}
+
+type adminPasswordChangeRequest struct {
+	CurrentPassword string `json:"current_password"`
+	NewPassword     string `json:"new_password"`
+}
+
+func (h *AdminHandler) changePassword(w http.ResponseWriter, r *http.Request) {
+	if !isJSON(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "invalid_content_type", "Content-Type must be application/json")
+		return
+	}
+	var input adminPasswordChangeRequest
+	if err := decodeStrictJSON(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	if err := h.Auth.ChangePassword(r.Context(), input.CurrentPassword, input.NewPassword); err != nil {
+		switch {
+		case errors.Is(err, auth.ErrInvalidCredentials):
+			writeError(w, http.StatusUnauthorized, "invalid_credentials", "Current password is incorrect")
+		case errors.Is(err, auth.ErrInvalidInput):
+			writeError(w, http.StatusBadRequest, "invalid_password", err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "internal_error", "Could not change admin password")
+		}
+		return
+	}
+	h.clearAdminCookie(w)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *AdminHandler) overview(w http.ResponseWriter, r *http.Request) {

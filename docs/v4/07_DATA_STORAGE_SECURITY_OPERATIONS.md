@@ -540,7 +540,7 @@ Web session cookie:
 Secure
 HttpOnly
 SameSite=Strict
-Path=/
+Path=/admin
 ```
 
 ### Android device
@@ -590,3 +590,13 @@ Do not log full notification bodies by default.
 - only local filesystem paths are accepted for the live DB;
 - unknown/corrupt schema version fails startup closed;
 - foreign-key/STRICT/CHECK violations are surfaced as programming errors, not silently normalized.
+
+## V4 container/runtime boundary — 2026-09-01
+
+`Dockerfile.v4` is the standalone v4 production-image path. It builds only the v4 dashboard plus `paygate-v4` and `paygate-v4-migrate`, then runs the server as the distroless `nonroot` user. The existing `Dockerfile` remains the legacy v3 image path until production cutover.
+
+The v4 image has a built-in `paygate-v4 healthcheck` command that calls its own `/health` route over loopback. A disposable image acceptance run verified Docker reports the container `healthy` with a fresh temporary SQLite database.
+
+The embedded v4 dashboard applies CSP, frame denial, no-referrer, noindex and no-store headers. Static SPA fallback is mounted only after the health, merchant, admin, relay and Digital Asset Links routes, so a frontend route cannot shadow a server API.
+
+Only a tiny placeholder `internal/v4web/dist/index.html` belongs in Git. CI/container builds replace it with generated hashed assets before compiling the production v4 binary; generated `dist/assets/*` remain ignored.

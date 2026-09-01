@@ -217,3 +217,30 @@ func TestAdminSettingsProfilesKeysAndPairing(t *testing.T) {
 		t.Fatalf("pairing status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
+
+func TestAdminPasswordChangeRequiresCurrentAndRevokesAllSessions(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	wrong := adminRequest(t, f, http.MethodPatch, "/admin/settings/password", []byte(`{"current_password":"wrong password","new_password":"replacement password"}`), false)
+	if wrong.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong current status=%d body=%s", wrong.Code, wrong.Body.String())
+	}
+	if rr := adminRequest(t, f, http.MethodGet, "/admin/overview", nil, true); rr.Code != http.StatusOK {
+		t.Fatalf("wrong change invalidated bearer status=%d", rr.Code)
+	}
+
+	changed := adminRequest(t, f, http.MethodPatch, "/admin/settings/password", []byte(`{"current_password":"correct horse battery staple","new_password":"replacement password"}`), false)
+	if changed.Code != http.StatusNoContent {
+		t.Fatalf("change status=%d body=%s", changed.Code, changed.Body.String())
+	}
+	if rr := adminRequest(t, f, http.MethodGet, "/admin/overview", nil, true); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("old bearer status=%d", rr.Code)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/session", strings.NewReader(`{"password":"replacement password"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("new password login status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}

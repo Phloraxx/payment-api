@@ -125,6 +125,40 @@ func (s *Service) SetPassword(ctx context.Context, password string) error {
 	})
 }
 
+func (s *Service) ChangePassword(ctx context.Context, currentPassword, newPassword string) error {
+	if err := s.ready(); err != nil {
+		return err
+	}
+	encodedNew, err := s.hashPassword(newPassword)
+	if err != nil {
+		return err
+	}
+	now := s.now().UnixMilli()
+	return s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		var encodedCurrent string
+		if err := tx.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE singleton=1`).Scan(&encodedCurrent); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotInitialized
+			}
+			return fmt.Errorf("read admin password: %w", err)
+		}
+		ok, err := verifyPassword(encodedCurrent, currentPassword)
+		if err != nil {
+			return fmt.Errorf("verify admin password: %w", err)
+		}
+		if !ok {
+			return ErrInvalidCredentials
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE admin_credentials SET password_hash=?,updated_at=? WHERE singleton=1`, encodedNew, now); err != nil {
+			return fmt.Errorf("store admin password: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM admin_sessions`); err != nil {
+			return fmt.Errorf("revoke admin sessions: %w", err)
+		}
+		return nil
+	})
+}
+
 func (s *Service) CreateAdminSession(ctx context.Context, password string) (AdminSession, error) {
 	if err := s.ready(); err != nil {
 		return AdminSession{}, err

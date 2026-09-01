@@ -5,7 +5,7 @@ WORKDIR /src
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY web ./web
-RUN npm run typecheck && npm run build
+RUN npm run typecheck:v3 && npm run build:v3
 
 FROM golang:1.25.13-bookworm AS go-build
 WORKDIR /src
