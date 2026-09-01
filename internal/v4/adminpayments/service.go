@@ -70,24 +70,24 @@ type ListResult struct {
 	Offset int
 }
 type HistoryEntry struct {
-	ID        string
-	Type      string
-	Actor     string
-	Summary   string
-	Changes   json.RawMessage
-	CreatedAt time.Time
+	ID        string          `json:"id"`
+	Type      string          `json:"type"`
+	Actor     string          `json:"actor"`
+	Summary   string          `json:"summary"`
+	Changes   json.RawMessage `json:"changes"`
+	CreatedAt time.Time       `json:"created_at"`
 }
 
 type WebhookEntry struct {
-	ID             string
-	EventType      string
-	Status         string
-	Attempts       int
-	NextAttemptAt  *time.Time
-	LastHTTPStatus *int
-	LastError      string
-	CreatedAt      time.Time
-	DeliveredAt    *time.Time
+	ID             string     `json:"id"`
+	EventType      string     `json:"event_type"`
+	Status         string     `json:"status"`
+	Attempts       int        `json:"attempts"`
+	NextAttemptAt  *time.Time `json:"next_attempt_at,omitempty"`
+	LastHTTPStatus *int       `json:"last_http_status,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
+	CreatedAt      time.Time  `json:"created_at"`
+	DeliveredAt    *time.Time `json:"delivered_at,omitempty"`
 }
 
 type Detail struct {
