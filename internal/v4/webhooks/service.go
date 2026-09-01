@@ -33,7 +33,8 @@ type Config struct {
 }
 type Service struct {
 	DB          *storage.DB
-	Config      Config
+	config      Config
+	configMu    sync.RWMutex
 	HTTPClient  *http.Client
 	Now         func() time.Time
 	MaxAttempts int
@@ -52,14 +53,40 @@ type Delivery struct {
 
 func NewService(db *storage.DB, cfg Config) *Service {
 	return &Service{
-		DB: db, Config: cfg, HTTPClient: newHTTPClient(), Now: time.Now,
+		DB: db, config: cfg, HTTPClient: newHTTPClient(), Now: time.Now,
 		MaxAttempts: defaultMaxAttempts, BatchSize: defaultBatchSize,
 		Lease: defaultLease, wake: make(chan struct{}, 1),
 	}
 }
 
 func (s *Service) Enabled() bool {
-	return s != nil && strings.TrimSpace(s.Config.Endpoint) != "" && strings.TrimSpace(s.Config.Secret) != ""
+	if s == nil {
+		return false
+	}
+	cfg := s.ConfigSnapshot()
+	return strings.TrimSpace(cfg.Endpoint) != "" && strings.TrimSpace(cfg.Secret) != ""
+}
+
+func (s *Service) ConfigSnapshot() Config {
+	if s == nil {
+		return Config{}
+	}
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	return s.config
+}
+
+func (s *Service) UpdateConfig(cfg Config) error {
+	if strings.TrimSpace(cfg.Endpoint) != "" || strings.TrimSpace(cfg.Secret) != "" {
+		if err := ValidateConfig(cfg); err != nil {
+			return err
+		}
+	}
+	s.configMu.Lock()
+	s.config = cfg
+	s.configMu.Unlock()
+	s.Wake()
+	return nil
 }
 func (s *Service) Wake() {
 	if !s.Enabled() {
@@ -72,9 +99,6 @@ func (s *Service) Wake() {
 }
 
 func (s *Service) Run(ctx context.Context) {
-	if !s.Enabled() {
-		return
-	}
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	s.Wake()
@@ -90,10 +114,14 @@ func (s *Service) Run(ctx context.Context) {
 }
 
 func (s *Service) SendPending(ctx context.Context) (int, error) {
-	if !s.Enabled() {
+	if err := s.readyStorage(); err != nil {
+		return 0, err
+	}
+	cfg := s.ConfigSnapshot()
+	if strings.TrimSpace(cfg.Endpoint) == "" && strings.TrimSpace(cfg.Secret) == "" {
 		return 0, nil
 	}
-	if err := s.ready(); err != nil {
+	if err := ValidateConfig(cfg); err != nil {
 		return 0, err
 	}
 	s.mu.Lock()
@@ -137,7 +165,7 @@ func (s *Service) SendPending(ctx context.Context) (int, error) {
 		if delivery == nil {
 			continue
 		}
-		s.deliver(ctx, *delivery)
+		s.deliver(ctx, cfg, *delivery)
 		processed++
 	}
 	return processed, nil
@@ -174,11 +202,11 @@ func (s *Service) claim(ctx context.Context, id string, now time.Time) (*Deliver
 	return out, err
 }
 
-func (s *Service) deliver(ctx context.Context, delivery Delivery) {
+func (s *Service) deliver(ctx context.Context, cfg Config, delivery Delivery) {
 	now := s.now()
 	timestamp := strconv.FormatInt(now.Unix(), 10)
-	signature := Sign(s.Config.Secret, timestamp, []byte(delivery.Body))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.Config.Endpoint, strings.NewReader(delivery.Body))
+	signature := Sign(cfg.Secret, timestamp, []byte(delivery.Body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Endpoint, strings.NewReader(delivery.Body))
 	if err == nil {
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", "PayGate/4")
@@ -229,7 +257,7 @@ func (s *Service) finish(ctx context.Context, delivery Delivery, statusCode int,
 	})
 }
 func (s *Service) RetryOne(ctx context.Context, id string) error {
-	if err := s.ready(); err != nil {
+	if err := s.readyStorage(); err != nil {
 		return err
 	}
 	id = strings.TrimSpace(id)
@@ -249,12 +277,16 @@ func (s *Service) RetryOne(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *Service) ready() error {
+func (s *Service) readyStorage() error {
 	if s == nil || s.DB == nil || s.DB.SQL == nil {
 		return errors.New("webhook storage is required")
 	}
-	endpoint := strings.TrimSpace(s.Config.Endpoint)
-	secret := strings.TrimSpace(s.Config.Secret)
+	return nil
+}
+
+func ValidateConfig(cfg Config) error {
+	endpoint := strings.TrimSpace(cfg.Endpoint)
+	secret := strings.TrimSpace(cfg.Secret)
 	if endpoint == "" || len(secret) < 32 {
 		return fmt.Errorf("%w: endpoint and at least 32-byte secret are required", ErrInvalidConfig)
 	}
@@ -262,7 +294,7 @@ func (s *Service) ready() error {
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("%w: endpoint must be an absolute URL without credentials/query/fragment", ErrInvalidConfig)
 	}
-	if u.Scheme != "https" && !(s.Config.AllowInsecureHTTP && u.Scheme == "http") {
+	if u.Scheme != "https" && !(cfg.AllowInsecureHTTP && u.Scheme == "http") {
 		return fmt.Errorf("%w: HTTPS endpoint is required", ErrInvalidConfig)
 	}
 	return nil
