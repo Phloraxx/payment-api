@@ -103,6 +103,11 @@ func New(ctx context.Context, cfg Config) (_ *App, err error) {
 	mux.Handle("/v1/", merchantHandler)
 	mux.Handle("/admin/", adminHandler)
 	mux.Handle("/api/v4/relay/", relayHandler)
+	// During the v3 -> v4 cutover the installed v0.4 relay can briefly hit
+	// its legacy endpoint after the server has switched. Return a transient
+	// status instead of letting the dashboard fallback answer 405, so v0.4
+	// keeps the notification queued as retryable until v0.5 is installed.
+	mux.HandleFunc("/api/relay/v1/", legacyRelayUpgradeRequired)
 	mux.HandleFunc("GET /.well-known/assetlinks.json", app.assetLinks)
 	mux.HandleFunc("GET /health", app.health)
 	mux.Handle("/", v4web.Handler())
@@ -126,6 +131,15 @@ func bootstrapAdmin(ctx context.Context, db *storage.DB, service *auth.Service, 
 	}
 	return nil
 }
+
+func legacyRelayUpgradeRequired(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Retry-After", "60")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(`{"error":{"code":"relay_upgrade_required","message":"PayGate relay upgrade required"}}`))
+}
+
 func (a *App) Handler() http.Handler {
 	if a == nil || a.handler == nil {
 		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

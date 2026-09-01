@@ -488,6 +488,8 @@ active in-flight reservations = 0
 
 After first successful v4 startup, persisted v4 API-key/webhook records are authoritative. Legacy environment values must not overwrite later v4 operator changes.
 
+During the short server-switch -> Android-upgrade window, v4 intentionally answers legacy `/api/relay/v1/*` requests with HTTP 503 plus `Retry-After`. This keeps v0.4 notification rows in `retry` rather than `failed`; the unchanged `EventStore` then lets v0.5 replay the stored raw notification through the signed v4 endpoint after its in-place upgrade. Remove this transition shim only after v0.4 is no longer deployed.
+
 Keep final v3 DB/image untouched for rollback window.
 
 ## Phase 15 — Cleanup
