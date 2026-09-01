@@ -257,3 +257,28 @@ func TestRuntimeServesAndroidAssetLinksForProductionSigner(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeServesV4DashboardWithoutShadowingAdminAPI(t *testing.T) {
+	app := newTestApp(t, nil)
+	for _, path := range []string{"/", "/device/pair/example-token"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), `id="root"`) {
+			t.Fatalf("dashboard %s = %d %s", path, res.Code, res.Body.String())
+		}
+		if !strings.Contains(res.Header().Get("Content-Security-Policy"), "frame-ancestors 'none'") {
+			t.Fatalf("dashboard %s missing CSP: %v", path, res.Header())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/admin/overview", nil)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized || !strings.Contains(res.Body.String(), `"unauthorized"`) {
+		t.Fatalf("admin route shadowed by SPA: %d %s", res.Code, res.Body.String())
+	}
+	if strings.Contains(res.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("admin route returned SPA content type: %s", res.Header().Get("Content-Type"))
+	}
+}

@@ -183,3 +183,33 @@ func TestMalformedPasswordHashFailsSafely(t *testing.T) {
 		t.Fatalf("malformed stored hash should be an internal validation error, got %v", err)
 	}
 }
+
+func TestChangePasswordRequiresCurrentPasswordAndRevokesSessions(t *testing.T) {
+	s, _, _ := testService(t)
+	ctx := context.Background()
+	if err := s.BootstrapPassword(ctx, "initial password"); err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.CreateAdminSession(ctx, "initial password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ChangePassword(ctx, "wrong password", "replacement password"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("wrong current password error = %v", err)
+	}
+	if err := s.AuthenticateAdminSession(ctx, session.Token); err != nil {
+		t.Fatalf("wrong change revoked session: %v", err)
+	}
+	if err := s.ChangePassword(ctx, "initial password", "replacement password"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AuthenticateAdminSession(ctx, session.Token); !errors.Is(err, ErrInvalidSession) {
+		t.Fatalf("old session after successful change = %v", err)
+	}
+	if _, err := s.CreateAdminSession(ctx, "initial password"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("old password login error = %v", err)
+	}
+	if _, err := s.CreateAdminSession(ctx, "replacement password"); err != nil {
+		t.Fatalf("new password login: %v", err)
+	}
+}

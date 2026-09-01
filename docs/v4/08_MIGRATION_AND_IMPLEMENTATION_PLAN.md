@@ -297,6 +297,8 @@ Add search/filter/payment edit/profile switch/webhook/device/backup health.
 
 Do not expose Reviews/Reconciliation/Evidence as primary products.
 
+**Implementation checkpoint (2026-09-01):** the standalone v4 dashboard is implemented on branch `v4/web-dashboard` as an embedded dark UI with cookie-only web sessions. Overview/Payments/Activity/Settings, profile switching, safe payment edits, webhook/API-key management, phone pairing and password change are wired to the finalized v4 admin API. Local TypeScript, full Go, race/vet, legacy-container and v4-container gates pass; production remains on v3 until the staging/cutover gates below are completed.
+
 ## Phase 10 — Android unified dark app
 
 Keep existing package ID/signing lineage and background services while replacing visible UI.
@@ -315,6 +317,8 @@ Order:
 10. queue/heartbeat/Doze regression tests.
 
 Do not require uninstall/clear-data/re-pair for the normal production upgrade.
+
+**Implementation checkpoint (2026-09-01):** Android v0.5 source is merged. The signed `0.5.0-alpha1` main artifact has package `io.github.phloraxx.paygaterelay`, versionCode `11`, and the exact stable signer SHA-256 `412b8f66c06acd93958c4dd11caa3214ba950059c00e57159d5673f94700d44a`. It has not been installed; the production phone remains on v0.4.2 until v4 staging/cutover acceptance.
 
 ## Phase 11 — PayGate Frontend test application
 
@@ -336,6 +340,8 @@ Keep:
 - 5-minute customer timer;
 - status polling;
 - paid result with actual payer details when available.
+
+**Implementation checkpoint (2026-09-01):** the separate test/customer frontend source is merged and provider-blind. It submits amount + person `name` + event `external_id`, renders the exact server `upi_uri`, respects the server grace window, and keeps the merchant API key out of browser assets via a narrow nginx server-side proxy.
 
 ## Phase 12 — Offline v3 -> v4 migrator
 

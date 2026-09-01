@@ -5,11 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "vite --config web/vite.config.ts",
-    "build": "vite build --config web/vite.config.ts",
-    "typecheck": "tsc -p web/tsconfig.json --noEmit",
-    "test": "npm run typecheck && node --test connectors/cloudflare-email-worker/worker.test.mjs && npm run build"
+    "build": "npm run build:v3 && npm run build:v4",
+    "typecheck": "npm run typecheck:v3 && npm run typecheck:v4",
+    "test": "npm run typecheck && node --test connectors/cloudflare-email-worker/worker.test.mjs && npm run build",
+    "dev:v3": "vite --config web/vite.config.ts",
+    "dev:v4": "vite --config web-v4/vite.config.ts",
+    "typecheck:v3": "tsc -p web/tsconfig.json --noEmit",
+    "typecheck:v4": "tsc -p web-v4/tsconfig.json --noEmit",
+    "build:v3": "vite build --config web/vite.config.ts",
+    "build:v4": "vite build --config web-v4/vite.config.ts"
   },
   "dependencies": {
+    "qrcode.react": "^4.2.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },

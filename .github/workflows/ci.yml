@@ -62,3 +62,6 @@ jobs:
 
       - name: Build production container
         run: docker build --pull -t paygate-ci:${{ github.sha }} .
+
+      - name: Build PayGate v4 container
+        run: docker build --pull -f Dockerfile.v4 -t paygate-v4-ci:${{ github.sha }} .

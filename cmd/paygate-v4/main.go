@@ -23,6 +23,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
+		return healthcheck()
+	}
 	cfg, err := configFromEnv()
 	if err != nil {
 		return err
@@ -60,6 +63,30 @@ func run() error {
 		}
 		return fmt.Errorf("serve PayGate v4: %w", err)
 	}
+}
+
+func healthcheck() error {
+	addr := strings.TrimSpace(os.Getenv("PAYGATE_V4_LISTEN_ADDR"))
+	if addr == "" {
+		addr = ":8091"
+	}
+	if strings.HasPrefix(addr, ":") {
+		addr = "127.0.0.1" + addr
+	} else if strings.HasPrefix(addr, "0.0.0.0:") {
+		addr = "127.0.0.1:" + strings.TrimPrefix(addr, "0.0.0.0:")
+	} else if strings.HasPrefix(addr, "[::]:") {
+		addr = "127.0.0.1:" + strings.TrimPrefix(addr, "[::]:")
+	}
+	client := &http.Client{Timeout: 4 * time.Second}
+	response, err := client.Get("http://" + addr + "/health")
+	if err != nil {
+		return fmt.Errorf("PayGate v4 healthcheck: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("PayGate v4 healthcheck returned HTTP %d", response.StatusCode)
+	}
+	return nil
 }
 
 func configFromEnv() (v4runtime.Config, error) {
