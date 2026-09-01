@@ -9,15 +9,18 @@ import (
 )
 
 type Config struct {
-	DataDir                string
-	ListenAddr             string
-	PublicURL              string
-	AllowedOrigins         []string
-	BootstrapAdminPassword string
-	BackupDir              string
-	BackupHourUTC          int
-	BackupRetention        int
-	ExpiryInterval         time.Duration
+	DataDir                  string
+	ListenAddr               string
+	PublicURL                string
+	AllowedOrigins           []string
+	BootstrapAdminPassword   string
+	BootstrapMerchantAPIKey  string
+	BootstrapWebhookEndpoint string
+	BootstrapWebhookSecret   string
+	BackupDir                string
+	BackupHourUTC            int
+	BackupRetention          int
+	ExpiryInterval           time.Duration
 }
 
 func (c Config) normalized() (Config, error) {

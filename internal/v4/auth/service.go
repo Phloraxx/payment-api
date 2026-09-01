@@ -238,6 +238,30 @@ func (s *Service) RevokeAdminSession(ctx context.Context, token string) error {
 	return nil
 }
 
+func (s *Service) BootstrapAPIKey(ctx context.Context, label, secret string) error {
+	if err := s.ready(); err != nil {
+		return err
+	}
+	label = strings.TrimSpace(label)
+	secret = strings.TrimSpace(secret)
+	if label == "" || len([]rune(label)) > 120 || len(secret) < 32 {
+		return fmt.Errorf("%w: bootstrap API key requires a label and at least 32 characters", ErrInvalidInput)
+	}
+	var count int
+	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_keys`).Scan(&count); err != nil {
+		return fmt.Errorf("read API key bootstrap state: %w", err)
+	}
+	if count > 0 {
+		return nil
+	}
+	hash := sha256.Sum256([]byte(secret))
+	_, err := s.DB.SQL.ExecContext(ctx, `INSERT INTO api_keys(id,label,secret_hash,enabled,created_at) VALUES('key_legacy_v3',?,?,1,?)`, label, hash[:], s.now().UnixMilli())
+	if err != nil {
+		return fmt.Errorf("bootstrap API key: %w", err)
+	}
+	return nil
+}
+
 func (s *Service) CreateAPIKey(ctx context.Context, label string) (APIKey, error) {
 	if err := s.ready(); err != nil {
 		return APIKey{}, err
@@ -269,7 +293,7 @@ func (s *Service) AuthenticateAPIKey(ctx context.Context, secret string) (string
 		return "", err
 	}
 	secret = strings.TrimSpace(secret)
-	if !strings.HasPrefix(secret, "pg_live_key_") || len(secret) < 48 {
+	if len(secret) < 32 {
 		return "", ErrInvalidAPIKey
 	}
 	hash := sha256.Sum256([]byte(secret))
@@ -281,6 +305,9 @@ func (s *Service) AuthenticateAPIKey(ctx context.Context, secret string) (string
 	}
 	if err != nil {
 		return "", fmt.Errorf("read API key: %w", err)
+	}
+	if id != "key_legacy_v3" && (!strings.HasPrefix(secret, "pg_live_key_") || len(secret) < 48) {
+		return "", ErrInvalidAPIKey
 	}
 	now := s.now().UnixMilli()
 	if !lastUsed.Valid || now-lastUsed.Int64 >= int64(5*time.Minute/time.Millisecond) {

@@ -74,6 +74,14 @@ func New(ctx context.Context, cfg Config) (_ *App, err error) {
 	if err := bootstrapAdmin(ctx, db, authService, cfg.BootstrapAdminPassword); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(cfg.BootstrapMerchantAPIKey) != "" {
+		if err := authService.BootstrapAPIKey(ctx, "Migrated v3 merchant key", cfg.BootstrapMerchantAPIKey); err != nil {
+			return nil, fmt.Errorf("bootstrap merchant API key: %w", err)
+		}
+	}
+	if err := settingsService.BootstrapWebhook(ctx, cfg.BootstrapWebhookEndpoint, cfg.BootstrapWebhookSecret); err != nil {
+		return nil, fmt.Errorf("bootstrap webhook settings: %w", err)
+	}
 	if err := settingsService.ApplyPersistedWebhook(ctx); err != nil {
 		return nil, fmt.Errorf("load persisted webhook settings: %w", err)
 	}

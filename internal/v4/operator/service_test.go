@@ -165,3 +165,25 @@ func TestWebhookSettingsGenerateHideRotateAndApplyLive(t *testing.T) {
 		t.Fatal("worker remained enabled after webhook was disabled")
 	}
 }
+
+func TestBootstrapWebhookPreservesLegacySecretAndDoesNotOverwrite(t *testing.T) {
+	f := newOperatorFixture(t)
+	worker := webhooks.NewService(f.db, webhooks.Config{})
+	settings := NewSettingsService(f.db, worker)
+	ctx := context.Background()
+	secret := "legacy-webhook-secret-0123456789abcdef"
+	if err := settings.BootstrapWebhook(ctx, "https://example.com/legacy-hook", secret); err != nil {
+		t.Fatal(err)
+	}
+	got := worker.ConfigSnapshot()
+	if got.Endpoint != "https://example.com/legacy-hook" || got.Secret != secret {
+		t.Fatalf("worker=%+v", got)
+	}
+	if err := settings.BootstrapWebhook(ctx, "https://example.com/replacement", "replacement-secret-0123456789abcdef"); err != nil {
+		t.Fatal(err)
+	}
+	got = worker.ConfigSnapshot()
+	if got.Endpoint != "https://example.com/legacy-hook" || got.Secret != secret {
+		t.Fatalf("bootstrap overwrote persisted config: %+v", got)
+	}
+}

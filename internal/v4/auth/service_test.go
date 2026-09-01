@@ -156,6 +156,45 @@ func TestAPIKeyLifecycleAndHashedStorage(t *testing.T) {
 		t.Fatalf("revoked key error = %v", err)
 	}
 }
+func TestBootstrapLegacyAPIKeyHashesAndDoesNotOverwrite(t *testing.T) {
+	s, db, _ := testService(t)
+	ctx := context.Background()
+	legacy := "legacy-v3-api-key-0123456789abcdef0123456789"
+	if err := s.BootstrapAPIKey(ctx, "Migrated v3 merchant key", legacy); err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.AuthenticateAPIKey(ctx, legacy)
+	if err != nil || id != "key_legacy_v3" {
+		t.Fatalf("id=%q err=%v", id, err)
+	}
+	var stored []byte
+	if err := db.SQL.QueryRow(`SELECT secret_hash FROM api_keys WHERE id='key_legacy_v3'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	want := sha256.Sum256([]byte(legacy))
+	if !bytes.Equal(stored, want[:]) {
+		t.Fatal("legacy API key hash mismatch")
+	}
+	other := "other-legacy-api-key-0123456789abcdef0123456789"
+	if err := s.BootstrapAPIKey(ctx, "replacement", other); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AuthenticateAPIKey(ctx, other); !errors.Is(err, ErrInvalidAPIKey) {
+		t.Fatalf("replacement bootstrap error=%v", err)
+	}
+	if _, err := s.AuthenticateAPIKey(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	foreign := "non-v4-format-key-0123456789abcdef0123456789"
+	foreignHash := sha256.Sum256([]byte(foreign))
+	if _, err := db.SQL.Exec(`INSERT INTO api_keys(id,label,secret_hash,enabled,created_at) VALUES('key_not_legacy','manual',?,1,1)`, foreignHash[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AuthenticateAPIKey(ctx, foreign); !errors.Is(err, ErrInvalidAPIKey) {
+		t.Fatalf("non-v4 secret accepted outside legacy slot: %v", err)
+	}
+}
+
 func TestValidationAndNotInitialized(t *testing.T) {
 	s, _, _ := testService(t)
 	ctx := context.Background()
