@@ -56,11 +56,11 @@ type APIKey struct {
 }
 
 type APIKeyInfo struct {
-	ID         string
-	Label      string
-	Enabled    bool
-	CreatedAt  time.Time
-	LastUsedAt *time.Time
+	ID         string     `json:"id"`
+	Label      string     `json:"label"`
+	Enabled    bool       `json:"enabled"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 }
 
 func NewService(db *storage.DB) *Service {
