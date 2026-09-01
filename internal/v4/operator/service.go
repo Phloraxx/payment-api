@@ -290,6 +290,9 @@ func (s *Service) appendObservations(ctx context.Context, out *[]ActivityEntry, 
 		entry.At = time.UnixMilli(at).UTC()
 		entry.Kind = "payment_detected"
 		entry.Title = "Incoming payment detected"
+		if entry.Status == "corroborated" {
+			entry.Title = "Payment confirmation corroborated"
+		}
 		entry.AmountPaise = &amount
 		entry.Detail = payer
 		*out = append(*out, entry)

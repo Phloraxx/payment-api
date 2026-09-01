@@ -85,7 +85,7 @@ func TestDifferentRelayEventForAlreadyPaidPaymentDoesNotTransitionTwice(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if second.Result != "matched" || second.PaymentID != created.Payment.ID || second.Transitioned {
+	if second.Result != "corroborated" || second.PaymentID != created.Payment.ID || second.Transitioned {
 		t.Fatalf("second match = %+v", second)
 	}
 	assertCount(t, db.SQL, "payment_observations", 2)

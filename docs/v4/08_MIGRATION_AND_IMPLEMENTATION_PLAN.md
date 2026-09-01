@@ -16,7 +16,7 @@ Before implementation, confirm these product rules:
 - `external_id` = merchant/event ID and is allowed to repeat across many payments;
 - idempotency uses `Idempotency-Key`, not `external_id`;
 - Paytm + Kotak only for v4.0;
-- GPay and Slice deferred;
+- GPay, Amazon Pay and Slice active matching deferred;
 - merchant never selects collection profile;
 - PayGate returns UPI URI string; frontend renders QR;
 - no hosted checkout requirement;
@@ -267,7 +267,10 @@ unique relay event
 - same amount reused later + high-confidence old timestamp -> old payment only;
 - same amount reused later + ambiguous/low-confidence timestamp -> no auto-match;
 - unknown decimal payment -> unmatched Activity;
-- duplicate relay event -> no second paid webhook;
+- duplicate relay event -> exact replay, no second observation or paid webhook;
+- different source event for the same already-paid reservation -> `corroborated`, no second transition/webhook;
+- future Kotak SMS + GPay/Amazon Pay observations converge on the payment as dedupe anchor;
+- reused amount + weak timing never becomes false corroboration;
 - inactive historical profile still matchable;
 - active profile switch never affects match decision.
 
@@ -340,17 +343,29 @@ Build a deterministic tool that reads a **verified v3 backup copy** and writes a
 
 Never mutate live v3/PocketBase DB in place.
 
-Map:
+Map conservatively:
 
-- payments;
-- payment merchant context;
-- account/UPI settings -> collection profiles;
-- existing relay device public key;
-- useful payment history/audit;
-- webhook configuration/delivery records as needed;
-- admin credential/bootstrap state.
+- preserve all PayGate payment IDs, requested/payable amounts and timestamps;
+- v3 `metadata.eventId` -> v4 event `external_id`; preserve the old registration-style v3 `external_id` under `metadata.legacy_v3`;
+- v3 `late` -> v4 `paid` only when the source has a real `paid_at`; report every normalization;
+- missing historical person name -> explicit `Unknown (legacy)`; never derive a person from an event/registration ID;
+- Paytm/Kotak destination UPI snapshots are reconstructed from operator-supplied cutover configuration because v3 did not store merchant destination UPI per payment;
+- historical Slice -> disabled, non-selectable `legacy` collection profile;
+- preserve historical amount-reservation rows and the existing Android relay device ID/public key;
+- old idempotency keys -> cutover tombstones so stale retries fail closed instead of creating duplicate payments;
+- synthesize simple payment history for imported lifecycle state.
 
-Do not preserve every legacy evidence/reconciliation row as a first-class v4 concept. Archive the original v3 DB for forensic reference.
+Source safety:
+
+- require the verified backup ZIP and matching SHA-256 sidecar;
+- require `data.db-wal` to be absent or zero length before extraction; a non-empty WAL fails before destination creation;
+- open only an extracted private `data.db` copy read-only/immutable; never accept live `pb_data`;
+- create a brand-new destination and import in one destination transaction;
+- destination must not already exist; failed/preflight migrations leave no partial DB.
+
+Do **not** activate old webhook deliveries, review cases, SMS/notification/relay events or alerts in v4. They remain forensic-only in the verified v3 archive so cutover cannot replay historical side effects.
+
+The Sep 1 verified production-shaped dry run migrated 271/271 payments with zero row-level mismatches, preserved the active Android device identity, created 271 idempotency tombstones and imported zero active webhook deliveries. Treat this as evidence for the runbook, not permission to skip the final cutover dry run against the latest backup.
 
 ### Migration report
 
@@ -402,6 +417,7 @@ No secrets/raw personal message bodies in the report.
 - real-format Kotak Google Messages notification -> correct observation/payment;
 - unrelated decimal message -> no payment mutation;
 - duplicate/rescan -> idempotent;
+- second independent notification for the same paid reservation -> corroborated only, no second webhook;
 - delayed/reused-amount ambiguity -> fail closed.
 
 ### SQLite
@@ -520,4 +536,5 @@ V4 is done only when:
 - web/Android share Overview/Payments/Activity/Settings;
 - password-only operator login is live;
 - webhooks remain durable/signed;
+- cross-source duplicate notifications corroborate one payment without duplicate state transitions/webhooks;
 - rollback artifacts are retained for the agreed safety window.
