@@ -466,7 +466,7 @@ Choose a quiet period.
 
 ### Drain v3 amount state
 
-Temporarily stop new payment creation while allowing existing pending/grace/quarantine reservations to settle.
+Temporarily stop new payment creation while allowing existing pending/grace/quarantine reservations to settle. On the final v3 build, set `PAYGATE_DRAIN_NEW_PAYMENTS=true`; `POST /api/payments` then returns retryable HTTP 503 while status reads, relay ingestion, matching, webhooks, and dashboard/backup operations remain available.
 
 Preferred:
 

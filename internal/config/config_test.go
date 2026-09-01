@@ -281,3 +281,18 @@ func TestCheckoutOriginsAreOptInAndStrict(t *testing.T) {
 		t.Fatalf("valid checkout origins rejected: %v", err)
 	}
 }
+
+func TestLoadCutoverDrainIsExplicitAndValidated(t *testing.T) {
+	t.Setenv("PAYGATE_DRAIN_NEW_PAYMENTS", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.DrainNewPayments {
+		t.Fatal("PAYGATE_DRAIN_NEW_PAYMENTS=true was not loaded")
+	}
+	t.Setenv("PAYGATE_DRAIN_NEW_PAYMENTS", "sometimes")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "PAYGATE_DRAIN_NEW_PAYMENTS") {
+		t.Fatalf("invalid drain flag error = %v", err)
+	}
+}
