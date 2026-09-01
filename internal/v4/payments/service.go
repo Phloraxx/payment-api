@@ -376,15 +376,18 @@ func paymentEventPayload(eventID, eventType string, p Payment) ([]byte, error) {
 }
 
 func paymentEventPayloadAt(eventID, eventType string, p Payment, eventAt time.Time) ([]byte, error) {
+	paymentData := map[string]any{
+		"id": p.ID, "name": p.Name, "external_id": p.ExternalID, "status": p.Status,
+		"requested_amount": moneyString(p.RequestedAmountPaise), "payable_amount": moneyString(p.PayableAmountPaise),
+		"metadata": json.RawMessage(p.Metadata),
+	}
+	if p.PaidAt != nil {
+		paymentData["paid_at"] = p.PaidAt.UTC().Format(time.RFC3339Nano)
+		paymentData["payer"] = map[string]any{"name": nullableJSON(p.PayerName), "upi_id": nullableJSON(p.PayerUPIID)}
+	}
 	payload := map[string]any{
-		"id":         eventID,
-		"type":       eventType,
-		"created_at": eventAt.UTC().Format(time.RFC3339Nano),
-		"data": map[string]any{"payment": map[string]any{
-			"id": p.ID, "name": p.Name, "external_id": p.ExternalID, "status": p.Status,
-			"requested_amount": moneyString(p.RequestedAmountPaise), "payable_amount": moneyString(p.PayableAmountPaise),
-			"metadata": json.RawMessage(p.Metadata),
-		}},
+		"id": eventID, "type": eventType, "created_at": eventAt.UTC().Format(time.RFC3339Nano),
+		"data": map[string]any{"payment": paymentData},
 	}
 	out, err := json.Marshal(payload)
 	if err != nil {
@@ -408,6 +411,13 @@ func moneyString(paise int64) string {
 
 func nullableString(value string) any {
 	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableJSON(value string) any {
+	if strings.TrimSpace(value) == "" {
 		return nil
 	}
 	return value
