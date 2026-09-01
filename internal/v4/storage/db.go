@@ -14,7 +14,7 @@ import (
 
 const (
 	defaultBusyTimeoutMS = 5000
-	schemaVersion        = 1
+	schemaVersion        = 2
 )
 
 type DB struct {

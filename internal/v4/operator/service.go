@@ -187,7 +187,7 @@ func (s *Service) loadRelay(ctx context.Context, out *RelaySummary) error {
 	var name string
 	var lastSeen sql.NullInt64
 	var appVersion sql.NullString
-	err := s.DB.SQL.QueryRowContext(ctx, `SELECT COALESCE(name,''),last_seen_at,app_version FROM relay_devices WHERE enabled=1 LIMIT 1`).
+	err := s.DB.SQL.QueryRowContext(ctx, `SELECT COALESCE(name,''),COALESCE(last_heartbeat_at,last_seen_at),app_version FROM relay_devices WHERE enabled=1 LIMIT 1`).
 		Scan(&name, &lastSeen, &appVersion)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
@@ -195,12 +195,13 @@ func (s *Service) loadRelay(ctx context.Context, out *RelaySummary) error {
 	if err != nil {
 		return fmt.Errorf("read relay summary: %w", err)
 	}
-	out.Connected = true
 	out.Name = name
 	out.AppVersion = appVersion.String
 	if lastSeen.Valid {
 		value := time.UnixMilli(lastSeen.Int64).UTC()
 		out.LastSeenAt = &value
+		age := s.now().Sub(value)
+		out.Connected = age >= -5*time.Minute && age <= time.Hour
 	}
 	return nil
 }
