@@ -24,15 +24,15 @@ type Service struct {
 	Now func() time.Time
 }
 type Profile struct {
-	ID        string
-	Label     string
-	UPIID     string
-	PayeeName string
-	Parser    string
-	Enabled   bool
-	Active    bool
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID        string    `json:"id"`
+	Label     string    `json:"label"`
+	UPIID     string    `json:"upi_id"`
+	PayeeName string    `json:"payee_name,omitempty"`
+	Parser    string    `json:"parser"`
+	Enabled   bool      `json:"enabled"`
+	Active    bool      `json:"active"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type UpsertInput struct {

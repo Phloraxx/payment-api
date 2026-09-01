@@ -48,14 +48,14 @@ type PairDeviceResult struct {
 }
 
 type DeviceInfo struct {
-	ID             string
-	Name           string
-	Enabled        bool
-	EnrolledAt     time.Time
-	LastSeenAt     *time.Time
-	AppVersion     string
-	DeviceModel    string
-	AndroidVersion string
+	ID             string     `json:"id"`
+	Name           string     `json:"name"`
+	Enabled        bool       `json:"enabled"`
+	EnrolledAt     time.Time  `json:"enrolled_at"`
+	LastSeenAt     *time.Time `json:"last_seen_at,omitempty"`
+	AppVersion     string     `json:"app_version,omitempty"`
+	DeviceModel    string     `json:"device_model,omitempty"`
+	AndroidVersion string     `json:"android_version,omitempty"`
 }
 
 func (s *Service) CreatePairing(ctx context.Context, replaceExisting bool) (PairingSession, error) {

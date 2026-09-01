@@ -24,44 +24,44 @@ type DailyVolume struct {
 }
 
 type Overview struct {
-	CollectedTodayPaise int64
-	PaymentsToday       int
-	PaidToday           int
-	Pending             int
-	ExpiredToday        int
-	StatusCounts        map[string]int
-	Volume              []DailyVolume
-	ActiveProfile       *ProfileSummary
-	Relay               RelaySummary
-	Webhooks            WebhookSummary
+	CollectedTodayPaise int64           `json:"collected_today_paise"`
+	PaymentsToday       int             `json:"payments_today"`
+	PaidToday           int             `json:"paid_today"`
+	Pending             int             `json:"pending"`
+	ExpiredToday        int             `json:"expired_today"`
+	StatusCounts        map[string]int  `json:"status_counts"`
+	Volume              []DailyVolume   `json:"volume"`
+	ActiveProfile       *ProfileSummary `json:"active_profile"`
+	Relay               RelaySummary    `json:"relay"`
+	Webhooks            WebhookSummary  `json:"webhooks"`
 }
 type ProfileSummary struct {
-	ID    string
-	Label string
+	ID    string `json:"id"`
+	Label string `json:"label"`
 }
 
 type RelaySummary struct {
-	Connected  bool
-	Name       string
-	LastSeenAt *time.Time
-	AppVersion string
+	Connected  bool       `json:"connected"`
+	Name       string     `json:"name,omitempty"`
+	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
+	AppVersion string     `json:"app_version,omitempty"`
 }
 
 type WebhookSummary struct {
-	Pending         int
-	Exhausted       int
-	LastDeliveredAt *time.Time
+	Pending         int        `json:"pending"`
+	Exhausted       int        `json:"exhausted"`
+	LastDeliveredAt *time.Time `json:"last_delivered_at,omitempty"`
 }
 
 type ActivityEntry struct {
-	At          time.Time
-	Kind        string
-	Status      string
-	Source      string
-	Title       string
-	PaymentID   string
-	AmountPaise *int64
-	Detail      string
+	At          time.Time `json:"at"`
+	Kind        string    `json:"kind"`
+	Status      string    `json:"status,omitempty"`
+	Source      string    `json:"source,omitempty"`
+	Title       string    `json:"title"`
+	PaymentID   string    `json:"payment_id,omitempty"`
+	AmountPaise *int64    `json:"amount_paise,omitempty"`
+	Detail      string    `json:"detail,omitempty"`
 }
 
 func NewService(db *storage.DB) *Service {
