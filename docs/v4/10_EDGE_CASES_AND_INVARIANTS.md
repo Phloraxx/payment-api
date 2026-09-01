@@ -166,11 +166,15 @@ Keep its amount reservation through normal reuse boundary.
 
 If trusted occurrence time proves money arrived before/around cancellation according to defined policy, record appropriately; do not reuse the amount early.
 
-### Paid payment receives duplicate source notification
+### Paid payment receives duplicate/corroborating notifications
 
-Deduped source event -> prior result.
+Exact retry of the same signed source event -> return the prior result idempotently.
 
-Different source event that clearly describes same money should not create a second state transition/webhook. It may attach as additional Activity only if useful.
+A different source event can describe the same underlying credit. Example: Kotak SMS + GPay, or later Kotak SMS + Amazon Pay. Do not dedupe these on Android and do not hash text in an attempt to prove they are identical.
+
+The first safe observation is `matched`. A later independent observation that resolves to the same historical payment reservation is `corroborated`. It attaches to the same payment and may fill missing payer information, but it creates **no second payment transition and no second merchant webhook**.
+
+If the payable amount has been reused and the later source has only low-confidence timing, fail closed as `ambiguous`; never call it corroboration merely because the amount is equal.
 
 ## 4. Collection profile
 
@@ -477,6 +481,18 @@ Historical payment imports remain valid; new allocator cap is not retroactively 
 
 Drain in-flight state before cutover where possible. Migrator must not accidentally turn an old active amount into a new free random candidate during cutover.
 
+### V3 backup contains non-empty `data.db-wal`
+
+Abort before creating the destination. A data-only extraction could otherwise omit uncheckpointed transactions. Migration accepts a missing WAL or an explicitly zero-length WAL only.
+
+### Old merchant retries a v3 idempotency key after cutover
+
+Migrated v3 keys are cutover tombstones bound to the historical payment. They deliberately do not pretend to be replayable v4 request fingerprints. A stale post-cutover retry fails closed with idempotency conflict and cannot create a second payment.
+
+### Historical operational rows
+
+Old webhook deliveries/reviews/SMS/relay/alert rows remain in the verified archive and are not activated in v4. This prevents a migration from replaying historical side effects.
+
 ### Migration interrupted
 
 Destination new DB is disposable/recreated. Source v3 backup is never modified.
@@ -522,7 +538,8 @@ Always render as escaped text. Never inject raw notification content into dashbo
 11. One PayGate process owns live SQLite.
 12. No second maintenance/backup PayGate process opens live DB.
 13. UTR/RRN is not required.
-14. GPay/Slice do not auto-match in v4.0.
-15. PocketBase/libgm are absent from final v4 runtime.
-16. Every risky operator correction is visible in immutable history.
-17. If PayGate cannot prove which payment owns money, it records Activity and does not guess.
+14. GPay/Amazon Pay/Slice do not auto-match in v4.0.
+15. Multiple independent notification sources can corroborate one payment but can never create multiple `payment.paid` transitions/webhooks.
+16. PocketBase/libgm are absent from final v4 runtime.
+17. Every risky operator correction is visible in immutable history.
+18. If PayGate cannot prove which payment owns money, it records Activity and does not guess.

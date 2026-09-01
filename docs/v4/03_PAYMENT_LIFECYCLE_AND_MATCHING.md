@@ -215,15 +215,19 @@ For normalized observation `O`:
 5. derive occurred_at + confidence/source
 6. find historical payments on P with exact payable amount
 7. restrict candidates to payments whose lifecycle can contain O.occurred_at
-8. if exactly one candidate is safe:
+8. if exactly one candidate is safe and not yet paid:
       mark paid
-      attach observation
+      attach observation as `matched`
       copy payer enrichment when present
       append payment history
-      enqueue payment.paid webhook in same transaction
-9. if zero candidates:
+      enqueue one payment.paid webhook in same transaction
+9. if exactly one safe candidate is already paid and already has a confirming observation:
+      attach this independent observation as `corroborated`
+      optionally enrich missing payer fields
+      do not create another payment transition/history/webhook
+10. if zero candidates:
       save unmatched Activity
-10. if multiple/uncertain candidates:
+11. if multiple/uncertain candidates:
       fail closed; save ambiguous Activity
 ```
 
@@ -342,7 +346,9 @@ Do not:
 - profile switch does not alter existing payments;
 - unrelated decimal Paytm/Google Messages notification becomes ignored/unmatched, never paid;
 - duplicate relay event is idempotent;
-- unsupported GPay/Slice cannot auto-match in v4.0.
+- two independent observations of the same already-paid reservation produce `matched` then `corroborated`, with one payment webhook total;
+- a delayed duplicate after amount reuse with low-confidence time fails ambiguous rather than attaching to the new payment;
+- unsupported GPay/Amazon Pay/Slice cannot auto-match in v4.0; their future parser rollout must map the source to a collection profile confidently.
 
 ### Operator/webhook
 

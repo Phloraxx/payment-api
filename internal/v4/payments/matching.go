@@ -95,6 +95,15 @@ func (s *Service) ApplyObservation(ctx context.Context, relayEventID string, obs
 				matchResult = "ambiguous"
 			} else {
 				matchResult = "matched"
+				if candidate.Status == "paid" {
+					prior, err := hasConfirmedObservation(ctx, tx, candidate.PaymentID)
+					if err != nil {
+						return err
+					}
+					if prior {
+						matchResult = "corroborated"
+					}
+				}
 				matchedID = candidate.PaymentID
 				transitioned, err := applyMatchedPayment(ctx, tx, idFn, candidate, obs, now)
 				if err != nil {
@@ -116,7 +125,11 @@ func (s *Service) ApplyObservation(ctx context.Context, relayEventID string, obs
 			obs.OccurredAtSource, receivedAt.UnixMilli(), nullableString(matchedID), matchResult); err != nil {
 			return fmt.Errorf("insert payment observation: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE relay_events SET status=?,error=NULL WHERE id=?`, matchResult, relayEventID); err != nil {
+		relayStatus := matchResult
+		if relayStatus == "corroborated" {
+			relayStatus = "matched"
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE relay_events SET status=?,error=NULL WHERE id=?`, relayStatus, relayEventID); err != nil {
 			return fmt.Errorf("update relay event status: %w", err)
 		}
 		result.Result = matchResult
@@ -238,6 +251,15 @@ func occurredBeforeCancellation(ctx context.Context, tx *storage.ImmediateTx, pa
 		return false, fmt.Errorf("read cancellation time: %w", err)
 	}
 	return occurredAt <= cancelledAt, nil
+}
+
+func hasConfirmedObservation(ctx context.Context, tx *storage.ImmediateTx, paymentID string) (bool, error) {
+	var found int
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM payment_observations WHERE matched_payment_id=? AND match_result IN ('matched','corroborated'))`, paymentID).Scan(&found)
+	if err != nil {
+		return false, fmt.Errorf("read prior payment observations: %w", err)
+	}
+	return found == 1, nil
 }
 
 func reusedLowConfidenceLatest(ctx context.Context, tx *storage.ImmediateTx, obs observations.Observation, candidate matchCandidate) (bool, error) {

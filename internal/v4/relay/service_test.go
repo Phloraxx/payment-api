@@ -170,6 +170,42 @@ func TestSignedPaytmEventMatchesPaymentAndIsIdempotent(t *testing.T) {
 		t.Fatal("duplicate relay event created duplicate state")
 	}
 }
+
+func TestIndependentNotificationCorroboratesAndReplaysWithoutSecondTransition(t *testing.T) {
+	ctx := context.Background()
+	db := openRelayDB(t)
+	createdAt := time.Date(2026, 9, 1, 3, 30, 0, 0, time.UTC)
+	insertProfile(t, db, "paytm", "paytm_notification", "merchant@paytm", true, createdAt)
+	paymentService, created := createPayment(t, db, createdAt, "corroborate-1")
+	firstAt := createdAt.Add(2 * time.Minute)
+	priv, deviceID := enrollTestDevice(t, db, createdAt.Add(-time.Minute))
+	service := NewService(db, paymentService)
+
+	firstBody := marshalEvent(t, EventInput{SchemaVersion: 1, EventID: strings.Repeat("c", 64), PackageName: observations.PaytmBusinessPackage,
+		PostedAtMS: firstAt.UnixMilli(), Title: "Payment Received on Paytm", Text: "₹100.37 Received from Rahul", AmountHintPaise: 10037})
+	service.Now = func() time.Time { return firstAt.Add(time.Second) }
+	if first, err := service.IngestSigned(ctx, signedAuth(t, priv, deviceID, service.Now(), firstBody), firstBody); err != nil || first.Status != "matched" || !first.Transitioned {
+		t.Fatalf("first=%+v err=%v", first, err)
+	}
+
+	secondAt := firstAt.Add(10 * time.Second)
+	secondBody := marshalEvent(t, EventInput{SchemaVersion: 1, EventID: strings.Repeat("d", 64), PackageName: observations.PaytmBusinessPackage,
+		PostedAtMS: secondAt.UnixMilli(), Title: "Payment Received on Paytm", Text: "₹100.37 Received from Rahul", AmountHintPaise: 10037})
+	service.Now = func() time.Time { return secondAt.Add(time.Second) }
+	secondAuth := signedAuth(t, priv, deviceID, service.Now(), secondBody)
+	second, err := service.IngestSigned(ctx, secondAuth, secondBody)
+	if err != nil || second.Status != "corroborated" || second.PaymentID != created.Payment.ID || second.Transitioned || second.Duplicate {
+		t.Fatalf("second=%+v err=%v", second, err)
+	}
+	replay, err := service.IngestSigned(ctx, secondAuth, secondBody)
+	if err != nil || !replay.Duplicate || replay.Status != "corroborated" || replay.PaymentID != created.Payment.ID || replay.Transitioned {
+		t.Fatalf("replay=%+v err=%v", replay, err)
+	}
+	if countRows(t, db, "relay_events") != 2 || countRows(t, db, "payment_observations") != 2 || countRows(t, db, "webhook_deliveries") != 2 {
+		t.Fatal("corroboration created duplicate payment side effects")
+	}
+}
+
 func TestRelaySignatureFailuresDoNotCreateEvents(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 1, 4, 0, 0, 0, time.UTC)

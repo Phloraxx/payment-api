@@ -161,9 +161,13 @@ It extracts best-effort:
 
 Unknown decimal-money Google Messages notifications are ignored/unmatched; they are not treated as Kotak by default.
 
-### GPay / Slice
+### GPay / Amazon Pay / Slice
 
-Deferred. Their notifications may be captured only in a future explicit rollout with real sanitized fixtures and parser tests.
+Deferred for v4.0. Their notifications may be enabled only in a future explicit rollout with real sanitized fixtures and parser tests.
+
+The normalized observation schema is intentionally not tied to a fixed source enum, so adding `gpay_notification`, `amazonpay_notification` or another vetted source later is a parser/routing change rather than a SQLite schema redesign.
+
+A future app-level notification source does **not** need to know the currently active collection profile. The server parser/routing layer must determine which collection profile(s) that source can represent. If the source cannot be mapped confidently to one profile, it must remain unmatched/ambiguous rather than guessing.
 
 ## Normalized observation
 
@@ -230,6 +234,19 @@ After accepted ingestion:
 - event text/time is not silently rewritten;
 - normalized observation keeps one source event;
 - repeated processing cannot generate a second `payment.paid` transition/webhook.
+
+### Cross-source corroboration
+
+One real UPI credit may create more than one phone notification. Example: a Kotak account credit can produce both a Kotak SMS surfaced by Google Messages and a GPay notification; a future Amazon Pay integration could create another observation for the same money.
+
+PayGate must not try to collapse those notifications on the phone. Each source event remains independently signed and stored. The **payment** is the dedupe anchor:
+
+1. first safe observation -> `matched`; if needed, transition payment to `paid` and enqueue exactly one `payment.paid` webhook;
+2. later independent observation for the same historical reservation -> `corroborated`, attach to the same payment and optionally enrich missing payer fields;
+3. exact retry of the same relay event ID -> replay prior result without a second observation;
+4. reused amount + insufficient timestamp confidence -> `ambiguous`, never assume it corroborates the newest payment.
+
+This makes duplicate handling provider-agnostic and does not require UTR/RRN or fragile notification-text hashes.
 
 ## Privacy
 

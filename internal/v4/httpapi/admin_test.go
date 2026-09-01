@@ -181,6 +181,14 @@ func TestAdminPaymentsFilterDetailAndEdit(t *testing.T) {
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"payer_name":"Bijoy P"`) || !strings.Contains(rr.Body.String(), `"payment.paid"`) {
 		t.Fatalf("detail status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	for _, key := range []string{`"created_at"`, `"event_type"`, `"changes"`} {
+		if !strings.Contains(rr.Body.String(), key) {
+			t.Fatalf("detail must use snake_case key %s: %s", key, rr.Body.String())
+		}
+	}
+	if strings.Contains(rr.Body.String(), `"CreatedAt"`) || strings.Contains(rr.Body.String(), `"EventType"`) {
+		t.Fatalf("detail leaked Go field names: %s", rr.Body.String())
+	}
 }
 func TestAdminSettingsProfilesKeysAndPairing(t *testing.T) {
 	f := newAdminHTTPFixture(t)

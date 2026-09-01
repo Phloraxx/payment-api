@@ -7,13 +7,7 @@ import (
 )
 
 func (db *DB) migrate(ctx context.Context) error {
-	tx, err := db.SQL.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin schema migration: %w", err)
-	}
-	defer tx.Rollback()
-
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := db.SQL.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY,
     applied_at INTEGER NOT NULL
@@ -21,35 +15,150 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 `); err != nil {
 		return fmt.Errorf("create schema_migrations: %w", err)
 	}
-
 	var current int
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
+	if err := db.SQL.QueryRowContext(ctx, `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&current); err != nil {
 		return fmt.Errorf("read schema version: %w", err)
 	}
 	if current > schemaVersion {
 		return fmt.Errorf("database schema %d is newer than supported %d", current, schemaVersion)
 	}
 	if current < 1 {
-		if err := applyV1(ctx, tx); err != nil {
+		if err := db.runMigrationTx(ctx, 1, applyV1); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(1, unixepoch('subsec') * 1000)`); err != nil {
-			return fmt.Errorf("record schema v1: %w", err)
-		}
+		current = 1
 	}
 	if current < 2 {
-		if err := applyV2(ctx, tx); err != nil {
+		if err := db.runMigrationTx(ctx, 2, applyV2); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES(2, unixepoch('subsec') * 1000)`); err != nil {
-			return fmt.Errorf("record schema v2: %w", err)
-		}
+		current = 2
 	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit schema migration: %w", err)
+	if current < 3 {
+		if err := db.applyV3(ctx); err != nil {
+			return err
+		}
+		current = 3
+	}
+	if current < 4 {
+		if err := db.runMigrationTx(ctx, 4, applyV4); err != nil {
+			return err
+		}
 	}
 	return nil
 }
+
+func (db *DB) runMigrationTx(ctx context.Context, version int, apply func(context.Context, *sql.Tx) error) error {
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin schema migration %d: %w", version, err)
+	}
+	defer tx.Rollback()
+	if err := apply(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(?, unixepoch('subsec') * 1000)`, version); err != nil {
+		return fmt.Errorf("record schema v%d: %w", version, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit schema v%d: %w", version, err)
+	}
+	return nil
+}
+
+func (db *DB) applyV3(ctx context.Context) (err error) {
+	conn, err := db.SQL.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire schema v3 connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return fmt.Errorf("disable foreign keys for schema v3: %w", err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), `PRAGMA foreign_keys=ON`) }()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("begin schema v3: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, schemaV3); err != nil {
+		return fmt.Errorf("apply schema v3: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(3, unixepoch('subsec') * 1000)`); err != nil {
+		return fmt.Errorf("record schema v3: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("commit schema v3: %w", err)
+	}
+	committed = true
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=ON`); err != nil {
+		return fmt.Errorf("restore foreign keys after schema v3: %w", err)
+	}
+	rows, err := conn.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return fmt.Errorf("verify schema v3 foreign keys: %w", err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		return fmt.Errorf("schema v3 foreign key check found violations")
+	}
+	return rows.Err()
+}
+
+const schemaV3 = `
+CREATE TABLE collection_profiles_v3 (
+    id TEXT PRIMARY KEY,
+    label TEXT NOT NULL CHECK(length(trim(label)) BETWEEN 1 AND 120),
+    upi_id TEXT NOT NULL CHECK(length(trim(upi_id)) BETWEEN 3 AND 255),
+    payee_name TEXT,
+    parser TEXT NOT NULL CHECK(parser IN ('paytm_notification','kotak_sms','legacy')),
+    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+    active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0,1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    CHECK(active = 0 OR enabled = 1),
+    CHECK(parser != 'legacy' OR (enabled = 0 AND active = 0))
+) STRICT;
+INSERT INTO collection_profiles_v3(id,label,upi_id,payee_name,parser,enabled,active,created_at,updated_at)
+SELECT id,label,upi_id,payee_name,parser,enabled,active,created_at,updated_at FROM collection_profiles;
+DROP TABLE collection_profiles;
+ALTER TABLE collection_profiles_v3 RENAME TO collection_profiles;
+CREATE UNIQUE INDEX uq_collection_profiles_one_active ON collection_profiles(active) WHERE active = 1;
+`
+
+func applyV4(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, schemaV4); err != nil {
+		return fmt.Errorf("apply schema v4: %w", err)
+	}
+	return nil
+}
+
+const schemaV4 = `
+CREATE TABLE payment_observations_v4 (
+    id TEXT PRIMARY KEY,
+    relay_event_id TEXT NOT NULL UNIQUE REFERENCES relay_events(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    source TEXT NOT NULL CHECK(length(trim(source)) BETWEEN 1 AND 64),
+    collection_profile_id TEXT NOT NULL REFERENCES collection_profiles(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    amount_paise INTEGER NOT NULL CHECK(amount_paise > 0 AND amount_paise % 100 BETWEEN 1 AND 99),
+    payer_name TEXT,
+    payer_upi_id TEXT,
+    occurred_at INTEGER NOT NULL,
+    occurred_at_source TEXT NOT NULL CHECK(occurred_at_source IN ('notification_text','notification_posted_at','server_received_at')),
+    received_at INTEGER NOT NULL,
+    matched_payment_id TEXT REFERENCES payments(id) ON UPDATE RESTRICT ON DELETE SET NULL,
+    match_result TEXT NOT NULL CHECK(match_result IN ('matched','corroborated','unmatched','ambiguous','ignored','error'))
+) STRICT;
+INSERT INTO payment_observations_v4(id,relay_event_id,source,collection_profile_id,amount_paise,payer_name,payer_upi_id,occurred_at,occurred_at_source,received_at,matched_payment_id,match_result)
+SELECT id,relay_event_id,source,collection_profile_id,amount_paise,payer_name,payer_upi_id,occurred_at,occurred_at_source,received_at,matched_payment_id,match_result FROM payment_observations;
+DROP TABLE payment_observations;
+ALTER TABLE payment_observations_v4 RENAME TO payment_observations;
+CREATE INDEX idx_observations_amount_time ON payment_observations(collection_profile_id, amount_paise, occurred_at);
+CREATE INDEX idx_observations_payment ON payment_observations(matched_payment_id, occurred_at) WHERE matched_payment_id IS NOT NULL;
+`
 
 func applyV2(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, schemaV2); err != nil {

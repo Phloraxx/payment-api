@@ -218,7 +218,7 @@ func (s *Service) acceptEvent(ctx context.Context, device verifiedDevice, in Eve
 func existingRelayEvent(ctx context.Context, tx *storage.ImmediateTx, deviceID, sourceEventID string) (IngestResult, bool, error) {
 	var result IngestResult
 	var paymentID sql.NullString
-	err := tx.QueryRowContext(ctx, `SELECT r.id,r.status,o.matched_payment_id
+	err := tx.QueryRowContext(ctx, `SELECT r.id,COALESCE(o.match_result,r.status),o.matched_payment_id
 		FROM relay_events r LEFT JOIN payment_observations o ON o.relay_event_id=r.id
 		WHERE r.device_id=? AND r.source_event_id=?`, deviceID, sourceEventID).
 		Scan(&result.RelayEventID, &result.Status, &paymentID)

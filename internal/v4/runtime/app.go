@@ -94,6 +94,7 @@ func New(ctx context.Context, cfg Config) (_ *App, err error) {
 	mux.Handle("/v1/", merchantHandler)
 	mux.Handle("/admin/", adminHandler)
 	mux.Handle("/api/v4/relay/", relayHandler)
+	mux.HandleFunc("GET /.well-known/assetlinks.json", app.assetLinks)
 	mux.HandleFunc("GET /health", app.health)
 	app.handler = cors(cfg.AllowedOrigins, mux)
 	return app, nil
@@ -122,6 +123,23 @@ func (a *App) Handler() http.Handler {
 		})
 	}
 	return a.handler
+}
+
+const androidAssetLinks = `[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "io.github.phloraxx.paygaterelay",
+      "sha256_cert_fingerprints": ["41:2B:8F:66:C0:6A:CD:93:95:8C:4D:D1:1C:AA:32:14:BA:95:00:59:C0:0E:57:15:9D:56:73:F9:47:00:D4:4A"]
+    }
+  }
+]`
+
+func (a *App) assetLinks(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=3600")
+	_, _ = w.Write([]byte(androidAssetLinks))
 }
 
 func (a *App) health(w http.ResponseWriter, r *http.Request) {

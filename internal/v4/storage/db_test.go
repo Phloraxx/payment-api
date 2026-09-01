@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func openTestDB(t *testing.T) *DB {
@@ -362,8 +363,8 @@ func TestOpenMigratesV1DatabaseToRelayHealthSchema(t *testing.T) {
 	if err := db.SQL.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("schema version=%d want=2", version)
+	if version != schemaVersion {
+		t.Fatalf("schema version=%d want=%d", version, schemaVersion)
 	}
 	rows, err := db.SQL.QueryContext(ctx, `PRAGMA table_info(relay_devices)`)
 	if err != nil {
@@ -384,5 +385,87 @@ func TestOpenMigratesV1DatabaseToRelayHealthSchema(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("relay health columns were not added")
+	}
+}
+
+func TestOpenMigratesV2ProfilesToDisabledLegacySupport(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "paygate-v2.db")
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL) STRICT;`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, schemaV1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, schemaV2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(1,1),(2,2)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO collection_profiles(id,label,upi_id,parser,enabled,active,created_at,updated_at)
+		VALUES('kotak','Kotak','merchant@kotak','kotak_sms',1,1,1,1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO payments(id,name,metadata_json,requested_amount_paise,payable_amount_paise,adjustment_paise,
+		collection_profile_id,upi_id_snapshot,status,created_at,expires_at,grace_until,reuse_after)
+		VALUES('pay_old','Unknown (legacy)','{}',10000,10001,1,'kotak','merchant@kotak','expired',1000,301000,601000,901000)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var profile string
+	if err := db.SQL.QueryRowContext(ctx, `SELECT collection_profile_id FROM payments WHERE id='pay_old'`).Scan(&profile); err != nil {
+		t.Fatal(err)
+	}
+	if profile != "kotak" {
+		t.Fatalf("payment profile=%q", profile)
+	}
+	if _, err := db.SQL.ExecContext(ctx, `INSERT INTO collection_profiles(id,label,upi_id,parser,enabled,active,created_at,updated_at)
+		VALUES('slice','Slice (legacy)','legacy@slice','legacy',0,0,3,3)`); err != nil {
+		t.Fatalf("disabled legacy profile rejected: %v", err)
+	}
+	if _, err := db.SQL.ExecContext(ctx, `INSERT INTO collection_profiles(id,label,upi_id,parser,enabled,active,created_at,updated_at)
+		VALUES('bad','Bad legacy','legacy@bad','legacy',1,0,3,3)`); err == nil {
+		t.Fatal("enabled legacy profile should be rejected")
+	}
+	rows, err := db.SQL.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if rows.Next() {
+		t.Fatal("foreign key violations after v3 profile rebuild")
+	}
+}
+
+func TestObservationSchemaSupportsCorroborationAndFutureSources(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Now().UTC().UnixMilli()
+	if _, err := db.SQL.Exec(`INSERT INTO collection_profiles(id,label,upi_id,parser,enabled,active,created_at,updated_at) VALUES('kotak','Kotak','merchant@kotak','kotak_sms',1,1,?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO payments(id,name,metadata_json,requested_amount_paise,payable_amount_paise,adjustment_paise,collection_profile_id,upi_id_snapshot,status,created_at,expires_at,grace_until,reuse_after,paid_at) VALUES('pay_future','Legacy','{}',10000,10037,37,'kotak','merchant@kotak','paid',?,?,?,?,?)`, now, now+300000, now+600000, now+900000, now+1000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO relay_devices(id,public_key_pem,enabled,enrolled_at) VALUES('device_future','pem',1,?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO relay_events(id,device_id,source_event_id,package_name,posted_at,received_at,status) VALUES('relay_future','device_future','src_future','future.package',?,?,'matched')`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO payment_observations(id,relay_event_id,source,collection_profile_id,amount_paise,occurred_at,occurred_at_source,received_at,matched_payment_id,match_result) VALUES('obs_future','relay_future','amazonpay_notification','kotak',10037,?,'notification_posted_at',?,'pay_future','corroborated')`, now, now); err != nil {
+		t.Fatalf("future source/corroboration rejected: %v", err)
 	}
 }

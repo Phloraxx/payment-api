@@ -242,3 +242,18 @@ func TestRuntimePairingSessionUsesPublicAppLinkNotRelayEndpoint(t *testing.T) {
 		t.Fatalf("pairing URL=%q", payload.PairingURL)
 	}
 }
+
+func TestRuntimeServesAndroidAssetLinksForProductionSigner(t *testing.T) {
+	app := newTestApp(t, nil)
+	req := httptest.NewRequest(http.MethodGet, "/.well-known/assetlinks.json", nil)
+	res := httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusOK {
+		t.Fatalf("assetlinks status=%d body=%s", res.Code, res.Body.String())
+	}
+	for _, want := range []string{"io.github.phloraxx.paygaterelay", "41:2B:8F:66:C0:6A:CD:93", "delegate_permission/common.handle_all_urls"} {
+		if !strings.Contains(res.Body.String(), want) {
+			t.Fatalf("assetlinks missing %q: %s", want, res.Body.String())
+		}
+	}
+}
