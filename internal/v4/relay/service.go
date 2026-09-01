@@ -25,10 +25,12 @@ const (
 )
 
 type Service struct {
-	DB       *storage.DB
-	Payments *payments.Service
-	Now      func() time.Time
-	NewID    func(prefix string) (string, error)
+	DB              *storage.DB
+	Payments        *payments.Service
+	Now             func() time.Time
+	NewID           func(prefix string) (string, error)
+	NewPairingToken func() (string, error)
+	PairingTTL      time.Duration
 }
 type EventInput struct {
 	SchemaVersion   int    `json:"schema_version"`
@@ -50,7 +52,10 @@ type IngestResult struct {
 }
 
 func NewService(db *storage.DB, paymentService *payments.Service) *Service {
-	return &Service{DB: db, Payments: paymentService, Now: time.Now, NewID: randomID}
+	return &Service{
+		DB: db, Payments: paymentService, Now: time.Now, NewID: randomID,
+		NewPairingToken: randomPairingToken, PairingTTL: 2 * time.Minute,
+	}
 }
 func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []byte) (IngestResult, error) {
 	if s == nil || s.DB == nil || s.DB.SQL == nil || s.Payments == nil {
