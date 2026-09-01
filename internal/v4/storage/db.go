@@ -18,7 +18,8 @@ const (
 )
 
 type DB struct {
-	SQL *sql.DB
+	SQL  *sql.DB
+	Path string
 }
 
 // ImmediateTx is a short BEGIN IMMEDIATE transaction. It deliberately exposes
@@ -94,7 +95,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	raw.SetConnMaxLifetime(0)
 	raw.SetConnMaxIdleTime(5 * time.Minute)
 
-	db := &DB{SQL: raw}
+	db := &DB{SQL: raw, Path: abs}
 	if err := raw.PingContext(ctx); err != nil {
 		raw.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
