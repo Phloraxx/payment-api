@@ -82,7 +82,6 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	q.Add("_pragma", "synchronous(FULL)")
 	q.Add("_pragma", "foreign_keys(ON)")
 	q.Add("_pragma", fmt.Sprintf("busy_timeout(%d)", defaultBusyTimeoutMS))
-	q.Set("_txlock", "immediate")
 	q.Set("_dqs", "false")
 
 	dsn := "file:" + filepath.ToSlash(abs) + "?" + q.Encode()

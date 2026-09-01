@@ -303,3 +303,24 @@ func TestWithImmediateTxCommitsAndRollsBack(t *testing.T) {
 		t.Fatalf("rolled-back row query error = %v, want sql.ErrNoRows", err)
 	}
 }
+func TestOrdinaryReadTransactionDoesNotAcquireWriterLock(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	readTx, err := db.SQL.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readTx.Rollback()
+	var version int
+	if err := readTx.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO settings(key,value,updated_at) VALUES('writer_probe','ok',1)`)
+		return err
+	}); err != nil {
+		t.Fatalf("ordinary read transaction blocked writer: %v", err)
+	}
+}
