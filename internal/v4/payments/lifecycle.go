@@ -181,6 +181,8 @@ func transitionSummary(eventType string) string {
 		return "Payment cancelled"
 	case "payment.expired":
 		return "Payment expired"
+	case "payment.paid":
+		return "Payment paid"
 	default:
 		return eventType
 	}
