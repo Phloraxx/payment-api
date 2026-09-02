@@ -47,6 +47,7 @@ type Config struct {
 	GMessagesSessionPath           string
 	TestMode                       bool
 	RateLimitsEnabled              bool
+	DrainNewPayments               bool
 	CheckoutAllowedOrigins         []string
 	RetentionEnabled               bool
 	SMSRawRetention                time.Duration
@@ -115,6 +116,10 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	rateLimitsEnabled, err := boolEnv("PAYGATE_RATE_LIMITS_ENABLED", true)
+	if err != nil {
+		return Config{}, err
+	}
+	drainNewPayments, err := boolEnv("PAYGATE_DRAIN_NEW_PAYMENTS", false)
 	if err != nil {
 		return Config{}, err
 	}
@@ -222,6 +227,7 @@ func Load() (Config, error) {
 		GMessagesEnabled:               gmessagesEnabled,
 		TestMode:                       testMode,
 		RateLimitsEnabled:              rateLimitsEnabled,
+		DrainNewPayments:               drainNewPayments,
 		CheckoutAllowedOrigins:         parseOriginList(os.Getenv("PAYGATE_CHECKOUT_ORIGINS")),
 		RetentionEnabled:               retentionEnabled,
 		SMSRawRetention:                smsRawRetention,

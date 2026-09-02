@@ -281,6 +281,8 @@ type createPaymentBody struct {
 	Metadata       json.RawMessage `json:"metadata"`
 }
 
+var errPaymentCreationDrained = errors.New("new payment creation is drained")
+
 func (a *API) createPayment(e *core.RequestEvent) error {
 	if !a.authorizedWrite(e) {
 		return e.UnauthorizedError("API key or dashboard authentication is required", nil)
@@ -310,8 +312,20 @@ func (a *API) createPayment(e *core.RequestEvent) error {
 		Metadata:       metadata,
 		IdempotencyKey: strings.TrimSpace(e.Request.Header.Get("Idempotency-Key")),
 	}, func(uow store.UnitOfWork) error {
+		if a.Config.DrainNewPayments {
+			return errPaymentCreationDrained
+		}
 		return a.ensurePaymentAccountReadyUoW(uow, body.PaymentAccount)
 	})
+	if errors.Is(err, errPaymentCreationDrained) {
+		e.Response.Header().Set("Retry-After", "60")
+		return e.JSON(http.StatusServiceUnavailable, map[string]any{
+			"error": map[string]any{
+				"code":    "PAYMENT_CREATION_DRAINED",
+				"message": "New payment creation is temporarily paused for a controlled PayGate cutover.",
+			},
+		})
+	}
 	if err != nil {
 		return writeDomainError(e, err)
 	}

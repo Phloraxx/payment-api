@@ -89,6 +89,34 @@ func (s *SettingsService) ConfigureWebhook(ctx context.Context, endpoint string,
 	}
 	return WebhookSettings{Enabled: true, Endpoint: endpoint, SecretConfigured: true}, newSecret, nil
 }
+func (s *SettingsService) BootstrapWebhook(ctx context.Context, endpoint, secret string) error {
+	if s == nil || s.DB == nil || s.DB.SQL == nil {
+		return errors.New("settings storage is required")
+	}
+	existing, err := s.loadWebhookConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(existing.Endpoint) != "" || strings.TrimSpace(existing.Secret) != "" {
+		return nil
+	}
+	endpoint, secret = strings.TrimSpace(endpoint), strings.TrimSpace(secret)
+	if endpoint == "" && secret == "" {
+		return nil
+	}
+	cfg := webhooks.Config{Endpoint: endpoint, Secret: secret}
+	if err := webhooks.ValidateConfig(cfg); err != nil {
+		return err
+	}
+	if err := s.storeWebhookConfig(ctx, cfg); err != nil {
+		return err
+	}
+	if s.Worker != nil {
+		return s.Worker.UpdateConfig(cfg)
+	}
+	return nil
+}
+
 func (s *SettingsService) ApplyPersistedWebhook(ctx context.Context) error {
 	if s == nil || s.Worker == nil {
 		return nil

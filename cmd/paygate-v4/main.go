@@ -108,15 +108,27 @@ func configFromEnv() (v4runtime.Config, error) {
 	}
 	origins := splitCSV(os.Getenv("PAYGATE_V4_ALLOWED_ORIGINS"))
 	return v4runtime.Config{
-		DataDir:                os.Getenv("PAYGATE_V4_DATA_DIR"),
-		ListenAddr:             os.Getenv("PAYGATE_V4_LISTEN_ADDR"),
-		PublicURL:              os.Getenv("PAYGATE_V4_PUBLIC_URL"),
-		AllowedOrigins:         origins,
-		BootstrapAdminPassword: os.Getenv("PAYGATE_V4_ADMIN_PASSWORD"),
-		BackupDir:              os.Getenv("PAYGATE_V4_BACKUP_DIR"),
-		BackupHourUTC:          hour,
-		BackupRetention:        retention,
+		DataDir:                  os.Getenv("PAYGATE_V4_DATA_DIR"),
+		ListenAddr:               os.Getenv("PAYGATE_V4_LISTEN_ADDR"),
+		PublicURL:                os.Getenv("PAYGATE_V4_PUBLIC_URL"),
+		AllowedOrigins:           origins,
+		BootstrapAdminPassword:   os.Getenv("PAYGATE_V4_ADMIN_PASSWORD"),
+		BootstrapMerchantAPIKey:  firstNonEmpty(os.Getenv("PAYGATE_V4_MERCHANT_API_KEY"), os.Getenv("PAYGATE_API_KEY")),
+		BootstrapWebhookEndpoint: firstNonEmpty(os.Getenv("PAYGATE_V4_WEBHOOK_ENDPOINT"), os.Getenv("OUTGOING_WEBHOOK_URL")),
+		BootstrapWebhookSecret:   firstNonEmpty(os.Getenv("PAYGATE_V4_WEBHOOK_SECRET"), os.Getenv("OUTGOING_WEBHOOK_SECRET")),
+		BackupDir:                os.Getenv("PAYGATE_V4_BACKUP_DIR"),
+		BackupHourUTC:            hour,
+		BackupRetention:          retention,
 	}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func splitCSV(value string) []string {

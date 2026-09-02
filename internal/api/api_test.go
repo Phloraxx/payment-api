@@ -204,6 +204,16 @@ func TestPaymentAPIAuthenticationAndAmountValidation(t *testing.T) {
 			ExpectedContent: []string{"Request entity too large"},
 		},
 		{
+			Name: "cutover drain rejects only new creation", Method: http.MethodPost, URL: "/api/payments",
+			Headers: map[string]string{"Authorization": "Bearer api-secret", "Content-Type": "application/json", "Idempotency-Key": "drain-test"},
+			Body:    strings.NewReader(`{"amount":100,"externalId":"drain-test"}`),
+			TestAppFactory: func(t testing.TB) *tests.TestApp {
+				return apiTestFactoryWithConfig(t, func(cfg *config.Config) { cfg.DrainNewPayments = true }, nil)
+			},
+			ExpectedStatus:  http.StatusServiceUnavailable,
+			ExpectedContent: []string{"PAYMENT_CREATION_DRAINED"},
+		},
+		{
 			Name: "valid whole rupee payment", Method: http.MethodPost, URL: "/api/payments",
 			Headers:         map[string]string{"Authorization": "Bearer api-secret", "Content-Type": "application/json", "Idempotency-Key": "http-test-idem"},
 			Body:            strings.NewReader(`{"amount":100,"externalId":"order-http"}`),
@@ -262,6 +272,90 @@ func TestPaymentCreateThroughRealHTTPServer(t *testing.T) {
 		if !strings.Contains(content, want) {
 			t.Fatalf("response missing %q: %s", want, content)
 		}
+	}
+}
+
+func TestCutoverDrainKeepsExistingPaymentsReadable(t *testing.T) {
+	var existingID string
+	app := apiTestFactoryWithConfig(t, func(cfg *config.Config) {
+		cfg.DrainNewPayments = true
+	}, func(_ *tests.TestApp, service *payments.Service) {
+		payment, _, err := service.Create(payments.CreateInput{AmountRupees: 100, ExternalID: "existing-before-drain", IdempotencyKey: "existing-drain-idem"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		existingID = payment.ID
+	})
+	defer app.Cleanup()
+
+	before, err := app.CountRecords("payments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	router, err := apis.NewRouter(app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveEvent := &core.ServeEvent{App: app, Router: router}
+	if err := app.OnServe().Trigger(serveEvent, func(e *core.ServeEvent) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	mux, err := serveEvent.Router.BuildMux()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	replayReq, err := http.NewRequest(http.MethodPost, server.URL+"/api/payments", strings.NewReader(`{"amount":100,"externalId":"existing-before-drain"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayReq.Header.Set("Authorization", "Bearer api-secret")
+	replayReq.Header.Set("Content-Type", "application/json")
+	replayReq.Header.Set("Idempotency-Key", "existing-drain-idem")
+	replayRes, err := server.Client().Do(replayReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayBody, _ := io.ReadAll(replayRes.Body)
+	_ = replayRes.Body.Close()
+	if replayRes.StatusCode != http.StatusOK || replayRes.Header.Get("X-Idempotent-Replayed") != "true" || !strings.Contains(string(replayBody), existingID) {
+		t.Fatalf("drain replay status=%d replay=%q body=%s", replayRes.StatusCode, replayRes.Header.Get("X-Idempotent-Replayed"), replayBody)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/payments", strings.NewReader(`{"amount":100,"externalId":"must-not-create"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer api-secret")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "drain-http-idem")
+	res, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	_ = res.Body.Close()
+	if res.StatusCode != http.StatusServiceUnavailable || res.Header.Get("Retry-After") != "60" || !strings.Contains(string(body), "PAYMENT_CREATION_DRAINED") {
+		t.Fatalf("drained create status=%d retry=%q body=%s", res.StatusCode, res.Header.Get("Retry-After"), body)
+	}
+	after, err := app.CountRecords("payments")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("drained create changed payment count: before=%d after=%d", before, after)
+	}
+
+	statusRes, err := server.Client().Get(server.URL + "/api/payments/" + existingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusBody, _ := io.ReadAll(statusRes.Body)
+	_ = statusRes.Body.Close()
+	if statusRes.StatusCode != http.StatusOK || !strings.Contains(string(statusBody), existingID) {
+		t.Fatalf("existing status=%d body=%s", statusRes.StatusCode, statusBody)
 	}
 }
 

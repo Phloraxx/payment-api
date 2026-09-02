@@ -461,11 +461,12 @@ Choose a quiet period.
 - parser parity complete;
 - direct SQLite backup/restore drill complete;
 - Android signed upgrade tested in place;
-- rollback image/config/data prepared.
+- rollback image/config/data prepared;
+- cutover credential bootstrap prepared: `PAYGATE_V4_ADMIN_PASSWORD` is explicit, while the existing v3 merchant key and outgoing webhook URL/secret may be imported once from `PAYGATE_API_KEY`, `OUTGOING_WEBHOOK_URL`, and `OUTGOING_WEBHOOK_SECRET` (or explicit `PAYGATE_V4_*` overrides) without logging their values.
 
 ### Drain v3 amount state
 
-Temporarily stop new payment creation while allowing existing pending/grace/quarantine reservations to settle.
+Temporarily stop new payment creation while allowing existing pending/grace/quarantine reservations to settle. On the final v3 build, set `PAYGATE_DRAIN_NEW_PAYMENTS=true`; `POST /api/payments` then returns retryable HTTP 503 while status reads, relay ingestion, matching, webhooks, and dashboard/backup operations remain available.
 
 Preferred:
 
@@ -479,11 +480,15 @@ active in-flight reservations = 0
 2. stop v3;
 3. run offline migrator -> new `paygate.db`;
 4. verify integrity, foreign keys, schema/report;
-5. start one v4 process;
-6. verify PRAGMA configuration/profile/device/webhook settings;
+5. start one v4 process with the explicit v4 admin bootstrap password and one-time merchant/webhook compatibility bootstrap;
+6. verify PRAGMA configuration/profile/device/webhook settings and confirm the preserved merchant key authenticates without exposing it;
 7. heartbeat/relay smoke test;
 8. controlled low-value end-to-end payment;
 9. re-enable normal creation.
+
+After first successful v4 startup, persisted v4 API-key/webhook records are authoritative. Legacy environment values must not overwrite later v4 operator changes.
+
+During the short server-switch -> Android-upgrade window, v4 intentionally answers legacy `/api/relay/v1/*` requests with HTTP 503 plus `Retry-After`. This keeps v0.4 notification rows in `retry` rather than `failed`; the unchanged `EventStore` then lets v0.5 replay the stored raw notification through the signed v4 endpoint after its in-place upgrade. Remove this transition shim only after v0.4 is no longer deployed.
 
 Keep final v3 DB/image untouched for rollback window.
 

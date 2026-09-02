@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Phloraxx/payment-api/internal/v4/auth"
 	"github.com/Phloraxx/payment-api/internal/v4/payments"
 	"github.com/Phloraxx/payment-api/internal/v4/profiles"
 )
@@ -280,5 +282,76 @@ func TestRuntimeServesV4DashboardWithoutShadowingAdminAPI(t *testing.T) {
 	}
 	if strings.Contains(res.Header().Get("Content-Type"), "text/html") {
 		t.Fatalf("admin route returned SPA content type: %s", res.Header().Get("Content-Type"))
+	}
+}
+
+func TestRuntimeCutoverBootstrapPreservesLegacyMerchantAndWebhook(t *testing.T) {
+	dir := t.TempDir()
+	legacyKey := "legacy-v3-merchant-key-0123456789abcdef0123456789"
+	legacyWebhookSecret := "legacy-webhook-secret-0123456789abcdef"
+	cfg := Config{
+		DataDir: dir, BootstrapAdminPassword: testAdminPassword,
+		BootstrapMerchantAPIKey:  legacyKey,
+		BootstrapWebhookEndpoint: "https://merchant.example/paygate",
+		BootstrapWebhookSecret:   legacyWebhookSecret,
+		BackupHourUTC:            3, BackupRetention: 30,
+	}
+	app, err := New(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, err := app.Auth.AuthenticateAPIKey(context.Background(), legacyKey); err != nil || id != "key_legacy_v3" {
+		t.Fatalf("legacy merchant key id=%q err=%v", id, err)
+	}
+	webhook, err := app.Settings.Webhook(context.Background())
+	if err != nil || !webhook.Enabled || webhook.Endpoint != cfg.BootstrapWebhookEndpoint {
+		t.Fatalf("webhook=%+v err=%v", webhook, err)
+	}
+	var plaintext int
+	if err := app.DB.SQL.QueryRow(`SELECT COUNT(*) FROM api_keys WHERE CAST(secret_hash AS TEXT)=?`, legacyKey).Scan(&plaintext); err != nil {
+		t.Fatal(err)
+	}
+	if plaintext != 0 {
+		t.Fatal("legacy merchant API key stored in plaintext")
+	}
+	if err := app.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := New(context.Background(), Config{
+		DataDir:                  dir,
+		BootstrapMerchantAPIKey:  "replacement-v3-merchant-key-0123456789abcdef0123456789",
+		BootstrapWebhookEndpoint: "https://replacement.example/paygate",
+		BootstrapWebhookSecret:   "replacement-webhook-secret-0123456789abcdef",
+		BackupHourUTC:            3, BackupRetention: 30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if _, err := second.Auth.AuthenticateAPIKey(context.Background(), legacyKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.Auth.AuthenticateAPIKey(context.Background(), "replacement-v3-merchant-key-0123456789abcdef0123456789"); !errors.Is(err, auth.ErrInvalidAPIKey) {
+		t.Fatalf("replacement key unexpectedly accepted: %v", err)
+	}
+	webhook, err = second.Settings.Webhook(context.Background())
+	if err != nil || webhook.Endpoint != cfg.BootstrapWebhookEndpoint {
+		t.Fatalf("persisted webhook overwritten: %+v err=%v", webhook, err)
+	}
+}
+
+func TestLegacyRelayPathsRemainRetryableDuringV4Cutover(t *testing.T) {
+	app := newTestApp(t, nil)
+	for _, path := range []string{"/api/relay/v1/events", "/api/relay/v1/heartbeat", "/api/relay/v1/enroll"} {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"legacy":"body"}`))
+		res := httptest.NewRecorder()
+		app.Handler().ServeHTTP(res, req)
+		if res.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s status=%d body=%s", path, res.Code, res.Body.String())
+		}
+		if res.Header().Get("Retry-After") == "" || !strings.Contains(res.Body.String(), "relay_upgrade_required") {
+			t.Fatalf("%s headers=%v body=%s", path, res.Header(), res.Body.String())
+		}
 	}
 }
