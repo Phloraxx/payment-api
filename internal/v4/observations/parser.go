@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	PaytmBusinessPackage  = "com.paytm.business"
-	GoogleMessagesPackage = "com.google.android.apps.messaging"
+	PaytmBusinessPackage          = "com.paytm.business"
+	GoogleMessagesPackage         = "com.google.android.apps.messaging"
+	paytmPostTimeRefinementWindow = time.Minute
 )
 
 var (
@@ -82,6 +83,10 @@ func parsePaytm(text string, postedAt time.Time) (Observation, error) {
 	}
 	payerName, payerUPI := extractPayer(text)
 	occurredAt, source := parsePaytmOccurredAt(text)
+	if !occurredAt.IsZero() && canRefinePaytmMinuteWithPostedAt(occurredAt, postedAt) {
+		occurredAt = postedAt.UTC()
+		source = "notification_posted_at"
+	}
 	if occurredAt.IsZero() {
 		occurredAt = postedAt.UTC()
 		source = "notification_posted_at"
@@ -153,6 +158,19 @@ func cleanPayer(value, upiID string) string {
 	}
 	return value
 }
+
+// Paytm renders the payment occurrence only to minute precision. Android's
+// notification post time carries milliseconds, so use it when it is credibly
+// close to that minute; callers mark this evidence as low-confidence.
+func canRefinePaytmMinuteWithPostedAt(minuteStart, postedAt time.Time) bool {
+	if minuteStart.IsZero() || postedAt.IsZero() {
+		return false
+	}
+	posted := postedAt.UTC()
+	start := minuteStart.UTC()
+	return !posted.Before(start) && posted.Before(start.Add(paytmPostTimeRefinementWindow))
+}
+
 func parsePaytmOccurredAt(text string) (time.Time, string) {
 	match := paytmOccurredPattern.FindStringSubmatch(text)
 	if len(match) < 2 {

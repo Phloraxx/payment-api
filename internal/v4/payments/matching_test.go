@@ -228,6 +228,30 @@ func TestKotakLowConfidenceLatestReuseFailsAmbiguous(t *testing.T) {
 		t.Fatalf("new payment status=%q err=%v", status, err)
 	}
 }
+func TestPaytmPostedTimeLatestReuseFailsAmbiguous(t *testing.T) {
+	ctx := context.Background()
+	db := openAllocatorDB(t)
+	base := time.UnixMilli(1_788_200_000_000).UTC()
+	released := base.Add(15 * time.Minute)
+	insertHistoricalReservation(t, db, "old_paytm", "paytm", base, &released, "expired")
+	insertHistoricalReservation(t, db, "new_paytm", "paytm", base.Add(20*time.Minute), nil, "pending")
+	occurred := base.Add(22 * time.Minute)
+	received := occurred.Add(time.Second)
+	insertRelayEvent(t, db, "relay_paytm_reuse", "source_paytm_reuse", observations.PaytmBusinessPackage, occurred, received)
+	s := newTestService(t, db, received)
+	result, err := s.ApplyObservation(ctx, "relay_paytm_reuse", paytmObservation(10037, occurred, "notification_posted_at"), received)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Result != "ambiguous" || result.PaymentID != "" || result.Transitioned {
+		t.Fatalf("reuse result = %+v", result)
+	}
+	var status string
+	if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id='new_paytm'`).Scan(&status); err != nil || status != "pending" {
+		t.Fatalf("new payment status=%q err=%v", status, err)
+	}
+}
+
 func TestTrustedHistoricalTimeCanMatchOldReservationAfterReuse(t *testing.T) {
 	ctx := context.Background()
 	db := openAllocatorDB(t)

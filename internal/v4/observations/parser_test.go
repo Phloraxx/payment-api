@@ -47,6 +47,41 @@ func TestPaytmRejectsNonPayGateAndNonPaymentNotifications(t *testing.T) {
 	}
 }
 
+func TestPaytmKeepsMinuteTextWhenPostTimeIsTooFarAway(t *testing.T) {
+	loc := time.FixedZone("IST", 5*60*60+30*60)
+	posted := time.Date(2026, 9, 3, 0, 28, 5, 0, loc)
+	got, err := Parse(Snapshot{
+		PackageName: PaytmBusinessPackage,
+		PostedAt:    posted,
+		Title:       "Payment Received on Paytm",
+		BigText:     "₹2.24 Received from Test User\nReceived on 3 Sep 2026 12:27 AM",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := time.Date(2026, 9, 3, 0, 27, 0, 0, loc).UTC()
+	if !got.OccurredAt.Equal(want) || got.OccurredAtSource != "notification_text" {
+		t.Fatalf("occurred = %s source=%s", got.OccurredAt, got.OccurredAtSource)
+	}
+}
+
+func TestPaytmMinuteTimestampUsesHigherResolutionPostTime(t *testing.T) {
+	loc := time.FixedZone("IST", 5*60*60+30*60)
+	posted := time.Date(2026, 9, 3, 0, 27, 55, 267_000_000, loc)
+	got, err := Parse(Snapshot{
+		PackageName: PaytmBusinessPackage,
+		PostedAt:    posted,
+		Title:       "Payment Received on Paytm",
+		BigText:     "₹2.24 Received from Test User\nReceived on 3 Sep 2026 12:27 AM",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AmountPaise != 224 || !got.OccurredAt.Equal(posted.UTC()) || got.OccurredAtSource != "notification_posted_at" {
+		t.Fatalf("observation = %+v", got)
+	}
+}
+
 func TestPaytmFallsBackToNotificationPostTime(t *testing.T) {
 	posted := time.UnixMilli(1_788_200_000_000).UTC()
 	got, err := Parse(Snapshot{PackageName: PaytmBusinessPackage, PostedAt: posted, Text: "₹100.37 Received from Rahul"})
