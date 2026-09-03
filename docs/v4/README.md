@@ -1,6 +1,6 @@
 # PayGate v4 — Unified Payment Gateway Redesign
 
-Status: architecture/research/implementation plan only. This branch must not change production behavior.
+Status: implemented. PayGate v4 is the current runtime architecture; these documents remain the design and operations source of truth.
 
 ## Product definition
 
@@ -42,7 +42,7 @@ A create request contains context such as:
 11. The allocator combines 5m active + 5m grace + 5m hard quarantine with **soft recent-use avoidance** after release. Recent values are avoided when alternatives exist but remain available under pressure.
 12. Exact profile+payable active ownership is database-enforced in SQLite.
 13. Admin UX is rebuilt around **Overview / Payments / Activity / Settings** rather than Review/Evidence/Reconciliation products.
-14. Web and Android use a Razorpay-inspired dark navy + blue design language.
+14. Web and Android share the PayGate charcoal + emerald/teal financial design language and common gateway mark.
 15. Authentication is password-only for the singleton operator; merchant API keys, webhook secrets and Android device keys remain separate credentials.
 16. Persistence is **direct SQLite only** through Go/`database/sql` + `modernc.org/sqlite`. PocketBase is removed from the target runtime.
 17. Production keeps one PayGate process, one local SQLite database, WAL, `synchronous=FULL`, foreign keys, bounded busy timeout, database constraints and SQLite Online Backup API.
@@ -74,9 +74,7 @@ A create request contains context such as:
 - no server-rendered QR images;
 - no merchant-controlled collection-profile selection.
 
-## Safety rule for implementation
+## Cutover status
 
-V4 is built beside v3 and cut over only after deterministic migration, parser parity, SQLite backup/restore testing, Android in-place upgrade testing and end-to-end payment acceptance.
-
-The final design should be simpler than v3, but migration must not sacrifice payment correctness or rollbackability.
+V4 was built beside v3 and cut over only after deterministic migration, SQLite integrity/backup testing, Android in-place upgrade validation, provider-blind API validation, relay compatibility checks and rollback preparation. The preserved v3 artifacts remain recovery material; new development targets v4.
 - [11 — Implementation checkpoint (2026-09-01)](./11_IMPLEMENTATION_CHECKPOINT_2026-09-01.md)

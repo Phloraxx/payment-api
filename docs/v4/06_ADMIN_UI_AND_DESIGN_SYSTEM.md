@@ -30,38 +30,37 @@ No primary products named Review, Reconciliation, Evidence, SMS Events or Connec
 
 ## Visual direction
 
-Razorpay-inspired **dark navy + blue** financial UI:
+PayGate uses an original **charcoal + emerald/teal** financial interface:
 
-- deep navy rather than pure black;
-- clear electric-blue actions;
-- high-contrast white monetary typography;
-- blue-gray metadata;
+- near-black charcoal backgrounds rather than flat black;
+- emerald primary actions and healthy-state emphasis;
+- teal/cyan secondary accents for charts and routing information;
+- high-contrast monetary typography;
+- muted green-gray metadata;
 - dense desktop financial tables;
-- responsive mobile cards;
-- restrained gradients/status colors.
+- responsive mobile cards and a four-item bottom navigation;
+- restrained gradients, borders and status colors.
 
-Do not copy Razorpay logos, wording or exact screens.
-
-Reference inspiration: https://razorpay.com/docs/payments/dashboard/account-settings/checkout-styling/
+The approved PayGate gateway mark, web dashboard concept and mobile concept are the visual source of truth. External fintech dashboards are reference material for information hierarchy only; do not copy logos, wording or exact screens.
 
 ## Color tokens
 
 ```text
---pg-bg:             #07111F
---pg-bg-subtle:      #091525
---pg-surface:        #0D1A2C
---pg-surface-2:      #12233B
---pg-border:         #213958
---pg-border-soft:    #182C47
---pg-primary:        #2F80FF
---pg-primary-hover:  #4A91FF
---pg-primary-soft:   #15345D
---pg-text:           #F7FAFF
---pg-text-secondary: #B1C0D5
---pg-text-muted:     #8096B5
---pg-success:        #2DCB8A
---pg-warning:        #F5B84B
---pg-danger:         #F0616A
+--pg-bg:             #050B0F
+--pg-bg-deep:        #03080B
+--pg-surface:        #0C171C
+--pg-surface-2:      #102027
+--pg-border:         rgba(167, 211, 206, .11)
+--pg-primary:        #31E78F
+--pg-primary-bright: #58FF72
+--pg-secondary:      #10D7A7
+--pg-accent:         #0AB6C8
+--pg-text:           #EDF6F5
+--pg-text-secondary: #C5D4D3
+--pg-text-muted:     #8CA09F
+--pg-success:        #31E78F
+--pg-warning:        #F6C85F
+--pg-danger:         #FF6F7D
 ```
 
 ## Typography
