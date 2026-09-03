@@ -171,6 +171,43 @@ func TestSignedPaytmEventMatchesPaymentAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestPaytmMinuteTimestampDoesNotPreDateMidMinutePayment(t *testing.T) {
+	ctx := context.Background()
+	db := openRelayDB(t)
+	createdAt := time.Date(2026, 9, 2, 18, 57, 38, 732_000_000, time.UTC)
+	insertProfile(t, db, "paytm", "paytm_notification", "merchant@paytm", true, createdAt)
+	paymentService, created := createPayment(t, db, createdAt, "paytm-minute-regression")
+	postedAt := time.Date(2026, 9, 2, 18, 57, 55, 267_000_000, time.UTC)
+	receivedAt := time.Date(2026, 9, 2, 18, 57, 56, 88_000_000, time.UTC)
+	paymentService.Now = func() time.Time { return receivedAt }
+	priv, deviceID := enrollTestDevice(t, db, createdAt.Add(-time.Minute))
+	service := NewService(db, paymentService)
+	service.Now = func() time.Time { return receivedAt }
+
+	body := marshalEvent(t, EventInput{
+		SchemaVersion: 1, EventID: strings.Repeat("e", 64),
+		PackageName: observations.PaytmBusinessPackage, PostedAtMS: postedAt.UnixMilli(),
+		Title:           "Payment Received on Paytm",
+		BigText:         "₹100.37 Received from Test User\nReceived on 3 Sep 2026 12:27 AM",
+		AmountHintPaise: 10037,
+	})
+	result, err := service.IngestSigned(ctx, signedAuth(t, priv, deviceID, receivedAt, body), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "matched" || result.PaymentID != created.Payment.ID || !result.Transitioned {
+		t.Fatalf("ingest result = %+v", result)
+	}
+	var occurredAt int64
+	var occurredSource string
+	if err := db.SQL.QueryRow(`SELECT occurred_at,occurred_at_source FROM payment_observations WHERE matched_payment_id=?`, created.Payment.ID).Scan(&occurredAt, &occurredSource); err != nil {
+		t.Fatal(err)
+	}
+	if occurredAt != postedAt.UnixMilli() || occurredSource != "notification_posted_at" {
+		t.Fatalf("occurred_at=%d source=%s", occurredAt, occurredSource)
+	}
+}
+
 func TestIndependentNotificationCorroboratesAndReplaysWithoutSecondTransition(t *testing.T) {
 	ctx := context.Background()
 	db := openRelayDB(t)

@@ -263,7 +263,7 @@ func hasConfirmedObservation(ctx context.Context, tx *storage.ImmediateTx, payme
 }
 
 func reusedLowConfidenceLatest(ctx context.Context, tx *storage.ImmediateTx, obs observations.Observation, candidate matchCandidate) (bool, error) {
-	lowConfidence := obs.OccurredAtSource == "server_received_at" || (obs.Source == "kotak_sms" && obs.OccurredAtSource == "notification_posted_at")
+	lowConfidence := obs.OccurredAtSource == "server_received_at" || obs.OccurredAtSource == "notification_posted_at"
 	if !lowConfidence {
 		return false, nil
 	}
