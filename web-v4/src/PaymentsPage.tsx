@@ -39,9 +39,9 @@ export function PaymentsPage({ initialPaymentId, onInitialConsumed }: { initialP
   return <>
     <SectionHead eyebrow="Transactions" title="Payments" copy="Search every payment and correct business or payer information without touching immutable financial snapshots." action={<button className="button button-secondary button-small" onClick={() => void load()}>Refresh</button>} />
     <section className="filter-bar">
-      <form onSubmit={(e) => { e.preventDefault(); setOffset(0); setQuery(q.trim()); }} className="search-box"><span>⌕</span><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, payment ID, event ID, payer…"/><button className="text-button" type="submit">Search</button></form>
-      <select value={status} onChange={(e) => { setStatus(e.target.value); setOffset(0); }}>{statuses.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}</select>
-      <select value={profile} onChange={(e) => { setProfile(e.target.value); setOffset(0); }}><option value="">All profiles</option>{profiles.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}</select>
+      <form onSubmit={(e) => { e.preventDefault(); setOffset(0); setQuery(q.trim()); }} className="search-box"><span aria-hidden="true">⌕</span><input aria-label="Search payments" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search name, payment ID, event ID, payer…"/><button className="text-button" type="submit">Search</button></form>
+      <select aria-label="Filter payments by status" value={status} onChange={(e) => { setStatus(e.target.value); setOffset(0); }}>{statuses.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}</select>
+      <select aria-label="Filter payments by collection profile" value={profile} onChange={(e) => { setProfile(e.target.value); setOffset(0); }}><option value="">All profiles</option>{profiles.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}</select>
     </section>
     {error && <ErrorNotice message={error} />}
     <section className="panel table-panel">
