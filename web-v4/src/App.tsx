@@ -39,7 +39,7 @@ export function App() {
   return <div className="app-shell">
     <aside className="sidebar">
       <Brand subtitle="Control plane" />
-      <nav aria-label="PayGate navigation">{tabs.map((item) => <button key={item.id} className={cx(tab === item.id && "active")} onClick={() => setTab(item.id)}>
+      <nav aria-label="PayGate navigation">{tabs.map((item) => <button key={item.id} aria-current={tab === item.id ? "page" : undefined} className={cx(tab === item.id && "active")} onClick={() => setTab(item.id)}>
         <NavIcon tab={item.id}/><span>{item.label}</span>
       </button>)}</nav>
       <div className="sidebar-foot">
@@ -63,7 +63,7 @@ export function App() {
         {tab === "settings" && <SettingsPage onSignedOut={() => setSession("out")} />}
       </div>
     </main>
-    <nav className="bottom-nav" aria-label="PayGate mobile navigation">{tabs.map((item) => <button key={item.id} className={cx(tab === item.id && "active")} onClick={() => setTab(item.id)}>
+    <nav className="bottom-nav" aria-label="PayGate mobile navigation">{tabs.map((item) => <button key={item.id} aria-current={tab === item.id ? "page" : undefined} className={cx(tab === item.id && "active")} onClick={() => setTab(item.id)}>
       <NavIcon tab={item.id}/><small>{item.label}</small>
     </button>)}</nav>
   </div>;
