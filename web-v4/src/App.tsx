@@ -12,7 +12,7 @@ type Tab = "overview" | "payments" | "activity" | "settings";
 const tabs: Array<{ id: Tab; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "payments", label: "Payments" },
-  { id: "activity", label: "Operations" },
+  { id: "activity", label: "Activity" },
   { id: "settings", label: "Settings" },
 ];
 

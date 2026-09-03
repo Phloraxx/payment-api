@@ -99,7 +99,7 @@ Web and Android share the same PayGate charcoal + emerald/teal design system and
 
 - **Overview** — money, payment status, active collection profile, relay and webhook health;
 - **Payments** — search, filters, exact amounts, payer context, timeline and controlled corrections;
-- **Activity / Operations** — payment detections, matches, webhook outcomes and system events;
+- **Activity** — payment detections, matches, webhook outcomes and system events;
 - **Settings** — collection profiles, merchant API keys, webhook configuration, trusted phone and admin security.
 
 The web UI is embedded in the v4 server image. The Android app remains a separate repository/artifact so its signing identity and in-place upgrade path stay independent of server deployment.
