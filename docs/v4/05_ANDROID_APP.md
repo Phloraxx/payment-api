@@ -102,19 +102,21 @@ Advanced
 Dark-only initial product UI, shared with web.
 
 ```text
-background       #07111F
-surface          #0C1728
-surface_elevated #12213A
-border           #213653
-primary          #2F80FF
-text             #F7FAFF
-text_muted       #8FA4C1
-success          #2DCB8A
-warning          #F5B84B
-danger           #F0616A
+background       #050B0F
+surface          #0C171C
+surface_elevated #102027
+border           rgba(167, 211, 206, .11)
+primary          #31E78F
+secondary        #10D7A7
+accent           #0AB6C8
+text             #EDF6F5
+text_muted       #8CA09F
+success          #31E78F
+warning          #F6C85F
+danger           #FF6F7D
 ```
 
-Razorpay is inspiration for financial density/blue identity, not a component copy.
+Modern fintech dashboards are inspiration for hierarchy and financial density, not component copies. PayGate owns its charcoal + emerald/teal identity.
 
 Use large money typography, clear hierarchy and restrained surfaces instead of the current oversized lime warning style.
 

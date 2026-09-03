@@ -1,408 +1,171 @@
+<p align="center">
+  <img src="docs/brand/paygate-logo.svg" alt="PayGate" width="360" />
+</p>
+
+<p align="center">
+  <strong>Self-hosted UPI payment verification with a provider-blind API, signed Android relay, direct SQLite persistence, and durable webhooks.</strong>
+</p>
+
 # PayGate
 
-Self-hosted UPI payment verification for applications that receive money directly into a configured UPI/bank account.
+PayGate creates a payment instruction with a unique exact payable amount, watches supported incoming-payment notifications through one trusted Android phone, and marks the matching payment only when the server can do so unambiguously.
 
-PayGate creates a unique payable amount using a paise fingerprint, observes authenticated bank-credit SMS or email evidence, matches the **exact** amount and UPI reference, persists the payment lifecycle in PocketBase/SQLite, and exposes status through an HTTP API, realtime operator UI and optional signed outgoing webhooks.
+The payer sends money directly to the configured UPI account. PayGate does not custody, route, or settle funds; notification matching is an evidence mechanism rather than a bank/acquirer settlement guarantee.
 
-PayGate does **not** custody, route or settle funds. The payer pays the configured UPI account directly. Message-based verification is an evidence mechanism, not a bank/acquirer API and not a settlement guarantee.
+## Current architecture
 
-## Runtime
-
-The production deployment is intentionally one small service:
-
-```text
-Android phone
-        │
-        ├── Google Messages → libgm ───────────┐
-        ├── Paytm for Business notification ──┤ signed PayGate Relay
-        └── legacy SMS relay (migration only) ┤
-                                              ▼
-                         ┌──────────────────────────┐
-                         │       PayGate (Go)       │
-                         │                          │
-                         │ PocketBase 0.39.9        │
-                         │ SQLite + migrations      │
-                         │ payment/SMS services     │
-                         │ webhook outbox/worker    │
-                         │ optional libgm manager   │
-                         │ React/Vite operator UI   │
-                         └────────────┬─────────────┘
-                                      │
-                                  /app/pb_data
-                              persistent volume
+```mermaid
+flowchart LR
+    M[Merchant backend] -->|POST /v1/payments| P[PayGate]
+    P -->|canonical UPI URI| M
+    A[PayGate Android] -->|signed notification events| P
+    P --> D[(SQLite)]
+    P -->|signed durable webhooks| W[Merchant webhook]
+    O[Operator] -->|Web / Android admin UI| P
 ```
 
-There is no Redis, external queue, second database or custom realtime server. PocketBase provides SQLite, auth, SSE realtime, cron, logs, backups and its raw admin UI at `/_/`.
+PayGate v4 is deliberately small:
 
+- one Go server process;
+- one direct SQLite database using WAL, `synchronous=FULL`, foreign keys and bounded busy timeout;
+- one Android app that combines operator UI with the background notification relay;
+- one active collection profile for new payments;
+- a durable webhook outbox;
+- no PocketBase runtime, Redis, PostgreSQL, server-side Google Messages session, or external queue.
 ## Payment model
 
-A caller requests a **whole rupee** amount. PayGate reserves one of 99 paise fingerprints for that rupee value.
+A merchant asks for a whole-INR amount. PayGate resolves the active collection profile and reserves a randomized non-`.00` payable value.
 
-Example:
+For a ₹100 request, PayGate first selects among free `₹100.01 … ₹100.99` values. Only when that entire bucket is unavailable can it overflow into `₹101.01 … ₹101.99`. The maximum v4.0 adjustment is therefore ₹1.99.
+
+The default lifecycle is:
 
 ```text
-requested ₹100
-possible payable amounts: ₹100.01 ... ₹100.99
+5 minutes active → 5 minutes grace → 5 minutes hard quarantine
 ```
 
-`.00` is never allocated and allocation never spills into the next rupee. All money is integer paise internally.
+Released values also receive soft recent-use avoidance when alternatives exist.
 
-The reservation is transactional and persisted. A payment remains `pending` until it is paid, cancelled or expires. Resolved/expired amounts are quarantined before reuse so a delayed SMS cannot normally confirm a newer payment.
+Matching is server-owned and uses the inferred collection profile, exact payable amount, reservation/lifecycle state, trustworthy occurrence time, and unique signed relay-event identity. The Android client never declares a payment successful.
 
-An additional stale-evidence guard compares the SMS/provider occurrence timestamp with the payment's persisted `created_at`: an old Google Messages catch-up event that predates a reused payment cannot confirm that newer payment.
+## Supported collection signals
 
-A finite quarantine cannot make amount-only verification mathematically unique forever: someone who deliberately pays an old QR **after** its amount has eventually been reused creates a new bank transaction at the current time and is indistinguishable from a new payer if the bank evidence exposes only amount/RRN. PayGate therefore fails closed where it can, keeps a long configurable quarantine, and treats official bank/acquirer references as the long-term path when stronger correlation is required.
+v4.0 currently supports:
 
-Statuses:
+- **Paytm for Business** payment notifications;
+- **Kotak** credit notifications delivered by Google Messages on the PayGate phone.
 
-- `pending`
-- `paid`
-- `expired`
-- `cancelled`
-- `late` — an exact credit arrived after expiry/cancellation but while that amount was still quarantined
+The merchant does not select Paytm or Kotak. PayGate snapshots the active profile and destination when the payment is created, so later profile changes cannot alter an existing payment.
 
-## API
+## Merchant API
 
-### Create a payment
+Create a payment:
 
 ```http
-POST /api/payments
-Authorization: Bearer <PAYGATE_API_KEY>
-Idempotency-Key: <unique key>
+POST /v1/payments
+Authorization: Bearer <merchant-api-key>
+Idempotency-Key: <unique-key>
 Content-Type: application/json
-
-{
-  "amount": 100,
-  "paymentAccount": "slice",
-  "externalId": "order-123",
-  "metadata": {"cart": "abc"}
-}
 ```
-
-`amount` may also be an integer string such as `"100"`. Fractional requested amounts are rejected. `paymentAccount` is `kotak`, `slice`, or `paytm`; omitted requests retain the configured default. Use `GET /api/payment-accounts` to discover configured choices plus their current `ready` state without exposing a UPI ID. Slice fails closed unless signed email evidence is enabled. Paytm exact-amount QR checkout fails closed unless a recently active signed Android relay is available.
-
-Example response:
 
 ```json
 {
-  "id": "...",
-  "paymentAccount": "slice",
-  "paymentAccountLabel": "Slice",
-  "verificationMethod": "email",
-  "requestedAmount": 100,
-  "requestedAmountPaise": 10000,
-  "payableAmount": "100.37",
-  "payableAmountPaise": 10037,
-  "status": "pending",
-  "expiresAt": "...",
-  "paidAt": null,
-  "externalId": "order-123",
-  "upiUri": "upi://pay?..."
+  "amount": 100,
+  "name": "Asha Nair",
+  "external_id": "event_2026",
+  "metadata": { "registration_id": "reg_284" }
 }
 ```
+The response is provider-blind and contains PayGate's payment ID, status, requested amount, exact payable amount, adjustment, lifecycle timestamps and the canonical `upi://` URI. Money is stored internally as integer paise.
 
-The same `Idempotency-Key` and identical parameters return the original payment. Reusing a key with different parameters returns `IDEMPOTENCY_CONFLICT`.
-
-### Read public payment status
-
-```http
-GET /api/payments/{id}
-```
-
-This deliberately returns the limited public payment view. Bank evidence such as RRN, payer UPI ID and payer name is not exposed here.
-
-### Cancel
-
-```http
-POST /api/payments/{id}/cancel
-Authorization: Bearer <PAYGATE_API_KEY>
-```
-
-### Primary SMS ingestion
-
-```http
-POST /api/events/sms
-X-Webhook-Secret: <SMS_WEBHOOK_SECRET>
-Content-Type: application/json
-
-{
-  "sms": "Received Rs.100.37 ... UPI Ref:123456789012",
-  "source": "android_webhook",
-  "sourceId": "provider-message-id",
-  "sender": "bank-sender",
-  "timestamp": "2026-07-25T12:34:56Z"
-}
-```
-
-`source` must be `android_webhook`, `gmessages` or `manual`. Supplying `sourceId` and the original `timestamp` is strongly recommended for durable deduplication and stale-message protection.
-
-### PayGate Relay Android
-
-`POST /api/relay/v1/events` accepts allowlisted notification evidence signed by a P-256 key generated in Android Keystore. `POST /api/relay/v1/heartbeat` reports notification-access/listener state and queue health with the same device signature. The server stores only the public key and can disable a device immediately from the operator console.
-
-For Paytm `qr_only`, payment creation is fail-closed: an enabled relay device must have recent validated activity. Old active notifications that predate device enrollment are persisted as ignored evidence and cannot settle a payment. Raw relay/Paytm notification text is redacted after the configured retention period while matching metadata remains. See `ANDROID_RELAY.md`.
-
-### Legacy Android relay
-
-`POST /api/webhook` accepts the old `{ "sms": "..." }` payload only when `LEGACY_SMS_WEBHOOK_ENABLED=true`. It authenticates with the separate legacy `WEBHOOK_SECRET` and always records the source as `android_webhook`.
-
-This compatibility route exists for migration only. The production default is disabled. Rotate the old relay to `SMS_WEBHOOK_SECRET` and `/api/events/sms`, then disable the legacy route.
-
-### Payment email ingestion
-
-`POST /api/events/email` is disabled unless `PAYMENT_EMAIL_ENABLED=true`. The included [Cloudflare Email Routing connector](connectors/cloudflare-email-worker/README.md) sends the original RFC 822 message with an HMAC-SHA256 signature over `<unixTimestamp>.<raw JSON body>`.
-
-Slice payments are email-verified; Kotak payments are SMS-verified. Evidence is account-scoped, so a Slice email can never settle a Kotak payment and a Kotak SMS or statement can never settle a Slice payment. PayGate accepts an email as automatic payment evidence only when all of these checks pass:
-
-- request timestamp is within the configured anti-replay window and the HMAC is valid;
-- Message-ID is present and stable for deduplication;
-- the decoded `From` address exactly equals `PAYMENT_EMAIL_ALLOWED_SENDER`;
-- the trusted receiver's `Authentication-Results` reports aligned DKIM or DMARC pass;
-- subject/body match the narrow bank UPI-credit parser and contain an exact amount and RRN;
-- the normal evidence-time, amount, quarantine and global RRN constraints pass.
-
-Failures are persisted and routed to manual review; they do not silently confirm a payment. The real Slice layout is covered by a redacted `.eml` fixture. Production enablement still requires an end-to-end forwarded message proving that the receiving Cloudflare route preserves an aligned DKIM or DMARC pass.
-
-### Operational APIs
-
-Dashboard-authenticated operations:
-
-- `GET /api/capacity` — active/quarantined suffix-pool utilization;
-- `POST /api/review-cases/{id}/resolve` — audited review resolution/manual match;
-- `POST /api/reconciliation/import` — multipart CSV/TSV/XLSX statement import;
-- `GET /api/paygate/backups/status` — redacted archive status;
-- `POST /api/paygate/backups` — create a backup now;
-- `POST /api/paygate/backups/verify` — verify the latest archive;
-- `POST /api/paygate/backups/restore-drill` — temporary extraction plus SQLite integrity checks.
-
-API-key or dashboard-authenticated refund operations:
-
-- `POST /api/refunds` with an `Idempotency-Key`;
-- `POST /api/refunds/{id}/status`.
-
-Refund endpoints record operator/bank evidence only; they never initiate a bank transfer.
-
-### Health
-
-- `GET /api/health` — PocketBase liveness endpoint, used by the container healthcheck.
-- `GET /api/paygate/health` — PayGate database readiness plus redacted connector/relay readiness; phone/relay degradation does not crash or restart the API process.
-
-Unknown `/api/*` paths remain JSON 404 responses; the React SPA fallback never converts API errors into HTML 200 responses.
-
-## Matching and idempotency
-
-Bank message processing follows these rules:
-
-1. persist the SMS or email evidence event;
-2. parse exact amount, RRN and optional payer information;
-3. reject automatic matching if amount or RRN is missing;
-4. treat an already-seen RRN with the same amount as an idempotent duplicate;
-5. treat the same RRN with a different amount as `RRN_AMOUNT_MISMATCH`;
-6. use the bank/provider occurrence timestamp to decide whether the transaction was on time, so delayed SMS delivery alone does not turn an on-time payment into `late`;
-7. match only the exact payable paise amount and eligible evidence window;
-8. if no on-time payment matches, check an expired/cancelled payment still in quarantine and mark a genuinely late transaction `late`;
-9. persist a review case instead of silently assigning incomplete, unmatched, contradictory or ambiguous evidence.
-
-Google Messages catch-up messages retain their provider message timestamp. Legacy relays that omit a timestamp are treated as arriving at ingestion time, so upgrading the legacy relay to send timestamps is recommended.
-
-## Outgoing webhooks
-
-Configure `OUTGOING_WEBHOOK_URL` and `OUTGOING_WEBHOOK_SECRET` to receive payment lifecycle events.
-
-Events currently include:
-
-- `payment.paid`
-- `payment.late`
-- `payment.expired`
-- `payment.cancelled`
-- `refund.requested`
-- `refund.processing`
-- `refund.completed`
-- `refund.failed`
-- `refund.cancelled`
-
-Delivery records are written transactionally to `webhook_deliveries`; network I/O happens only after the transaction commits. The worker uses durable retries and recovers stale `sending` leases after process restarts.
-
-Headers:
+Useful routes:
 
 ```text
-X-PayGate-Event-Id: <stable event id>
-X-PayGate-Timestamp: <unix seconds>
-X-PayGate-Signature: v1=<hex HMAC-SHA256>
+POST   /v1/payments
+GET    /v1/payments/{id}
+POST   /v1/payments/{id}/cancel
+POST   /admin/session
+GET    /admin/overview
+GET    /admin/payments
+GET    /admin/activity
+GET    /admin/settings
 ```
 
-Signature input:
+See [Public API and webhooks](docs/v4/04_PUBLIC_API_AND_WEBHOOKS.md) for field semantics, idempotency and signing rules.
+
+## Operator experience
+
+Web and Android share the same PayGate charcoal + emerald/teal design system and the same four primary areas:
+
+- **Overview** — money, payment status, active collection profile, relay and webhook health;
+- **Payments** — search, filters, exact amounts, payer context, timeline and controlled corrections;
+- **Activity** — payment detections, matches, webhook outcomes and system events;
+- **Settings** — collection profiles, merchant API keys, webhook configuration, trusted phone and admin security.
+
+The web UI is embedded in the v4 server image. The Android app remains a separate repository/artifact so its signing identity and in-place upgrade path stay independent of server deployment.
+
+## Android trust boundary
+
+The PayGate phone uses `NotificationListenerService`, a durable local queue and a P-256 ECDSA key stored in Android Keystore.
+
+Android performs only cheap source allowlisting and notification capture. The server owns source-specific parsing, incoming-credit semantics, profile inference, matching, deduplication and payment mutation.
+
+The foreground relay is intentionally independent of operator login and is designed to survive screen lock, Doze, process recreation, temporary network loss and normal Battery Saver when the app is exempt from battery optimization.
+## Persistence and recovery
+
+Production keeps exactly one PayGate process owning the live SQLite database. Writes use explicit transactions and the allocator/matcher fail closed when ownership is ambiguous.
+
+The v4 container expects persistent storage at:
 
 ```text
-<timestamp>.<raw request body>
+/app/data
+/app/backups
 ```
 
-Consumers should verify the HMAC with `OUTGOING_WEBHOOK_SECRET` and deduplicate by event ID.
+Use SQLite's online backup path rather than copying a live database file. Keep rollback images, the previous data volume and the final verified migration archive until the new version has passed acceptance.
 
-## Operator UI
-
-The React UI at `/` provides:
-
-- dashboard and payment statistics;
-- payment creation;
-- realtime payment list/details;
-- cancellation;
-- SMS and email evidence records;
-- persistent evidence review and audited manual matching;
-- CSV/TSV/XLSX bank-statement reconciliation;
-- fingerprint-pool capacity monitoring;
-- operational alerts and signed notification delivery state;
-- manual refund lifecycle records;
-- backup creation, verification and temporary restore drills;
-- outgoing webhook delivery records;
-- Google Messages connector status, Google-account/emoji pairing and QR fallback controls;
-- safe non-secret configuration status.
-
-Operator accounts use the PocketBase `users` auth collection. Domain collections are read-only through PocketBase APIs for authenticated `users`; state-changing payment operations go through custom Go handlers. Direct domain writes are locked.
-
-PocketBase's own `/_/` interface remains available to superusers for low-level administration, logs, backups and schema inspection.
-
-## Google Messages connector
-
-The optional connector uses `go.mau.fi/mautrix-gmessages/pkg/libgm`.
-
-Set:
-
-```text
-GMESSAGES_ENABLED=true
-```
-
-The connector:
-
-- restores a persisted session from `pb_data/gmessages/session.json`;
-- stores the session with restrictive filesystem permissions;
-- connects using libgm's event-driven relay/long-poll implementation;
-- forwards only incoming messages that resemble supported bank-credit SMS text;
-- records the Google message ID and original timestamp;
-- reconnects/backoffs on connection failures;
-- reports paired/connected/phone-responsive state;
-- supports the current Google-account + emoji (Gaia) pairing flow;
-- accepts the upstream-required browser cookie set as cookie JSON, a raw Cookie header, or a DevTools Copy-as-cURL request;
-- keeps QR pairing as a fallback and automatically refreshes short-lived QR data.
-
-Google-account pairing is the primary path. Browser cookie input is never logged or echoed; it remains transient until pairing succeeds, after which libgm's AuthData (including the cookies required for account reauthentication) is stored in `pb_data/gmessages/session.json` with restrictive permissions.
-
-Starting a new pairing is refused while another pairing is active or a valid session is already paired; explicitly cancel/unpair first.
-
-The production connector has completed real-phone Google-account/emoji pairing, persisted its session across restarts and remained connected through the expected Tachyon authentication refresh boundary. This is strong acceptance evidence, but the private Google Messages protocol can still change; operational alerts and a reconciliation safety net remain necessary.
-
-## Configuration
-
-Copy `.env.example` and provide secrets through your deployment system rather than committing them.
-
-Required in normal serve mode:
-
-```text
-KOTAK_UPI_ID=
-SLICE_UPI_ID=             # required when PAYMENT_EMAIL_ENABLED=true
-PAYMENT_DEFAULT_ACCOUNT=kotak
-PAYGATE_API_KEY=           # minimum 24 characters
-SMS_WEBHOOK_SECRET=        # minimum 24 characters
-```
-
-Common optional values:
-
-```text
-KOTAK_UPI_PAYEE_NAME=PayGate
-SLICE_UPI_PAYEE_NAME=PayGate
-PAYMENT_TTL=5m
-PAYMENT_QUARANTINE=24h
-PAYGATE_RATE_LIMITS_ENABLED=true
-GMESSAGES_ENABLED=false
-GMESSAGES_SESSION_PATH=
-PAYMENT_EMAIL_ENABLED=false
-PAYMENT_EMAIL_WEBHOOK_SECRET= # minimum 24 characters when enabled
-PAYMENT_EMAIL_ALLOWED_SENDER=noreply@slice.bank.in
-PAYMENT_EMAIL_AUTH_SERV_ID=mx.cloudflare.net
-PAYMENT_EMAIL_SIGNATURE_TOLERANCE=5m
-OUTGOING_WEBHOOK_URL=
-OUTGOING_WEBHOOK_SECRET=
-OPERATOR_ALERT_WEBHOOK_URL=
-OPERATOR_ALERT_WEBHOOK_SECRET=
-STATEMENT_TIMEZONE=Asia/Kolkata
-PAYGATE_RETENTION_ENABLED=true
-SMS_RAW_RETENTION=2160h
-EMAIL_RAW_RETENTION=2160h
-RECONCILIATION_RAW_RETENTION=8760h
-AUDIT_RETENTION=17520h
-PAYGATE_BACKUP_CRON="0 3 * * *"
-PAYGATE_BACKUP_MAX_KEEP=14
-PB_DATA_DIR=./pb_data
-```
-
-Legacy prototype variables `UPI_NAME`, `TICKET_TTL_MINUTES`, `AMOUNT_QUARANTINE_HOURS` and `PAYMENT_WEBHOOK_*` remain understood where documented in `.env.example`. Invalid booleans/durations fail startup instead of silently falling back.
-
-`PAYGATE_TEST_MODE=true` is for controlled tests only. It skips required production credentials, but duration, URL, timezone and feature-specific secret validation still applies.
-
-## Docker
-
-```bash
-cp .env.example .env
-# edit .env
-docker compose up -d --build
-```
-
-The only state that must survive container replacement is mounted at:
-
-```text
-/app/pb_data
-```
-
-Do not deploy this image without a persistent volume/bind mount there. PocketBase SQLite, migrations, operator accounts, SMS evidence, outgoing webhook state, backups and the Google Messages session all depend on that directory.
-
-## First operator account
-
-PocketBase can create the first superuser through `/_/`, or from the container CLI with PocketBase's `superuser upsert` command. After that, create a normal record in the `users` auth collection for the PayGate operator UI.
-
-## Tests and CI
-
-Local validation:
+## Build and test
 
 ```bash
 npm ci
-npm run typecheck
-npm run build
+npm run typecheck:v4
+npm run build:v4
 
-gofmt -w cmd internal migrations
 go test -count=1 ./...
 go test -race -count=1 ./...
 go vet ./...
 
-docker build -t paygate .
+docker build -f Dockerfile.v4 -t paygate:v4 .
 ```
 
-CI performs frontend install/typecheck/build, Go formatting, unit/integration tests, race tests, vet and a production container build. Deployment is intentionally not automatic: the persistent-volume and environment cutover is an operator action.
+CI validates the frontend, Go tests/race tests/vet, static analysis and both production container targets.
 
-## Security notes
+## Security model
 
-- Treat `PAYGATE_API_KEY`, SMS secrets, PocketBase auth tokens and the libgm session as credentials.
-- The Google Messages session can represent a paired Messages-for-Web client and is stored outside normal collections with restrictive permissions.
-- Keep `/app/pb_data` private and backed up.
-- Use HTTPS at the reverse proxy.
-- PocketBase rate limits are enabled by default in PayGate.
-- Do not leave the weak legacy `/api/webhook` compatibility route enabled after migration.
-- A false-positive payment confirmation is worse than a delayed/manual review; matching therefore fails closed on ambiguity.
-- SMS delivery and the private Google Messages protocol have no end-to-end latency/SLA guarantee.
+- admin password, merchant API keys, webhook signing secrets and Android device keys are separate credentials;
+- plaintext merchant/webhook secrets are never persisted when a verifier/hash is sufficient;
+- Android private signing keys remain non-exportable in Android Keystore;
+- payer identity and raw notification detail stay out of unauthenticated/public payment views;
+- a false-positive confirmation is considered worse than a delayed/manual outcome, so matching fails closed;
+- never run a second PayGate process against the live SQLite volume.
+
+## Documentation
+
+Start with [the v4 documentation index](docs/v4/README.md):
+
+- [Target architecture](docs/v4/01_TARGET_ARCHITECTURE.md)
+- [Notification ingestion and pairing](docs/v4/02_NOTIFICATION_INGESTION_AND_PAIRING.md)
+- [Payment lifecycle and matching](docs/v4/03_PAYMENT_LIFECYCLE_AND_MATCHING.md)
+- [Public API and webhooks](docs/v4/04_PUBLIC_API_AND_WEBHOOKS.md)
+- [Android app](docs/v4/05_ANDROID_APP.md)
+- [Admin UI and design system](docs/v4/06_ADMIN_UI_AND_DESIGN_SYSTEM.md)
+- [Storage, security and operations](docs/v4/07_DATA_STORAGE_SECURITY_OPERATIONS.md)
+- [Edge cases and invariants](docs/v4/10_EDGE_CASES_AND_INVARIANTS.md)
+
+## Brand assets
+
+Reusable PayGate assets live in [`docs/brand`](docs/brand). The standalone mark is suitable for the web favicon, Android launcher icon and GitHub/social-preview artwork.
 
 ## Licence
 
-This repository directly links against `libgm`, which is AGPL-3.0. The rebuilt project is therefore distributed under the GNU Affero General Public License; see `LICENSE` and `NOTICE`.
-
-A future proprietary/commercial distribution needs a separate licensing review rather than assuming architectural separation removes AGPL obligations.
-
-## More detail
-
-- `ARCHITECTURE.md` — implemented system design and invariants
-- `PLAN.md` — implementation/acceptance status
-- `OPERATIONS.md` — evidence review, reconciliation, refunds, alerts, backups and incident runbook
-- `RAZORPAY_TEST.md` — isolated Razorpay Test Mode setup and verification flow
-- `RESEARCH.md` — technical research and constraints behind the design
-- `IMPLEMENTATION_SPEC.md` — rebuild requirements used during implementation
-
-
-During the v0.2 → v0.3 rollout, an existing **enabled** relay device receives a bounded 48-hour heartbeat grace only if it had validated signed traffic within the preceding 24 hours. Disabled or long-idle devices and new enrollments receive no grace. The first signed heartbeat immediately switches the device to normal permission/listener/staleness readiness checks, and any operator enable/disable state change permanently clears migration grace for that device.
+See [LICENSE](LICENSE) and [NOTICE](NOTICE).
