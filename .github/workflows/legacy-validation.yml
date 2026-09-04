@@ -1,0 +1,65 @@
+name: Legacy validation (manual)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Legacy coverage stays available for migration/deletion work, but never gates a release.
+jobs:
+  legacy-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22.23.1"
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Frontend dependency vulnerability scan
+        uses: google/osv-scanner-action/osv-scanner-action@baa4139e56d6312335d899e6ba045fa16d1d3d0b # v2.5.1
+        with:
+          scan-args: |-
+            -L package-lock.json
+
+      - name: Legacy v3 frontend typecheck
+        run: npm run typecheck:v3
+
+      - name: Legacy v3 frontend production build
+        run: npm run build:v3
+
+      - name: Full repository Go formatting check
+        shell: bash
+        run: test -z "$(gofmt -l cmd internal migrations)"
+
+      - name: Diff whitespace check
+        run: git diff --check
+
+      - name: Full repository Go tests
+        run: go test -count=1 ./...
+
+      - name: Full repository Go race tests
+        # PocketBase integration fixtures are CPU-heavy under -race; keep legacy coverage serial.
+        run: go test -race -p=1 -timeout=20m -count=1 ./internal/...
+
+      - name: Full repository Go vet
+        run: go vet ./...
+
+      - name: Full repository static analysis
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+
+      - name: Full repository Go vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: Build legacy production container
+        run: docker build --pull -f Dockerfile -t paygate-legacy-ci:${{ github.sha }} .
