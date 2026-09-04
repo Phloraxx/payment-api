@@ -1,8 +1,8 @@
 # 09 — Research Notes
 
-This file records why the v4 plan changed so implementation does not have to rediscover the same conclusions.
+This file records the pre-v4 audit and the conclusions that shaped v4. References to “current” code describe that retired baseline unless a section explicitly names v4.
 
-## Current-code findings
+## Pre-v4 baseline findings
 
 ### Current frontend chooses payment account
 
@@ -48,21 +48,19 @@ Google Messages -> Kotak
 
 GPay/Slice are deferred.
 
-### Current server routes non-Paytm Android events observation-only
+### Pre-v4 Android routing observed non-Paytm events only
 
-`internal/androidrelay/service.go` currently sends only Paytm notification events into Paytm matching; other allowlisted Android notifications are `observed_only`.
+At the time of this audit, `internal/androidrelay/service.go` sent only Paytm notification events into Paytm matching; other allowlisted Android notifications were `observed_only`.
 
-Promoting Kotak-via-Google-Messages into the unified server parser/matcher is therefore an extension of the existing transport, not a new relay.
+Promoting Kotak-via-Google-Messages into the unified v4 server parser/matcher was therefore an extension of the existing transport, not a new relay.
 
-### Current server duplicates Google Messages transport through libgm
+### Pre-v4 server duplicated Google Messages transport through libgm
 
-`internal/gmessages/manager.go` handles Google account/session pairing, cookies, reconnect, reauth and message ingestion.
+The retired `internal/gmessages/manager.go` handled Google account/session pairing, cookies, reconnect, reauthentication and message ingestion. V4 removed that duplicate transport after Android Google Messages notification parity was established for Kotak.
 
-Once Android Google Messages notification parity is proven for Kotak, this duplicate server-side transport can be removed.
+### Pre-v4 bank SMS matching required RRN
 
-### Current bank SMS matching requires RRN, Paytm does not
-
-Current SMS matching requires amount + RRN. Paytm notification matching already proves idempotency can instead use unique notification evidence identity.
+The old SMS matcher required amount + RRN. Paytm notification matching had already proved idempotency could instead use unique notification evidence identity.
 
 V4 therefore removes UTR/RRN from the required matching contract.
 
@@ -192,28 +190,21 @@ Razorpay references used during planning:
 
 ## SQLite research
 
-### SQLite is the database; PocketBase is a framework above it
+### SQLite was the database; PocketBase was a framework above it
 
-Current PayGate effectively has:
+At the audit baseline PayGate used:
 
 ```text
 Go + PocketBase + SQLite
 ```
 
-Target is:
+V4 uses:
 
 ```text
 Go + database/sql + modernc.org/sqlite + SQLite
 ```
 
-The current repository already depends directly on:
-
-```text
-modernc.org/sqlite v1.54.0
-modernc.org/libc v1.74.1
-```
-
-So removing PocketBase does not require introducing a different database engine.
+The repository already depended directly on `modernc.org/sqlite`, so removing PocketBase did not require a different database engine.
 
 `modernc.org/sqlite` is CGO-free and exposes SQLite's online Backup API. Its v1.54.0 release upgraded the embedded SQLite engine to SQLite 3.53.3.
 

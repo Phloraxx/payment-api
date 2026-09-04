@@ -272,9 +272,9 @@ References:
 - https://developer.android.com/reference/android/service/notification/NotificationListenerService.html
 - https://support.google.com/googleplay/android-developer/answer/16558241
 
-## Retire server-side libgm
+## Server-side libgm retirement
 
-Final v4 removes:
+V4 removed:
 
 - `internal/gmessages`;
 - server Google Messages login/session;
@@ -283,18 +283,7 @@ Final v4 removes:
 - libgm reconnect/client state;
 - Google Messages connector UI.
 
-Before deletion, run a short parity period using real Kotak transaction captures:
-
-1. current libgm path remains available;
-2. Android Google Messages notifications are captured in observe mode;
-3. compare event coverage/timestamps/text completeness;
-4. investigate every miss;
-5. only enable Kotak auto-match after parity is convincing;
-6. disable libgm;
-7. observe production;
-8. remove libgm code/state.
-
-If Google Messages notifications do not reliably expose enough Kotak content on the real phone, do **not** pretend parity succeeded; solve that concrete transport problem before deleting the fallback.
+Deletion followed the Android Google Messages/Kotak parity gate. The dated implementation checkpoint retains the production-shaped parser replay evidence; the current server has no libgm fallback or Google session state. Google Messages remains an Android notification source and must keep its narrow, fail-closed Kotak recognition.
 
 ## Seamless QR pairing
 

@@ -76,5 +76,5 @@ A create request contains context such as:
 
 ## Cutover status
 
-V4 was built beside v3 and cut over only after deterministic migration, SQLite integrity/backup testing, Android in-place upgrade validation, provider-blind API validation, relay compatibility checks and rollback preparation. The preserved v3 artifacts remain recovery material; new development targets v4.
-- [11 — Implementation checkpoint (2026-09-01)](./11_IMPLEMENTATION_CHECKPOINT_2026-09-01.md)
+V4 was built beside v3 and cut over only after deterministic migration, SQLite integrity/backup testing, Android in-place upgrade validation, provider-blind API validation, relay compatibility checks and rollback preparation. The executable v3 runtime has since been removed. The verified final v3 archive and the one-way migrator remain the recovery and forensic boundary; new development targets v4.
+- [11 — Pre-cutover implementation checkpoint (2026-09-01)](./11_IMPLEMENTATION_CHECKPOINT_2026-09-01.md)
