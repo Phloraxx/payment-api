@@ -41,10 +41,12 @@ type ProfileSummary struct {
 }
 
 type RelaySummary struct {
-	Connected  bool       `json:"connected"`
-	Name       string     `json:"name,omitempty"`
-	LastSeenAt *time.Time `json:"last_seen_at,omitempty"`
-	AppVersion string     `json:"app_version,omitempty"`
+	Connected        bool       `json:"connected"`
+	Name             string     `json:"name,omitempty"`
+	LastSeenAt       *time.Time `json:"last_seen_at,omitempty"`
+	AppVersion       string     `json:"app_version,omitempty"`
+	EnabledDevices   int        `json:"enabled_devices"`
+	ConnectedDevices int        `json:"connected_devices"`
 }
 
 type WebhookSummary struct {
@@ -184,24 +186,57 @@ func (s *Service) activeProfile(ctx context.Context) (*ProfileSummary, error) {
 }
 
 func (s *Service) loadRelay(ctx context.Context, out *RelaySummary) error {
-	var name string
-	var lastSeen sql.NullInt64
-	var appVersion sql.NullString
-	err := s.DB.SQL.QueryRowContext(ctx, `SELECT COALESCE(name,''),COALESCE(last_heartbeat_at,last_seen_at),app_version FROM relay_devices WHERE enabled=1 LIMIT 1`).
-		Scan(&name, &lastSeen, &appVersion)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
+	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT COALESCE(name,''),COALESCE(last_heartbeat_at,last_seen_at),app_version
+		FROM relay_devices WHERE enabled=1`)
 	if err != nil {
 		return fmt.Errorf("read relay summary: %w", err)
 	}
-	out.Name = name
-	out.AppVersion = appVersion.String
-	if lastSeen.Valid {
-		value := time.UnixMilli(lastSeen.Int64).UTC()
-		out.LastSeenAt = &value
-		age := s.now().Sub(value)
-		out.Connected = age >= -5*time.Minute && age <= time.Hour
+	defer rows.Close()
+
+	var fallbackName, fallbackVersion string
+	var bestSeen, bestConnected *time.Time
+	var bestSeenName, bestSeenVersion, bestConnectedName, bestConnectedVersion string
+	for rows.Next() {
+		var name string
+		var lastSeen sql.NullInt64
+		var appVersion sql.NullString
+		if err := rows.Scan(&name, &lastSeen, &appVersion); err != nil {
+			return fmt.Errorf("scan relay summary: %w", err)
+		}
+		out.EnabledDevices++
+		if fallbackName == "" {
+			fallbackName, fallbackVersion = name, appVersion.String
+		}
+		if !lastSeen.Valid {
+			continue
+		}
+		seen := time.UnixMilli(lastSeen.Int64).UTC()
+		if bestSeen == nil || seen.After(*bestSeen) {
+			value := seen
+			bestSeen = &value
+			bestSeenName, bestSeenVersion = name, appVersion.String
+		}
+		age := s.now().Sub(seen)
+		if age >= -5*time.Minute && age <= time.Hour {
+			out.ConnectedDevices++
+			if bestConnected == nil || seen.After(*bestConnected) {
+				value := seen
+				bestConnected = &value
+				bestConnectedName, bestConnectedVersion = name, appVersion.String
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate relay summary: %w", err)
+	}
+	out.Connected = out.ConnectedDevices > 0
+	switch {
+	case bestConnected != nil:
+		out.Name, out.AppVersion, out.LastSeenAt = bestConnectedName, bestConnectedVersion, bestConnected
+	case bestSeen != nil:
+		out.Name, out.AppVersion, out.LastSeenAt = bestSeenName, bestSeenVersion, bestSeen
+	default:
+		out.Name, out.AppVersion = fallbackName, fallbackVersion
 	}
 	return nil
 }

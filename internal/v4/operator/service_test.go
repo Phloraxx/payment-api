@@ -93,6 +93,27 @@ func TestOverviewUsesIndiaLocalDayAndShowsOperationalSummary(t *testing.T) {
 		t.Fatalf("volume=%+v", overview.Volume)
 	}
 }
+func TestOverviewRelaySummaryUsesAnyHealthyEnabledDevice(t *testing.T) {
+	f := newOperatorFixture(t)
+	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(id,name,public_key_pem,enabled,enrolled_at,last_seen_at,app_version) VALUES
+		('stale','Stale phone','pem',1,?,?,?),
+		('healthy','Healthy phone','pem',1,?,?,?)`,
+		f.now.Add(-3*time.Hour).UnixMilli(), f.now.Add(-2*time.Hour).UnixMilli(), "0.6.1",
+		f.now.Add(-time.Hour).UnixMilli(), f.now.Add(-time.Minute).UnixMilli(), "0.7.0"); err != nil {
+		t.Fatal(err)
+	}
+	overview, err := f.operator.Overview(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !overview.Relay.Connected || overview.Relay.EnabledDevices != 2 || overview.Relay.ConnectedDevices != 1 {
+		t.Fatalf("relay summary = %+v", overview.Relay)
+	}
+	if overview.Relay.Name != "Healthy phone" || overview.Relay.AppVersion != "0.7.0" || overview.Relay.LastSeenAt == nil {
+		t.Fatalf("representative relay = %+v", overview.Relay)
+	}
+}
+
 func TestActivityCombinesPaymentObservationAndWebhookEvents(t *testing.T) {
 	f := newOperatorFixture(t)
 	payment := f.create(t, 100, "activity")
