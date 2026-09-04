@@ -27,6 +27,8 @@ func NewRelayHandler(service *relay.Service) *RelayHandler {
 	h.mux.HandleFunc("POST /api/v4/relay/pair", h.pair)
 	h.mux.HandleFunc("POST "+relay.EventPath, h.event)
 	h.mux.HandleFunc("POST "+relay.HeartbeatPath, h.heartbeat)
+	h.mux.HandleFunc("GET "+relay.DevicePath, h.getThisDevice)
+	h.mux.HandleFunc("DELETE "+relay.DevicePath, h.disconnectDevice)
 	return h
 }
 func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -100,6 +102,40 @@ func (h *RelayHandler) heartbeat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *RelayHandler) getThisDevice(w http.ResponseWriter, r *http.Request) {
+	deviceID, err := h.Relay.AuthenticateDevice(r.Context(), relayAuth(r, relay.DevicePath), nil)
+	if err != nil {
+		writeRelayError(w, err)
+		return
+	}
+	device, err := h.Relay.Device(r.Context(), deviceID)
+	if err != nil {
+		writeRelayError(w, relayErrorForDeviceRevoke(err))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"device": device})
+}
+
+func (h *RelayHandler) disconnectDevice(w http.ResponseWriter, r *http.Request) {
+	deviceID, err := h.Relay.AuthenticateDevice(r.Context(), relayAuth(r, relay.DevicePath), nil)
+	if err != nil {
+		writeRelayError(w, err)
+		return
+	}
+	if err := h.Relay.RevokeDevice(r.Context(), deviceID); err != nil {
+		writeRelayError(w, relayErrorForDeviceRevoke(err))
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func relayErrorForDeviceRevoke(err error) error {
+	if errors.Is(err, relay.ErrInvalidDevice) {
+		return &relay.Error{Code: "UNKNOWN_RELAY_DEVICE", Message: "relay device is not enrolled or is disabled", HTTPStatus: http.StatusUnauthorized}
+	}
+	return err
 }
 
 func relayAuth(r *http.Request, path string) relay.RequestAuth {

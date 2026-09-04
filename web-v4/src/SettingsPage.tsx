@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { QRCodeCanvas } from "qrcode.react";
 import {
-  ApiError, activateProfile, changePassword, createApiKey, createPairingSession, getApiKeys, getDevice,
-  getProfiles, getWebhookSettings, revokeApiKey, revokeDevice, saveProfile, saveWebhook,
+  ApiError, activateProfile, changePassword, createApiKey, createPairingSession, getApiKeys,
+  getProfiles, getWebhookSettings, revokeApiKey, revokeDevice, saveProfile, saveWebhook, getDevices, updateProfileDestination,
 } from "./api";
 import type { ApiKeyInfo, DeviceInfo, PairingSession, Profile, WebhookSettings } from "./types";
 import { Badge, Dot, ErrorNotice, Modal, SectionHead, Spinner, copyText, dateTime, relativeTime } from "./ui";
@@ -21,7 +21,7 @@ export function SettingsPage({ onSignedOut }: { onSignedOut: () => void }) {
 }
 
 function ProfilesSettings() {
-  const [items, setItems] = useState<Profile[]>([]); const [error, setError] = useState(""); const [editing, setEditing] = useState<Profile | "new">(); const [busy, setBusy] = useState("");
+  const [items, setItems] = useState<Profile[]>([]); const [error, setError] = useState(""); const [editing, setEditing] = useState<Profile | "new">(); const [destination, setDestination] = useState<Profile>(); const [busy, setBusy] = useState("");
   const load = useCallback(async () => { try { setItems(await getProfiles()); setError(""); } catch (e) { setError(e instanceof ApiError ? e.message : "Could not load collection profiles."); } }, []);
   useEffect(() => { void load(); }, [load]);
   async function activate(id: string) { setBusy(id); setError(""); try { await activateProfile(id); await load(); } catch (e) { setError(e instanceof ApiError ? e.message : "Could not activate profile."); } finally { setBusy(""); } }
@@ -29,9 +29,10 @@ function ProfilesSettings() {
     {error && <ErrorNotice message={error}/>}<div className="profile-grid">{items.map((profile) => <article className={`profile-card ${profile.active ? "active" : ""}`} key={profile.id}>
       <div className="profile-top"><div><Badge tone={profile.active ? "blue" : profile.enabled ? "good" : "neutral"}>{profile.active ? "Active" : profile.enabled ? "Enabled" : "Disabled"}</Badge><h4>{profile.label}</h4></div><span className="profile-id">{profile.id}</span></div>
       <dl><div><dt>UPI ID</dt><dd>{profile.upi_id}</dd></div><div><dt>Payee</dt><dd>{profile.payee_name || "—"}</dd></div><div><dt>Input</dt><dd>{parserLabel(profile.parser)}</dd></div></dl>
-      <div className="profile-actions">{profile.parser !== "legacy" && <button className="text-button" onClick={() => setEditing(profile)}>Edit</button>}{profile.enabled && !profile.active && <button className="button button-primary button-small" disabled={busy === profile.id} onClick={() => void activate(profile.id)}>{busy === profile.id ? <Spinner/> : "Make active"}</button>}{profile.parser === "legacy" && <span className="muted">Historical only</span>}</div>
+      <div className="profile-actions">{profile.parser !== "legacy" && <><button className="text-button" onClick={() => setDestination(profile)}>Change UPI ID</button><button className="text-button" onClick={() => setEditing(profile)}>Edit profile</button></>}{profile.enabled && !profile.active && <button className="button button-primary button-small" disabled={busy === profile.id} onClick={() => void activate(profile.id)}>{busy === profile.id ? <Spinner/> : "Make active"}</button>}{profile.parser === "legacy" && <span className="muted">Historical only</span>}</div>
     </article>)}</div>
     {editing && <ProfileModal profile={editing === "new" ? undefined : editing} onClose={() => setEditing(undefined)} onSaved={async () => { setEditing(undefined); await load(); }}/>}
+    {destination && <DestinationModal profile={destination} onClose={() => setDestination(undefined)} onSaved={async () => { setDestination(undefined); await load(); }}/>}
   </section>;
 }
 
@@ -46,6 +47,17 @@ function ProfileModal({ profile, onClose, onSaved }: { profile?: Profile; onClos
     <label><span>Incoming signal</span><select value={parser} onChange={(e) => setParser(e.target.value)}><option value="paytm_notification">Paytm Business notification</option><option value="kotak_sms">Kotak SMS via Google Messages</option></select></label>
     <label className="toggle-line"><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)}/><span>Allow new payments on this profile</span></label>
     {error && <ErrorNotice message={error}/>}<div className="form-actions"><button className="button button-secondary" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={busy || !id || !label || !upi} onClick={() => void save()}>{busy ? <><Spinner/> Saving…</> : "Save profile"}</button></div>
+  </div></Modal>;
+}
+
+function DestinationModal({ profile, onClose, onSaved }: { profile: Profile; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [upi, setUpi] = useState(profile.upi_id); const [payee, setPayee] = useState(profile.payee_name || ""); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  async function save() { setBusy(true); setError(""); try { await updateProfileDestination(profile.id, upi, payee); await onSaved(); } catch (e) { setError(e instanceof ApiError ? e.message : "Could not change the UPI destination."); } finally { setBusy(false); } }
+  return <Modal title={`Change UPI ID · ${profile.label}`} onClose={onClose}><div className="form-stack">
+    <div className="immutable-note"><strong>Future payments only.</strong><span>Payments and QR codes already created keep the destination that was snapshotted when they were issued.</span></div>
+    <label><span>Destination UPI ID</span><input value={upi} onChange={(e) => setUpi(e.target.value)} placeholder="merchant@upi" autoCapitalize="none" autoCorrect="off"/></label>
+    <label><span>Payee name</span><input value={payee} onChange={(e) => setPayee(e.target.value)} placeholder="PayGate"/></label>
+    {error && <ErrorNotice message={error}/>}<div className="form-actions"><button className="button button-secondary" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={busy || !upi.trim().includes("@")} onClick={() => void save()}>{busy ? <><Spinner/> Saving…</> : "Change UPI ID"}</button></div>
   </div></Modal>;
 }
 
@@ -73,24 +85,26 @@ function ApiKeysPanel() {
 }
 
 function DevicePanel() {
-  const [device, setDevice] = useState<DeviceInfo | null>(); const [error, setError] = useState(""); const [pairing, setPairing] = useState<PairingSession>(); const [busy, setBusy] = useState(false);
-  const load = useCallback(async () => { try { setDevice(await getDevice()); setError(""); } catch (e) { setError(e instanceof ApiError ? e.message : "Could not load phone status."); } }, []);
+  const [devices, setDevices] = useState<DeviceInfo[]>([]); const [error, setError] = useState(""); const [pairing, setPairing] = useState<PairingSession>(); const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => { try { setDevices(await getDevices()); setError(""); } catch (e) { setError(e instanceof ApiError ? e.message : "Could not load phone status."); } }, []);
   useEffect(() => { void load(); const t = setInterval(() => { if (document.visibilityState === "visible") void load(); }, 30_000); return () => clearInterval(t); }, [load]);
-  async function pair() { setBusy(true); setError(""); try { setPairing(await createPairingSession(Boolean(device))); } catch (e) { setError(e instanceof ApiError ? e.message : "Could not create pairing link."); } finally { setBusy(false); } }
-  return <section className="panel settings-panel"><div className="panel-head"><div><p className="eyebrow">Notification relay</p><h3>PayGate phone</h3><p>One trusted Android device captures allowlisted decimal-money notifications and signs them to PayGate.</p></div>{device && <Badge tone={isDeviceHealthy(device) ? "good" : "warn"}>{isDeviceHealthy(device) ? "Healthy" : "Needs attention"}</Badge>}</div>
-    {error && <ErrorNotice message={error}/>} {device ? <><div className="device-card"><div className="device-title"><div className="phone-glyph">▯</div><div><strong>{device.name || device.device_model || "PayGate phone"}</strong><span>{device.device_model || "Android"} · Android {device.android_version || "—"} · PayGate {device.app_version || "—"}</span></div></div><div className="device-heartbeat"><Dot ok={Boolean(device.last_heartbeat_at)}/><span>Heartbeat {relativeTime(device.last_heartbeat_at)}</span></div></div>
+  async function pair() { setBusy(true); setError(""); try { setPairing(await createPairingSession()); } catch (e) { setError(e instanceof ApiError ? e.message : "Could not create pairing link."); } finally { setBusy(false); } }
+  const healthy = devices.filter(isDeviceHealthy).length;
+  return <section className="panel settings-panel"><div className="panel-head"><div><p className="eyebrow">Notification relay</p><h3>Connected phones</h3><p>Any connected Android phone can relay incoming decimal-payment notifications. Each phone has its own signing key and can be revoked independently.</p></div>{devices.length > 0 && <Badge tone={healthy > 0 ? "good" : "warn"}>{healthy > 0 ? `${healthy} healthy` : "Needs attention"}</Badge>}</div>
+    {error && <ErrorNotice message={error}/>} {devices.length ? <div className="device-list">{devices.map((device) => <div key={device.id} className="device-block"><div className="device-card"><div className="device-title"><div className="phone-glyph">▯</div><div><strong>{device.name || device.device_model || "PayGate phone"}</strong><span>{device.device_model || "Android"} · Android {device.android_version || "—"} · PayGate {device.app_version || "—"}</span></div></div><div className="device-heartbeat"><Dot ok={isDeviceHealthy(device)}/><span>Heartbeat {relativeTime(device.last_heartbeat_at)}</span></div></div>
       <div className="prereq-grid"><Prereq label="Notification access" value={device.notification_access}/><Prereq label="Listener connected" value={device.listener_connected}/><Prereq label="Battery unrestricted" value={device.battery_optimization_exempt}/><Prereq label="Foreground service" value={device.foreground_service}/><Prereq label="Power saver" value={device.power_save_mode === undefined ? undefined : !device.power_save_mode}/><Prereq label="Background allowed" value={device.background_restricted === undefined ? undefined : !device.background_restricted}/></div>
       <div className="queue-strip"><span>Local pending <strong>{device.pending_count ?? "—"}</strong></span><span>Local failed <strong>{device.failed_count ?? "—"}</strong></span><span>Last upload <strong>{relativeTime(device.last_successful_delivery_at)}</strong></span></div>
       {device.last_client_error && <div className="notice notice-error">Phone reports: {device.last_client_error}</div>}
-    </> : <div className="empty-inline">No active PayGate phone is connected.</div>}
-    <div className="inline-actions"><button className="button button-primary" disabled={busy} onClick={() => void pair()}>{busy ? <Spinner/> : device ? "Connect replacement phone" : "Connect phone"}</button>{device && <button className="text-button danger-text" onClick={() => { if (window.confirm("Revoke this phone now? Payment notifications will stop until another phone is paired.")) void revokeDevice(device.id).then(load).catch((e) => setError(e instanceof ApiError ? e.message : "Could not revoke phone.")); }}>Revoke phone</button>}</div>
+      <button className="text-button danger-text" onClick={() => { if (window.confirm(`Disconnect ${device.name || "this phone"}? Other connected phones will continue relaying.`)) void revokeDevice(device.id).then(load).catch((e) => setError(e instanceof ApiError ? e.message : "Could not revoke phone.")); }}>Disconnect phone</button>
+    </div>)}</div> : <div className="empty-inline">No PayGate phones are connected.</div>}
+    <div className="inline-actions"><button className="button button-primary" disabled={busy} onClick={() => void pair()}>{busy ? <Spinner/> : "Add phone"}</button></div>
     {pairing && <PairingModal pairing={pairing} onClose={() => { setPairing(undefined); void load(); }}/>}
   </section>;
 }
 
 function PairingModal({ pairing, onClose }: { pairing: PairingSession; onClose: () => void }) {
   const url = pairing.pairing_url || `${window.location.origin}/device/pair/${pairing.token}`; const [copied, setCopied] = useState(false);
-  return <Modal title={pairing.replace_existing ? "Connect replacement phone" : "Connect PayGate phone"} onClose={onClose}><div className="pairing-modal"><div className="qr-card"><QRCodeCanvas value={url} size={232} level="M" bgColor="#ffffff" fgColor="#07111f" marginSize={2}/></div><p>Scan this QR with the Android phone. The verified PayGate App Link should open the existing app directly.</p><div className="pairing-expiry"><span>Expires</span><strong>{dateTime(pairing.expires_at)}</strong></div><button className="button button-secondary" onClick={() => void copyText(url).then((ok) => { if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1300); } })}>{copied ? "Copied" : "Copy pairing link"}</button><div className="immutable-note"><strong>Short-lived and one-use.</strong><span>Do not send this link to another person. The old phone stays active until replacement pairing succeeds.</span></div></div></Modal>;
+  return <Modal title="Add PayGate phone" onClose={onClose}><div className="pairing-modal"><div className="qr-card"><QRCodeCanvas value={url} size={232} level="M" bgColor="#ffffff" fgColor="#07111f" marginSize={2}/></div><p>Scan this QR with PayGate on the Android phone. That phone gets its own device key and joins the same PayGate instance.</p><div className="pairing-expiry"><span>Expires</span><strong>{dateTime(pairing.expires_at)}</strong></div><button className="button button-secondary" onClick={() => void copyText(url).then((ok) => { if (ok) { setCopied(true); setTimeout(() => setCopied(false), 1300); } })}>{copied ? "Copied" : "Copy pairing link"}</button><div className="immutable-note"><strong>Short-lived and one-use.</strong><span>Scanning this QR adds one phone. Existing connected phones stay active.</span></div></div></Modal>;
 }
 
 function PasswordPanel({ onSignedOut }: { onSignedOut: () => void }) {

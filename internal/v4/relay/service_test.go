@@ -290,17 +290,24 @@ func TestSignedButUnsupportedOrNonPayGateNotificationsCannotMatch(t *testing.T) 
 	priv, deviceID := enrollTestDevice(t, db, now.Add(-time.Hour))
 	service := NewService(db, paymentService)
 	service.Now = func() time.Time { return now }
+	if _, err := db.SQL.Exec(`INSERT INTO collection_profiles(id,label,upi_id,parser,enabled,active,created_at,updated_at) VALUES('generic','Generic','merchant@upi','paytm_notification',1,1,?,?)`, now.Add(-time.Hour).UnixMilli(), now.Add(-time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
 
 	gpay := marshalEvent(t, EventInput{
 		SchemaVersion: 1, EventID: strings.Repeat("c", 64),
 		PackageName: "com.google.android.apps.nbu.paisa.user",
 		PostedAtMS:  now.UnixMilli(), Text: "₹100.37 received",
 	})
-	if _, err := service.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, now, gpay), gpay); err == nil {
-		t.Fatal("expected GPay package to be rejected in v4.0")
+	gpayResult, err := service.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, now, gpay), gpay)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if countRows(t, db, "relay_events") != 0 {
-		t.Fatal("unsupported package persisted a relay event")
+	if gpayResult.Status != "unmatched" || gpayResult.PaymentID != "" {
+		t.Fatalf("generic GPay result = %+v", gpayResult)
+	}
+	if countRows(t, db, "relay_events") != 1 || countRows(t, db, "payment_observations") != 1 {
+		t.Fatal("generic incoming notification was not normalized as evidence")
 	}
 	nonPayGate := marshalEvent(t, EventInput{
 		SchemaVersion: 1, EventID: strings.Repeat("d", 64),
@@ -314,7 +321,7 @@ func TestSignedButUnsupportedOrNonPayGateNotificationsCannotMatch(t *testing.T) 
 	if result.Status != "ignored" || result.PaymentID != "" {
 		t.Fatalf("non-PayGate result = %+v", result)
 	}
-	if countRows(t, db, "relay_events") != 1 || countRows(t, db, "payment_observations") != 0 {
+	if countRows(t, db, "relay_events") != 2 || countRows(t, db, "payment_observations") != 1 {
 		t.Fatal(".00 event was not safely ignored")
 	}
 }
@@ -405,5 +412,65 @@ func TestSignedKotakGoogleMessagesEventMatchesKotakPayment(t *testing.T) {
 	}
 	if got.Payment.Status != "paid" || got.Payment.PayerUPIID != "maya@okaxis" {
 		t.Fatalf("Kotak paid payment = %+v", got.Payment)
+	}
+}
+
+func TestGenericWalletNotificationMatchesActiveProfilePayment(t *testing.T) {
+	db := openRelayDB(t)
+	now := time.Date(2026, 9, 4, 8, 15, 0, 0, time.UTC)
+	insertProfile(t, db, "paytm", "paytm_notification", "merchant@paytm", true, now.Add(-time.Hour))
+	paymentService, created := createPayment(t, db, now, "generic-wallet-match")
+	priv, deviceID := enrollTestDevice(t, db, now.Add(-time.Hour))
+	relayService := NewService(db, paymentService)
+	relayService.Now = func() time.Time { return now.Add(time.Minute) }
+	body := marshalEvent(t, EventInput{
+		SchemaVersion: 1, EventID: strings.Repeat("a", 64),
+		PackageName: "com.example.wallet", PostedAtMS: now.Add(time.Minute).UnixMilli(),
+		Text: "Payment received ₹100.37 from Rahul",
+	})
+	result, err := relayService.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, now.Add(time.Minute), body), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "matched" || result.PaymentID != created.Payment.ID || !result.Transitioned {
+		t.Fatalf("generic wallet result=%+v", result)
+	}
+	got, err := paymentService.Get(context.Background(), created.Payment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Payment.Status != "paid" {
+		t.Fatalf("payment status=%s", got.Payment.Status)
+	}
+}
+
+func TestTwoEnabledPhonesCanRelaySameIncomingPaymentSafely(t *testing.T) {
+	db := openRelayDB(t)
+	now := time.Date(2026, 9, 4, 8, 30, 0, 0, time.UTC)
+	insertProfile(t, db, "paytm", "paytm_notification", "merchant@paytm", true, now.Add(-time.Hour))
+	paymentService, created := createPayment(t, db, now, "two-phone-match")
+	firstPriv, firstID := enrollTestDevice(t, db, now.Add(-time.Hour))
+	secondPriv, secondID := enrollTestDevice(t, db, now.Add(-30*time.Minute))
+	relayService := NewService(db, paymentService)
+	occurred := now.Add(time.Minute)
+	relayService.Now = func() time.Time { return occurred.Add(time.Second) }
+	first := marshalEvent(t, EventInput{SchemaVersion: 1, EventID: strings.Repeat("b", 64), PackageName: "com.example.wallet", PostedAtMS: occurred.UnixMilli(), Text: "₹100.37 received from Rahul"})
+	one, err := relayService.IngestSigned(context.Background(), signedAuth(t, firstPriv, firstID, occurred.Add(time.Second), first), first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := marshalEvent(t, EventInput{SchemaVersion: 1, EventID: strings.Repeat("c", 64), PackageName: "com.example.wallet", PostedAtMS: occurred.Add(500 * time.Millisecond).UnixMilli(), Text: "₹100.37 received from Rahul"})
+	two, err := relayService.IngestSigned(context.Background(), signedAuth(t, secondPriv, secondID, occurred.Add(2*time.Second), second), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if one.Status != "matched" || one.PaymentID != created.Payment.ID || !one.Transitioned {
+		t.Fatalf("first=%+v", one)
+	}
+	if two.Status != "corroborated" || two.PaymentID != created.Payment.ID || two.Transitioned {
+		t.Fatalf("second=%+v", two)
+	}
+	if countRows(t, db, "relay_events") != 2 || countRows(t, db, "payment_observations") != 2 {
+		t.Fatal("two-phone audit evidence was not retained")
 	}
 }

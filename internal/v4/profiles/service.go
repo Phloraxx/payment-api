@@ -44,6 +44,11 @@ type UpsertInput struct {
 	Enabled   bool
 }
 
+type DestinationInput struct {
+	UPIID     string
+	PayeeName string
+}
+
 func NewService(db *storage.DB) *Service {
 	return &Service{DB: db, Now: time.Now}
 }
@@ -95,6 +100,40 @@ func (s *Service) Upsert(ctx context.Context, in UpsertInput) (Profile, error) {
 	return out, err
 }
 
+func (s *Service) UpdateDestination(ctx context.Context, id string, in DestinationInput) (Profile, error) {
+	if s == nil || s.DB == nil || s.DB.SQL == nil {
+		return Profile{}, errors.New("profile storage is required")
+	}
+	id = strings.ToLower(strings.TrimSpace(id))
+	in.UPIID = strings.TrimSpace(in.UPIID)
+	in.PayeeName = strings.TrimSpace(in.PayeeName)
+	if id == "" {
+		return Profile{}, ErrProfileNotFound
+	}
+	if err := validateDestination(in.UPIID, in.PayeeName); err != nil {
+		return Profile{}, err
+	}
+	nowFn := s.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	now := nowFn().UTC()
+	var out Profile
+	err := s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		if _, err := getWith(ctx, tx, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE collection_profiles SET upi_id=?,payee_name=?,updated_at=? WHERE id=?`,
+			in.UPIID, nullable(in.PayeeName), now.UnixMilli(), id); err != nil {
+			return fmt.Errorf("update collection destination: %w", err)
+		}
+		var err error
+		out, err = getWith(ctx, tx, id)
+		return err
+	})
+	return out, err
+}
+
 func (s *Service) Activate(ctx context.Context, id string) (Profile, error) {
 	if s == nil || s.DB == nil || s.DB.SQL == nil {
 		return Profile{}, errors.New("profile storage is required")
@@ -128,6 +167,22 @@ func (s *Service) Activate(ctx context.Context, id string) (Profile, error) {
 		return err
 	})
 	return out, err
+}
+
+func (s *Service) Active(ctx context.Context) (Profile, error) {
+	if s == nil || s.DB == nil || s.DB.SQL == nil {
+		return Profile{}, errors.New("profile storage is required")
+	}
+	row := s.DB.SQL.QueryRowContext(ctx, `SELECT id,label,upi_id,COALESCE(payee_name,''),parser,enabled,active,created_at,updated_at
+		FROM collection_profiles WHERE active=1 LIMIT 1`)
+	profile, err := scanProfile(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Profile{}, ErrProfileNotFound
+	}
+	if err != nil {
+		return Profile{}, fmt.Errorf("read active collection profile: %w", err)
+	}
+	return profile, nil
 }
 
 func (s *Service) Get(ctx context.Context, id string) (Profile, error) {
@@ -202,16 +257,23 @@ func validateUpsert(in UpsertInput) error {
 	if in.Label == "" || utf8.RuneCountInString(in.Label) > 120 {
 		return fmt.Errorf("%w: label must contain 1-120 characters", ErrInvalidProfile)
 	}
-	if len(in.UPIID) < 3 || len(in.UPIID) > 255 || !strings.Contains(in.UPIID, "@") {
-		return fmt.Errorf("%w: upi_id must be a valid VPA-like identifier", ErrInvalidProfile)
-	}
-	if utf8.RuneCountInString(in.PayeeName) > 120 {
-		return fmt.Errorf("%w: payee_name is too long", ErrInvalidProfile)
+	if err := validateDestination(in.UPIID, in.PayeeName); err != nil {
+		return err
 	}
 	switch in.Parser {
 	case "paytm_notification", "kotak_sms":
 	default:
 		return fmt.Errorf("%w: unsupported parser %q", ErrInvalidProfile, in.Parser)
+	}
+	return nil
+}
+
+func validateDestination(upiID, payeeName string) error {
+	if len(upiID) < 3 || len(upiID) > 255 || !strings.Contains(upiID, "@") {
+		return fmt.Errorf("%w: upi_id must be a valid VPA-like identifier", ErrInvalidProfile)
+	}
+	if utf8.RuneCountInString(payeeName) > 120 {
+		return fmt.Errorf("%w: payee_name is too long", ErrInvalidProfile)
 	}
 	return nil
 }

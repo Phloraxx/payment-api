@@ -1,7 +1,9 @@
 package httpapi
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -51,6 +53,7 @@ func (h *AdminHandler) registerRoutes() {
 	h.mux.HandleFunc("POST /admin/webhooks/{id}/retry", h.retryWebhook)
 	h.mux.HandleFunc("GET /admin/profiles", h.listProfiles)
 	h.mux.HandleFunc("POST /admin/profiles", h.upsertProfile)
+	h.mux.HandleFunc("PATCH /admin/profiles/{id}/destination", h.updateProfileDestination)
 	h.mux.HandleFunc("POST /admin/profiles/{id}/activate", h.activateProfile)
 	h.mux.HandleFunc("GET /admin/api-keys", h.listAPIKeys)
 	h.mux.HandleFunc("POST /admin/api-keys", h.createAPIKey)
@@ -72,11 +75,67 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.mux.ServeHTTP(w, r)
 		return
 	}
-	if _, err := h.adminToken(r); err != nil {
-		writeError(w, http.StatusUnauthorized, "unauthorized", "Admin session is invalid")
+	if _, err := h.adminToken(r); err == nil {
+		h.mux.ServeHTTP(w, r)
+		return
+	}
+	deviceID, ok := h.deviceAuthorization(w, r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Admin or connected-device authentication is required")
+		return
+	}
+	if !deviceOperationalRoute(r.Method, r.URL.Path) {
+		_ = deviceID
+		writeError(w, http.StatusForbidden, "admin_required", "This setting requires the web admin session")
 		return
 	}
 	h.mux.ServeHTTP(w, r)
+}
+
+const adminDeviceBodyLimit = 256 << 10
+
+func (h *AdminHandler) deviceAuthorization(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if h.Relay == nil {
+		return "", false
+	}
+	deviceID := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Device"))
+	timestamp := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Time"))
+	signature := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Signature"))
+	if deviceID == "" || timestamp == "" || signature == "" {
+		return "", false
+	}
+	var body []byte
+	if r.Body != nil {
+		raw, err := io.ReadAll(io.LimitReader(r.Body, adminDeviceBodyLimit+1))
+		if err != nil || len(raw) > adminDeviceBodyLimit {
+			return "", false
+		}
+		body = raw
+		r.Body = io.NopCloser(bytes.NewReader(raw))
+	}
+	target := r.URL.RequestURI()
+	id, err := h.Relay.AuthenticateDevice(r.Context(), relay.RequestAuth{
+		DeviceID: deviceID, Timestamp: timestamp, Signature: signature, Method: r.Method, Path: target,
+	}, body)
+	return id, err == nil
+}
+
+func deviceOperationalRoute(method, path string) bool {
+	if method == http.MethodGet {
+		return path == "/admin/overview" || path == "/admin/activity" || path == "/admin/payments" ||
+			strings.HasPrefix(path, "/admin/payments/") || path == "/admin/settings" ||
+			path == "/admin/profiles" || path == "/admin/device"
+	}
+	if method == http.MethodPatch && strings.HasPrefix(path, "/admin/payments/") {
+		return true
+	}
+	if method == http.MethodPatch && path == "/admin/profiles/active/destination" {
+		return true
+	}
+	if method == http.MethodPost && strings.HasPrefix(path, "/admin/webhooks/") && strings.HasSuffix(path, "/retry") {
+		return true
+	}
+	return false
 }
 
 type adminLoginRequest struct {

@@ -44,6 +44,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		if err := db.runMigrationTx(ctx, 4, applyV4); err != nil {
 			return err
 		}
+		current = 4
+	}
+	if current < 5 {
+		if err := db.runMigrationTx(ctx, 5, applyV5); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -129,6 +135,13 @@ DROP TABLE collection_profiles;
 ALTER TABLE collection_profiles_v3 RENAME TO collection_profiles;
 CREATE UNIQUE INDEX uq_collection_profiles_one_active ON collection_profiles(active) WHERE active = 1;
 `
+
+func applyV5(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS uq_relay_devices_one_enabled;`); err != nil {
+		return fmt.Errorf("apply schema v5: %w", err)
+	}
+	return nil
+}
 
 func applyV4(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, schemaV4); err != nil {

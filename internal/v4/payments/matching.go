@@ -73,7 +73,7 @@ func (s *Service) ApplyObservation(ctx context.Context, relayEventID string, obs
 		if err != nil {
 			return err
 		}
-		if packageName != expectedPackage(obs.Source) {
+		if expected := expectedPackage(obs.Source); expected != "" && packageName != expected {
 			return fmt.Errorf("%w: source %s does not match relay package %s", ErrInvalidObservation, obs.Source, packageName)
 		}
 
@@ -154,6 +154,10 @@ func validateObservation(obs observations.Observation) error {
 	case "kotak_sms":
 		if obs.CollectionProfileID != "kotak" {
 			return fmt.Errorf("%w: Kotak source/profile mismatch", ErrInvalidObservation)
+		}
+	case observations.GenericNotificationSource, observations.GenericMessageSource:
+		if strings.TrimSpace(obs.CollectionProfileID) == "" {
+			return fmt.Errorf("%w: generic source requires resolved collection profile", ErrInvalidObservation)
 		}
 	default:
 		return fmt.Errorf("%w: unsupported source %q", ErrInvalidObservation, obs.Source)

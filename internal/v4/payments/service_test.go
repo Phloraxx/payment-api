@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Phloraxx/payment-api/internal/v4/profiles"
 	"github.com/Phloraxx/payment-api/internal/v4/storage"
 )
 
@@ -71,6 +72,42 @@ func TestCreatePaymentOwnsProfileAmountLifecycleAndUPIURI(t *testing.T) {
 	assertCount(t, db.SQL, "payment_history", 1)
 	assertCount(t, db.SQL, "webhook_deliveries", 1)
 	assertCount(t, db.SQL, "idempotency_keys", 1)
+}
+
+func TestDestinationChangeAffectsOnlyFuturePayments(t *testing.T) {
+	ctx := context.Background()
+	db := openAllocatorDB(t)
+	now := time.UnixMilli(1_788_200_000_000).UTC()
+	s := newTestService(t, db, now)
+
+	first, err := s.Create(ctx, validCreateInput("upi-before"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileService := profiles.NewService(db)
+	profileService.Now = func() time.Time { return now.Add(time.Second) }
+	if _, err := profileService.UpdateDestination(ctx, "paytm", profiles.DestinationInput{UPIID: "newmerchant@upi", PayeeName: "New Merchant"}); err != nil {
+		t.Fatal(err)
+	}
+
+	s.Allocator.Random = fixedIndex(37)
+	second, err := s.Create(ctx, validCreateInput("upi-after"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Payment.UPIIDSnapshot != "merchant@paytm" {
+		t.Fatalf("first payment snapshot = %q", first.Payment.UPIIDSnapshot)
+	}
+	if second.Payment.UPIIDSnapshot != "newmerchant@upi" || second.Payment.PayeeNameSnapshot != "New Merchant" {
+		t.Fatalf("second payment destination = %q / %q", second.Payment.UPIIDSnapshot, second.Payment.PayeeNameSnapshot)
+	}
+	reloaded, err := s.Get(ctx, first.Payment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Payment.UPIIDSnapshot != "merchant@paytm" {
+		t.Fatalf("existing payment was rewritten to %q", reloaded.Payment.UPIIDSnapshot)
+	}
 }
 
 func TestCreateIdempotencyExactReplayReturnsOriginalPayment(t *testing.T) {

@@ -15,6 +15,11 @@ type webhookSettingsRequest struct {
 	RotateSecret bool   `json:"rotate_secret,omitempty"`
 }
 
+type profileDestinationRequest struct {
+	UPIID     string `json:"upi_id"`
+	PayeeName string `json:"payee_name,omitempty"`
+}
+
 type profileRequest struct {
 	ID        string `json:"id"`
 	Label     string `json:"label"`
@@ -104,6 +109,39 @@ func (h *AdminHandler) upsertProfile(w http.ResponseWriter, r *http.Request) {
 	profile, err := h.Profiles.Upsert(r.Context(), profiles.UpsertInput{
 		ID: input.ID, Label: input.Label, UPIID: input.UPIID,
 		PayeeName: input.PayeeName, Parser: input.Parser, Enabled: input.Enabled,
+	})
+	if err != nil {
+		writeProfileError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"profile": profile})
+}
+
+func (h *AdminHandler) updateProfileDestination(w http.ResponseWriter, r *http.Request) {
+	if h.Profiles == nil {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "Collection profiles are unavailable")
+		return
+	}
+	if !isJSON(r.Header.Get("Content-Type")) {
+		writeError(w, http.StatusUnsupportedMediaType, "invalid_content_type", "Content-Type must be application/json")
+		return
+	}
+	var input profileDestinationRequest
+	if err := decodeStrictJSON(w, r, &input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "active" {
+		active, err := h.Profiles.Active(r.Context())
+		if err != nil {
+			writeProfileError(w, err)
+			return
+		}
+		id = active.ID
+	}
+	profile, err := h.Profiles.UpdateDestination(r.Context(), id, profiles.DestinationInput{
+		UPIID: input.UPIID, PayeeName: input.PayeeName,
 	})
 	if err != nil {
 		writeProfileError(w, err)
