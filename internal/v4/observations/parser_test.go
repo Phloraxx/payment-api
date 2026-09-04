@@ -156,6 +156,14 @@ func TestMessagesAcceptAnyIncomingBankCreditButStillRejectUnsafeMoneyText(t *tes
 	}
 }
 
+func TestUnknownPackageSplitTitleAndAmountCanProvideIncomingPaymentEvidence(t *testing.T) {
+	posted := time.Now().UTC()
+	got, err := Parse(Snapshot{PackageName: "com.example.wallet", PostedAt: posted, Title: "received", Text: "₹98765.43"})
+	if err != nil || got.Source != GenericNotificationSource || got.AmountPaise != 9876543 {
+		t.Fatalf("split-field generic observation=%+v err=%v", got, err)
+	}
+}
+
 func TestUnknownPackageCanProvideIncomingPaymentEvidence(t *testing.T) {
 	got, err := Parse(Snapshot{PackageName: "com.example.wallet", PostedAt: time.Now().UTC(), Text: "₹100.37 received from Rahul"})
 	if err != nil || got.Source != GenericNotificationSource || got.AmountPaise != 10037 {
