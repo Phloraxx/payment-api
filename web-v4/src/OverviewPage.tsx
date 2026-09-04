@@ -35,11 +35,18 @@ export function OverviewPage({ onOpenPayment }: { onOpenPayment: (id: string) =>
     <SectionHead eyebrow="Live operations" title="Overview" copy="Payment volume, settlement state and collection health — without exposing routing to callers." action={<button className="button button-secondary button-small" onClick={() => void load()}>Refresh</button>} />
     {error && <ErrorNotice message={error} />}
     {overview && <>
-      <section className="stat-grid">
-        <MetricCard label="Collected today" value={money(overview.collected_today_paise)} detail={`${overview.paid_today} settled`} accent="green" />
-        <MetricCard label="Payments today" value={overview.payments_today.toLocaleString("en-IN")} detail={`${overview.pending} pending`} accent="teal" />
-        <MetricCard label="7-day volume" value={money(volumeTotal)} detail={`${overview.volume.reduce((sum, item) => sum + item.payments, 0)} payments`} accent="aqua" />
-        <MetricCard label="Collection profile" value={overview.active_profile?.label ?? "Not configured"} detail={overview.active_profile?.id ?? "Needs setup"} accent="green" />
+      <section className="overview-hero">
+        <div className="overview-money">
+          <div className="overview-hero-top"><p className="eyebrow">Collected today</p><Badge tone={overview.relay.connected ? "good" : "bad"}>{overview.relay.connected ? "Relay online" : "Relay offline"}</Badge></div>
+          <strong>{money(overview.collected_today_paise)}</strong>
+          <div className="overview-route"><Dot ok={Boolean(overview.active_profile)} /><span>{overview.active_profile?.label ?? "No collection profile"}</span><small>{overview.active_profile ? "Live collection route" : "Configuration required"}</small></div>
+        </div>
+        <div className="overview-kpis">
+          <HeroMetric label="Payments" value={overview.payments_today.toLocaleString("en-IN")} detail="today" />
+          <HeroMetric label="Paid" value={overview.paid_today.toLocaleString("en-IN")} detail="settled" />
+          <HeroMetric label="Waiting" value={overview.pending.toLocaleString("en-IN")} detail="pending" />
+          <HeroMetric label="7-day volume" value={money(volumeTotal)} detail={`${overview.volume.reduce((sum, item) => sum + item.payments, 0)} payments`} />
+        </div>
       </section>
 
       <section className="dashboard-grid dashboard-grid-primary">
@@ -101,8 +108,8 @@ export function OverviewPage({ onOpenPayment }: { onOpenPayment: (id: string) =>
   </>;
 }
 
-function MetricCard({ label, value, detail, accent }: { label: string; value: string; detail: string; accent: string }) {
-  return <article className={`stat stat-${accent}`}><div className="stat-icon"><span/></div><span>{label}</span><strong>{value}</strong><small>{detail}</small><div className="stat-spark"><i/><i/><i/><i/><i/><i/></div></article>;
+function HeroMetric({ label, value, detail }: { label: string; value: string; detail: string }) {
+  return <div className="hero-metric"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>;
 }
 
 function AreaChart({ points }: { points: DailyVolume[] }) {
