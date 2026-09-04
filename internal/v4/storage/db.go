@@ -14,7 +14,7 @@ import (
 
 const (
 	defaultBusyTimeoutMS = 5000
-	schemaVersion        = 5
+	schemaVersion        = 4
 )
 
 type DB struct {
@@ -105,6 +105,10 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, err
 	}
 	if err := db.migrate(ctx); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	if err := db.ensureMultiRelayCompatibility(ctx); err != nil {
 		raw.Close()
 		return nil, err
 	}

@@ -46,11 +46,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		}
 		current = 4
 	}
-	if current < 5 {
-		if err := db.runMigrationTx(ctx, 5, applyV5); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -136,9 +131,12 @@ ALTER TABLE collection_profiles_v3 RENAME TO collection_profiles;
 CREATE UNIQUE INDEX uq_collection_profiles_one_active ON collection_profiles(active) WHERE active = 1;
 `
 
-func applyV5(ctx context.Context, tx *sql.Tx) error {
-	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS uq_relay_devices_one_enabled;`); err != nil {
-		return fmt.Errorf("apply schema v5: %w", err)
+// ensureMultiRelayCompatibility removes the historical singleton relay index
+// without advancing schema_migrations. The change is backwards-compatible with
+// the v4 runtime, so an image rollback can still open the database.
+func (db *DB) ensureMultiRelayCompatibility(ctx context.Context) error {
+	if _, err := db.SQL.ExecContext(ctx, `DROP INDEX IF EXISTS uq_relay_devices_one_enabled;`); err != nil {
+		return fmt.Errorf("enable multi-relay compatibility: %w", err)
 	}
 	return nil
 }

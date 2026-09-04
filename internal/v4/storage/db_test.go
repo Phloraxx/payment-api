@@ -469,3 +469,27 @@ func TestObservationSchemaSupportsCorroborationAndFutureSources(t *testing.T) {
 		t.Fatalf("future source/corroboration rejected: %v", err)
 	}
 }
+
+func TestMultiRelayCompatibilityKeepsSchemaV4RollbackReadable(t *testing.T) {
+	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "paygate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	var version int
+	if err := db.SQL.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 4 {
+		t.Fatalf("schema version=%d want=4 for rollback compatibility", version)
+	}
+
+	var indexes int
+	if err := db.SQL.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='uq_relay_devices_one_enabled'`).Scan(&indexes); err != nil {
+		t.Fatal(err)
+	}
+	if indexes != 0 {
+		t.Fatalf("singleton relay index still present: %d", indexes)
+	}
+}
