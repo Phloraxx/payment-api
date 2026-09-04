@@ -208,3 +208,26 @@ func TestGenericParserRejectsMoneyThatIsNotIncomingPaymentEvidence(t *testing.T)
 		}
 	}
 }
+
+func TestParseGooglePayPaidYouNotification(t *testing.T) {
+	posted := time.UnixMilli(1_788_200_000_000).UTC()
+	got, err := Parse(Snapshot{
+		PackageName: "com.google.android.apps.nbu.paisa.user",
+		PostedAt:    posted,
+		Text:        "Sourav P Bijoy paid you ₹3.05",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got.Source != GenericNotificationSource || got.AmountPaise != 305 || got.PayerName != "Sourav P Bijoy" {
+		t.Fatalf("observation = %+v", got)
+	}
+
+	if _, err := Parse(Snapshot{
+		PackageName: "com.google.android.apps.nbu.paisa.user",
+		PostedAt:    posted,
+		Text:        "You paid Rahul ₹3.05",
+	}); !errors.Is(err, ErrUnrecognized) {
+		t.Fatalf("outgoing GPay notification error = %v, want %v", err, ErrUnrecognized)
+	}
+}
