@@ -209,6 +209,23 @@ func TestGenericParserRejectsMoneyThatIsNotIncomingPaymentEvidence(t *testing.T)
 	}
 }
 
+func TestParseGooglePayBusinessReceivedFromNotification(t *testing.T) {
+	posted := time.UnixMilli(1_788_523_862_958).UTC()
+	got, err := Parse(Snapshot{
+		PackageName: "com.google.android.apps.nbu.paisa.merchant",
+		PostedAt:    posted,
+		Title:       "₹4.47 received from Sourav P B at 5:41 pm",
+		Text:        "See live notifications here when you receive customer payments",
+		BigText:     "See live notifications here when you receive customer payments",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got.Source != GenericNotificationSource || got.AmountPaise != 447 || got.PayerName != "Sourav P B" {
+		t.Fatalf("observation = %+v", got)
+	}
+}
+
 func TestParseGooglePayPaidYouNotification(t *testing.T) {
 	posted := time.UnixMilli(1_788_200_000_000).UTC()
 	got, err := Parse(Snapshot{
