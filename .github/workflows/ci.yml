@@ -27,6 +27,9 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Normalize frontend dependency tree
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
       - name: Frontend dependency audit
         run: npm audit --audit-level=high
 
