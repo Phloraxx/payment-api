@@ -220,7 +220,7 @@ func combinedText(snapshot Snapshot) string {
 		seen[value] = struct{}{}
 		parts = append(parts, value)
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, " ")
 }
 func truncateRunes(value string, max int) string {
 	runes := []rune(value)
