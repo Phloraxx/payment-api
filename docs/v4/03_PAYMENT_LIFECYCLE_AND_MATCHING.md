@@ -209,10 +209,10 @@ For normalized observation `O`:
 
 ```text
 1. dedupe signed relay event
-2. parse source and infer collection profile P
-3. validate incoming-credit semantics
-4. validate amount > 0 and paise != 00
-5. derive occurred_at + confidence/source
+2. parse source and validate incoming-credit semantics
+3. validate amount > 0 and paise != 00
+4. derive occurred_at + confidence/source
+5. resolve collection profile P from source semantics or, for generic evidence, historical exact-amount reservations at occurred_at
 6. find historical payments on P with exact payable amount
 7. restrict candidates to payments whose lifecycle can contain O.occurred_at
 8. if exactly one candidate is safe and not yet paid:
@@ -231,7 +231,7 @@ For normalized observation `O`:
       fail closed; save ambiguous Activity
 ```
 
-The **currently active collection profile is irrelevant to matching**. A Paytm observation can still pay an older Paytm payment after the operator has switched new payment creation to Kotak.
+The **currently active collection profile is irrelevant to a match when historical evidence identifies the profile**. A Paytm observation can still pay an older Paytm payment after the operator switches new payment creation to Kotak. Generic evidence similarly follows a unique historical reservation profile; if the same amount was simultaneously reserved on multiple profiles, it fails closed as ambiguous rather than guessing.
 
 ## Relay amount hint is not trusted
 

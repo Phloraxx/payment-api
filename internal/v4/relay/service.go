@@ -124,12 +124,19 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 		return result, nil
 	}
 	if obs.CollectionProfileID == "" {
-		profileID, err := s.activeCollectionProfileID(ctx)
+		profileID, ambiguous, err := s.resolveGenericCollectionProfileID(ctx, obs)
 		if err != nil {
 			if err := s.finishIgnored(ctx, result.RelayEventID, err); err != nil {
 				return IngestResult{}, err
 			}
 			result.Status = "ignored"
+			return result, nil
+		}
+		if ambiguous {
+			if err := s.finishAmbiguous(ctx, result.RelayEventID, errors.New("generic notification matches reservations in multiple collection profiles")); err != nil {
+				return IngestResult{}, err
+			}
+			result.Status = "ambiguous"
 			return result, nil
 		}
 		obs.CollectionProfileID = profileID
@@ -142,6 +149,41 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 	result.PaymentID = matched.PaymentID
 	result.Transitioned = matched.Transitioned
 	return result, nil
+}
+
+func (s *Service) resolveGenericCollectionProfileID(ctx context.Context, obs observations.Observation) (string, bool, error) {
+	occurred := obs.OccurredAt.UnixMilli()
+	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT DISTINCT r.collection_profile_id
+		FROM amount_reservations r JOIN payments p ON p.id=r.payment_id
+		WHERE r.payable_amount_paise=? AND p.created_at<=? AND r.reserved_until>=?
+		AND (p.status<>'cancelled' OR EXISTS(
+			SELECT 1 FROM payment_history h
+			WHERE h.payment_id=p.id AND h.type='payment.cancelled' AND h.created_at>=?
+		))
+		ORDER BY r.collection_profile_id`, obs.AmountPaise, occurred, occurred, occurred)
+	if err != nil {
+		return "", false, fmt.Errorf("resolve generic notification profile: %w", err)
+	}
+	defer rows.Close()
+	profiles := make([]string, 0, 2)
+	for rows.Next() {
+		var profileID string
+		if err := rows.Scan(&profileID); err != nil {
+			return "", false, fmt.Errorf("scan generic notification profile: %w", err)
+		}
+		profiles = append(profiles, profileID)
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, fmt.Errorf("iterate generic notification profiles: %w", err)
+	}
+	if len(profiles) == 1 {
+		return profiles[0], false, nil
+	}
+	if len(profiles) > 1 {
+		return "", true, nil
+	}
+	profileID, err := s.activeCollectionProfileID(ctx)
+	return profileID, false, err
 }
 
 func (s *Service) activeCollectionProfileID(ctx context.Context) (string, error) {
@@ -254,6 +296,17 @@ func existingRelayEvent(ctx context.Context, tx *storage.ImmediateTx, deviceID, 
 	}
 	result.PaymentID = paymentID.String
 	return result, true, nil
+}
+
+func (s *Service) finishAmbiguous(ctx context.Context, relayEventID string, reason error) error {
+	message := "ambiguous generic notification"
+	if reason != nil {
+		message = trimError(reason.Error(), 512)
+	}
+	return s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE relay_events SET status='ambiguous',error=? WHERE id=? AND status='received'`, message, relayEventID)
+		return err
+	})
 }
 
 func (s *Service) finishIgnored(ctx context.Context, relayEventID string, reason error) error {
