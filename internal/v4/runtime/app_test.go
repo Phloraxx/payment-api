@@ -16,6 +16,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/v4/auth"
 	"github.com/Phloraxx/payment-api/internal/v4/payments"
 	"github.com/Phloraxx/payment-api/internal/v4/profiles"
+	"github.com/Phloraxx/payment-api/internal/v4/relay"
 )
 
 const testAdminPassword = "correct horse battery staple"
@@ -282,6 +283,16 @@ func TestRuntimeServesV4DashboardWithoutShadowingAdminAPI(t *testing.T) {
 	}
 	if strings.Contains(res.Header().Get("Content-Type"), "text/html") {
 		t.Fatalf("admin route returned SPA content type: %s", res.Header().Get("Content-Type"))
+	}
+
+	req = httptest.NewRequest(http.MethodGet, relay.DevicePath, nil)
+	res = httptest.NewRecorder()
+	app.Handler().ServeHTTP(res, req)
+	if res.Code != http.StatusUnauthorized || !strings.Contains(res.Body.String(), `"error"`) {
+		t.Fatalf("device route shadowed by SPA: %d %s", res.Code, res.Body.String())
+	}
+	if strings.Contains(res.Header().Get("Content-Type"), "text/html") {
+		t.Fatalf("device route returned SPA content type: %s", res.Header().Get("Content-Type"))
 	}
 }
 
