@@ -103,6 +103,7 @@ func New(ctx context.Context, cfg Config) (_ *App, err error) {
 	mux.Handle("/v1/", merchantHandler)
 	mux.Handle("/admin/", adminHandler)
 	mux.Handle("/api/v4/relay/", relayHandler)
+	mux.Handle(relay.DevicePath, relayHandler)
 	// During the v3 -> v4 cutover the installed v0.4 relay can briefly hit
 	// its legacy endpoint after the server has switched. Return a transient
 	// status instead of letting the dashboard fallback answer 405, so v0.4
