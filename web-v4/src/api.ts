@@ -114,15 +114,22 @@ export function revokeApiKey(id: string): Promise<void> {
   return request(`/admin/api-keys/${encodeURIComponent(id)}`, { method: "DELETE" });
 }
 
-export async function getDevice(): Promise<DeviceInfo | null> {
-  const body = await request<{ device: DeviceInfo | null }>("/admin/device");
-  return body.device ?? null;
+export async function getDevices(): Promise<DeviceInfo[]> {
+  const body = await request<{ device: DeviceInfo | null; devices?: DeviceInfo[] }>("/admin/device");
+  return body.devices ?? (body.device ? [body.device] : []);
 }
-export function createPairingSession(replaceExisting: boolean): Promise<PairingSession> {
+export function createPairingSession(): Promise<PairingSession> {
   return request("/admin/device/pairing-session", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ replace_existing: replaceExisting }),
+    method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
   });
 }
+export function updateProfileDestination(id: string, upiId: string, payeeName: string): Promise<{ profile: import("./types").Profile }> {
+  return request(`/admin/profiles/${encodeURIComponent(id)}/destination`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ upi_id: upiId.trim(), payee_name: payeeName.trim() }),
+  });
+}
+
 export function revokeDevice(id: string): Promise<void> {
   return request(`/admin/device/${encodeURIComponent(id)}`, { method: "DELETE" });
 }

@@ -108,6 +108,10 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		raw.Close()
 		return nil, err
 	}
+	if err := db.ensureMultiRelayCompatibility(ctx); err != nil {
+		raw.Close()
+		return nil, err
+	}
 	return db, nil
 }
 

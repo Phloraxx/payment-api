@@ -126,22 +126,29 @@ func TestKotakExtractsUPIWithoutRequiringReference(t *testing.T) {
 		t.Fatalf("observation = %+v", got)
 	}
 }
-func TestKotakRequiresKotakMarkerAndIncomingCredit(t *testing.T) {
+func TestMessagesAcceptAnyIncomingBankCreditButStillRejectUnsafeMoneyText(t *testing.T) {
 	posted := time.UnixMilli(1_788_200_000_000).UTC()
-	cases := []struct {
-		title string
-		text  string
-		want  error
+	accepted := []struct{ title, text string }{
+		{"VM-HDFCBK", "Received Rs.100.37 from Rahul"},
+		{"JD-SBIUPI-S", "A/c credited Rs.100.37 through UPI Ref 123456789012"},
+		{"JK-SBIUPI-S", "A/c credited Rs.100.37 through UPI Ref 123456789012"},
+	}
+	for _, tc := range accepted {
+		got, err := Parse(Snapshot{PackageName: GoogleMessagesPackage, PostedAt: posted, Title: tc.title, Text: tc.text})
+		if err != nil || got.Source != GenericMessageSource {
+			t.Errorf("Parse(%q,%q)=%+v err=%v", tc.title, tc.text, got, err)
+		}
+	}
+	rejected := []struct {
+		title, text string
+		want        error
 	}{
-		{"VM-HDFCBK", "Received Rs.100.37 from Rahul", ErrUnrecognized},
-		{"JD-SBIUPI-S", "A/c credited Rs.100.37 through UPI Ref 123456789012", ErrUnrecognized},
-		{"JK-SBIUPI-S", "A/c credited Rs.100.37 through UPI Ref 123456789012", ErrUnrecognized},
 		{"VM-KOTAKB", "Your OTP is 123456 for Rs.100.37", ErrUnrecognized},
 		{"VM-KOTAKB", "Rs.100.37 debited from your account", ErrUnrecognized},
 		{"VM-KOTAKB", "Cashback of INR 100.37 credited to your account", ErrUnrecognized},
 		{"VM-KOTAKB", "Received Rs.100.00 from Rahul", ErrNonPayGateAmount},
 	}
-	for _, tc := range cases {
+	for _, tc := range rejected {
 		_, err := Parse(Snapshot{PackageName: GoogleMessagesPackage, PostedAt: posted, Title: tc.title, Text: tc.text})
 		if !errors.Is(err, tc.want) {
 			t.Errorf("Parse(%q,%q) error=%v want=%v", tc.title, tc.text, err, tc.want)
@@ -149,9 +156,47 @@ func TestKotakRequiresKotakMarkerAndIncomingCredit(t *testing.T) {
 	}
 }
 
-func TestUnsupportedPackageIsIgnored(t *testing.T) {
-	_, err := Parse(Snapshot{PackageName: "com.google.android.apps.nbu.paisa.user", Text: "₹100.37 received"})
-	if !errors.Is(err, ErrUnrecognized) {
-		t.Fatalf("unsupported package error = %v", err)
+func TestUnknownPackageCanProvideIncomingPaymentEvidence(t *testing.T) {
+	got, err := Parse(Snapshot{PackageName: "com.example.wallet", PostedAt: time.Now().UTC(), Text: "₹100.37 received from Rahul"})
+	if err != nil || got.Source != GenericNotificationSource || got.AmountPaise != 10037 {
+		t.Fatalf("generic package observation=%+v err=%v", got, err)
+	}
+}
+
+func TestParseGenericIncomingPaymentApplications(t *testing.T) {
+	posted := time.UnixMilli(1_788_200_000_000).UTC()
+	cases := []struct{ pkg, text, source string }{
+		{"in.amazon.mShop.android.shopping", "Payment received: ₹499.37 from Rahul", GenericNotificationSource},
+		{"com.phonepe.app", "You received INR 250.41 from Maya via UPI", GenericNotificationSource},
+		{"com.google.android.apps.nbu.paisa.user", "₹99.23 received from user@okaxis", GenericNotificationSource},
+		{GoogleMessagesPackage, "HDFC: A/c credited with Rs. 701.19 from Arun UPI Ref 123456789012", GenericMessageSource},
+	}
+	for _, tc := range cases {
+		got, err := Parse(Snapshot{PackageName: tc.pkg, PostedAt: posted, Text: tc.text})
+		if err != nil {
+			t.Errorf("%s: %v", tc.pkg, err)
+			continue
+		}
+		if got.Source != tc.source || got.AmountPaise%100 == 0 || got.CollectionProfileID != "" {
+			t.Errorf("%s: %+v", tc.pkg, got)
+		}
+	}
+}
+
+func TestGenericParserRejectsMoneyThatIsNotIncomingPaymentEvidence(t *testing.T) {
+	posted := time.UnixMilli(1_788_200_000_000).UTC()
+	texts := []string{
+		"Amazon order total ₹499.37",
+		"You paid to STORE ₹499.37",
+		"₹499.37 debited from your account",
+		"Refund received ₹499.37",
+		"EMI due ₹499.37 tomorrow",
+		"Cashback of ₹499.37 received",
+		"Payment received ₹499.00",
+	}
+	for _, text := range texts {
+		if _, err := Parse(Snapshot{PackageName: "example.app", PostedAt: posted, Text: text}); err == nil {
+			t.Errorf("accepted %q", text)
+		}
 	}
 }

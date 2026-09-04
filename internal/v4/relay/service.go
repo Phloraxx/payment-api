@@ -123,6 +123,17 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 		result.Status = "ignored"
 		return result, nil
 	}
+	if obs.CollectionProfileID == "" {
+		profileID, err := s.activeCollectionProfileID(ctx)
+		if err != nil {
+			if err := s.finishIgnored(ctx, result.RelayEventID, err); err != nil {
+				return IngestResult{}, err
+			}
+			result.Status = "ignored"
+			return result, nil
+		}
+		obs.CollectionProfileID = profileID
+	}
 	matched, err := s.Payments.ApplyObservation(ctx, result.RelayEventID, obs, now)
 	if err != nil {
 		return IngestResult{}, err
@@ -132,6 +143,19 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 	result.Transitioned = matched.Transitioned
 	return result, nil
 }
+
+func (s *Service) activeCollectionProfileID(ctx context.Context) (string, error) {
+	var profileID string
+	err := s.DB.SQL.QueryRowContext(ctx, `SELECT id FROM collection_profiles WHERE active=1 AND enabled=1 LIMIT 1`).Scan(&profileID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", errors.New("no active collection profile is available for generic notification evidence")
+	}
+	if err != nil {
+		return "", fmt.Errorf("read active collection profile: %w", err)
+	}
+	return profileID, nil
+}
+
 func validateEventInput(in *EventInput) error {
 	if in.SchemaVersion != SchemaVersion {
 		return relayError("UNSUPPORTED_RELAY_SCHEMA", "schema_version must be 1", 400)
@@ -144,8 +168,8 @@ func validateEventInput(in *EventInput) error {
 		return relayError("INVALID_RELAY_EVENT_ID", "event_id must be a SHA-256 hex string", 400)
 	}
 	in.PackageName = strings.TrimSpace(in.PackageName)
-	if in.PackageName != observations.PaytmBusinessPackage && in.PackageName != observations.GoogleMessagesPackage {
-		return relayError("UNSUPPORTED_RELAY_APP", "notification app is not allowlisted", 400)
+	if in.PackageName == "" || len(in.PackageName) > 255 {
+		return relayError("INVALID_RELAY_APP", "notification package name is required and must be at most 255 characters", 400)
 	}
 	if len(in.Title)+len(in.Text)+len(in.BigText) == 0 || len(in.Title)+len(in.Text)+len(in.BigText) > maxNotificationTextBytes {
 		return relayError("RELAY_EVENT_TOO_LARGE", "notification text is empty or too large", 400)

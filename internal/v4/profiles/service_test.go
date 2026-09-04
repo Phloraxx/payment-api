@@ -117,6 +117,40 @@ func TestProfileSwitchDoesNotMutateExistingPaymentSnapshot(t *testing.T) {
 		t.Fatalf("payment snapshot changed: profile=%q upi=%q", profileID, upiID)
 	}
 }
+func TestUpdateDestinationPreservesExistingPaymentSnapshot(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	svc := NewService(db)
+	now := time.UnixMilli(1_788_200_000_000).UTC()
+	svc.Now = func() time.Time { return now }
+
+	if _, err := svc.Upsert(ctx, testProfile("paytm", true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Activate(ctx, "paytm"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO payments(id,name,requested_amount_paise,payable_amount_paise,adjustment_paise,collection_profile_id,upi_id_snapshot,status,created_at,expires_at,grace_until,reuse_after)
+		VALUES('pay_snapshot','Sourav',10000,10037,37,'paytm','paytm@upi','pending',?,?,?,?)`, now.UnixMilli(), now.Add(5*time.Minute).UnixMilli(), now.Add(10*time.Minute).UnixMilli(), now.Add(15*time.Minute).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := svc.UpdateDestination(ctx, "paytm", DestinationInput{UPIID: "newdestination@upi", PayeeName: "New Payee"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.UPIID != "newdestination@upi" || updated.PayeeName != "New Payee" || !updated.Active {
+		t.Fatalf("updated profile = %+v", updated)
+	}
+	var snapshot string
+	if err := db.SQL.QueryRow(`SELECT upi_id_snapshot FROM payments WHERE id='pay_snapshot'`).Scan(&snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot != "paytm@upi" {
+		t.Fatalf("existing payment snapshot changed to %q", snapshot)
+	}
+}
+
 func TestProfileValidationAndNotFound(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)

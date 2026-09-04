@@ -102,24 +102,41 @@ func TestPairDeviceConsumesTokenAndEnablesFingerprintDevice(t *testing.T) {
 		t.Fatalf("replay error = %v", err)
 	}
 }
-func TestConnectRequiresExplicitReplaceWhenDeviceAlreadyActive(t *testing.T) {
+func TestAdditionalDevicePairingKeepsExistingDeviceEnabled(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 1, 6, 30, 0, 0, time.UTC)
-	enrollTestDevice(t, db, now.Add(-time.Hour))
+	_, oldID := enrollTestDevice(t, db, now.Add(-time.Hour))
 	service := NewService(db, payments.NewService(db))
 	service.Now = func() time.Time { return now }
-	if _, err := service.CreatePairing(context.Background(), false); !errors.Is(err, ErrRelayAlreadyActive) {
-		t.Fatalf("connect pairing error = %v", err)
+	session, err := service.CreatePairing(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if countRows(t, db, "pairing_sessions") != 0 {
-		t.Fatal("blocked Connect created a pairing session")
+	publicKey, newID := newPairingPublicKey(t)
+	result, err := service.PairDevice(context.Background(), PairDeviceInput{Token: session.Token, Name: "Second Phone", PublicKeyPEM: publicKey})
+	if err != nil {
+		t.Fatal(err)
 	}
-	replace, err := service.CreatePairing(context.Background(), true)
-	if err != nil || !replace.ReplaceExisting {
-		t.Fatalf("replace pairing = %+v err=%v", replace, err)
+	if result.DeviceID != newID || result.ReplacedDeviceID != "" || !result.Enabled {
+		t.Fatalf("pair result=%+v", result)
+	}
+	var oldEnabled, newEnabled int
+	if err := db.SQL.QueryRow(`SELECT enabled FROM relay_devices WHERE id=?`, oldID).Scan(&oldEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL.QueryRow(`SELECT enabled FROM relay_devices WHERE id=?`, newID).Scan(&newEnabled); err != nil {
+		t.Fatal(err)
+	}
+	if oldEnabled != 1 || newEnabled != 1 {
+		t.Fatalf("enabled states old=%d new=%d", oldEnabled, newEnabled)
+	}
+	var enabledCount int
+	if err := db.SQL.QueryRow(`SELECT COUNT(*) FROM relay_devices WHERE enabled=1`).Scan(&enabledCount); err != nil || enabledCount != 2 {
+		t.Fatalf("enabled count=%d err=%v", enabledCount, err)
 	}
 }
-func TestReplaceDeviceAtomicallyMovesActiveRelay(t *testing.T) {
+
+func TestReplaceFlagIsBackwardCompatibleButAdditive(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 1, 6, 45, 0, 0, time.UTC)
 	_, oldID := enrollTestDevice(t, db, now.Add(-time.Hour))
@@ -129,32 +146,22 @@ func TestReplaceDeviceAtomicallyMovesActiveRelay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if session.ReplaceExisting {
+		t.Fatalf("replace flag should be deprecated in v5: %+v", session)
+	}
 	publicKey, newID := newPairingPublicKey(t)
-	result, err := service.PairDevice(context.Background(), PairDeviceInput{
-		Token: session.Token, Name: "Replacement Phone", PublicKeyPEM: publicKey,
-	})
+	result, err := service.PairDevice(context.Background(), PairDeviceInput{Token: session.Token, Name: "Another Phone", PublicKeyPEM: publicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.DeviceID != newID || result.ReplacedDeviceID != oldID {
-		t.Fatalf("replace result = %+v", result)
+	if result.DeviceID != newID || result.ReplacedDeviceID != "" {
+		t.Fatalf("pair result=%+v", result)
 	}
 	var oldEnabled, newEnabled int
-	if err := db.SQL.QueryRow(`SELECT enabled FROM relay_devices WHERE id=?`, oldID).Scan(&oldEnabled); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SQL.QueryRow(`SELECT enabled FROM relay_devices WHERE id=?`, newID).Scan(&newEnabled); err != nil {
-		t.Fatal(err)
-	}
-	if oldEnabled != 0 || newEnabled != 1 {
+	_ = db.SQL.QueryRow(`SELECT enabled FROM relay_devices WHERE id=?`, oldID).Scan(&oldEnabled)
+	_ = db.SQL.QueryRow(`SELECT enabled FROM relay_devices WHERE id=?`, newID).Scan(&newEnabled)
+	if oldEnabled != 1 || newEnabled != 1 {
 		t.Fatalf("enabled states old=%d new=%d", oldEnabled, newEnabled)
-	}
-	active, err := service.ActiveDevice(context.Background())
-	if err != nil || active == nil || active.ID != newID {
-		t.Fatalf("active=%+v err=%v", active, err)
-	}
-	if countRows(t, db, "relay_devices") != 2 {
-		t.Fatal("replacement deleted historical device record")
 	}
 }
 func TestExpiredReplacementLeavesOldDeviceEnabled(t *testing.T) {
@@ -180,21 +187,14 @@ func TestExpiredReplacementLeavesOldDeviceEnabled(t *testing.T) {
 		t.Fatalf("old device enabled=%d err=%v", enabled, err)
 	}
 }
-func TestNewPairingInvalidatesOlderUnusedQR(t *testing.T) {
+func TestMultiplePairingSessionsCanCoexistAndAreIndividuallyOneUse(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 1, 7, 15, 0, 0, time.UTC)
 	service := NewService(db, payments.NewService(db))
 	service.Now = func() time.Time { return now }
-	tokens := []string{
-		"first-pairing-token-abcdefghijklmnopqrstuvwxyz",
-		"second-pairing-token-abcdefghijklmnopqrstuvwxyz",
-	}
+	tokens := []string{"first-pairing-token-abcdefghijklmnopqrstuvwxyz", "second-pairing-token-abcdefghijklmnopqrstuvwxyz"}
 	index := 0
-	service.NewPairingToken = func() (string, error) {
-		value := tokens[index]
-		index++
-		return value, nil
-	}
+	service.NewPairingToken = func() (string, error) { value := tokens[index]; index++; return value, nil }
 	first, err := service.CreatePairing(context.Background(), false)
 	if err != nil {
 		t.Fatal(err)
@@ -203,21 +203,26 @@ func TestNewPairingInvalidatesOlderUnusedQR(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Token == second.Token || countRows(t, db, "pairing_sessions") != 1 {
-		t.Fatal("new QR did not replace the older pending session")
+	if first.Token == second.Token || countRows(t, db, "pairing_sessions") != 2 {
+		t.Fatal("pairing sessions did not coexist")
 	}
-	publicKey, _ := newPairingPublicKey(t)
-	if _, err := service.PairDevice(context.Background(), PairDeviceInput{
-		Token: first.Token, Name: "Old QR", PublicKeyPEM: publicKey,
-	}); !errors.Is(err, ErrPairingTokenInvalid) {
-		t.Fatalf("old QR error = %v", err)
+	key1, _ := newPairingPublicKey(t)
+	key2, _ := newPairingPublicKey(t)
+	if _, err := service.PairDevice(context.Background(), PairDeviceInput{Token: first.Token, Name: "Phone A", PublicKeyPEM: key1}); err != nil {
+		t.Fatalf("first QR failed: %v", err)
 	}
-	if _, err := service.PairDevice(context.Background(), PairDeviceInput{
-		Token: second.Token, Name: "Current QR", PublicKeyPEM: publicKey,
-	}); err != nil {
-		t.Fatalf("current QR failed: %v", err)
+	if _, err := service.PairDevice(context.Background(), PairDeviceInput{Token: second.Token, Name: "Phone B", PublicKeyPEM: key2}); err != nil {
+		t.Fatalf("second QR failed: %v", err)
+	}
+	if _, err := service.PairDevice(context.Background(), PairDeviceInput{Token: first.Token, Name: "Replay", PublicKeyPEM: key1}); !errors.Is(err, ErrPairingTokenUsed) {
+		t.Fatalf("replay error=%v", err)
+	}
+	var enabled int
+	if err := db.SQL.QueryRow(`SELECT COUNT(*) FROM relay_devices WHERE enabled=1`).Scan(&enabled); err != nil || enabled != 2 {
+		t.Fatalf("enabled=%d err=%v", enabled, err)
 	}
 }
+
 func TestRevokeDeviceDisablesWithoutDeletingHistory(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 1, 7, 30, 0, 0, time.UTC)

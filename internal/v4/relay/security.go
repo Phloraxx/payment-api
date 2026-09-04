@@ -19,7 +19,10 @@ import (
 	"github.com/Phloraxx/payment-api/internal/v4/storage"
 )
 
-const signatureTolerance = 5 * time.Minute
+const (
+	signatureTolerance = 5 * time.Minute
+	DevicePath         = "/api/v4/device"
+)
 
 type RequestAuth struct {
 	DeviceID  string
@@ -107,6 +110,24 @@ func verifyRequest(ctx context.Context, db *storage.DB, auth RequestAuth, body [
 		return verifiedDevice{}, relayError("INVALID_RELAY_SIGNATURE", "invalid relay signature", 401)
 	}
 	return verifiedDevice{ID: deviceID, EnrolledAt: time.UnixMilli(enrolledAt).UTC()}, nil
+}
+
+// AuthenticateDevice verifies a signed request from an enabled QR-enrolled device.
+// It is shared by relay ingestion and the Android operational dashboard; callers
+// decide which application routes a device identity is authorized to use.
+func (s *Service) AuthenticateDevice(ctx context.Context, auth RequestAuth, body []byte) (string, error) {
+	if s == nil || s.DB == nil || s.DB.SQL == nil {
+		return "", errors.New("relay storage is required")
+	}
+	nowFn := s.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	device, err := verifyRequest(ctx, s.DB, auth, body, nowFn().UTC())
+	if err != nil {
+		return "", err
+	}
+	return device.ID, nil
 }
 
 func parsePublicKey(value string) (*ecdsa.PublicKey, []byte, error) {

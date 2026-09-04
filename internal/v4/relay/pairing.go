@@ -103,22 +103,11 @@ func (s *Service) CreatePairing(ctx context.Context, replaceExisting bool) (Pair
 		return PairingSession{}, fmt.Errorf("generate pairing session id: %w", err)
 	}
 	tokenHash := sha256.Sum256([]byte(token))
+	// replaceExisting is retained only for wire compatibility with older clients.
+	// Pairing is additive in v5: every valid QR enrolls one independently revocable device.
 	err = s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
-		if !replaceExisting {
-			var activeID string
-			err := tx.QueryRowContext(ctx, `SELECT id FROM relay_devices WHERE enabled=1 LIMIT 1`).Scan(&activeID)
-			if err == nil {
-				return ErrRelayAlreadyActive
-			}
-			if !errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("read active relay device: %w", err)
-			}
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM pairing_sessions WHERE consumed_at IS NULL`); err != nil {
-			return fmt.Errorf("invalidate older pairing sessions: %w", err)
-		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO pairing_sessions(id,token_hash,replace_existing,created_at,expires_at)
-			VALUES(?,?,?,?,?)`, sessionID, tokenHash[:], boolInt(replaceExisting), now.UnixMilli(), expiresAt.UnixMilli())
+			VALUES(?,?,?,?,?)`, sessionID, tokenHash[:], 0, now.UnixMilli(), expiresAt.UnixMilli())
 		if err != nil {
 			return fmt.Errorf("create pairing session: %w", err)
 		}
@@ -127,7 +116,7 @@ func (s *Service) CreatePairing(ctx context.Context, replaceExisting bool) (Pair
 	if err != nil {
 		return PairingSession{}, err
 	}
-	return PairingSession{Token: token, ExpiresAt: expiresAt, ReplaceExisting: replaceExisting}, nil
+	return PairingSession{Token: token, ExpiresAt: expiresAt, ReplaceExisting: false}, nil
 }
 
 func (s *Service) PairDevice(ctx context.Context, input PairDeviceInput) (PairDeviceResult, error) {
@@ -146,11 +135,9 @@ func (s *Service) PairDevice(ctx context.Context, input PairDeviceInput) (PairDe
 	tokenHash := sha256.Sum256([]byte(normalized.Token))
 	result := PairDeviceResult{DeviceID: deviceID, Enabled: true}
 	err = s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
-		var replaceExisting int
 		var expiresAt int64
 		var consumedAt sql.NullInt64
-		err := tx.QueryRowContext(ctx, `SELECT replace_existing,expires_at,consumed_at FROM pairing_sessions WHERE token_hash=?`, tokenHash[:]).
-			Scan(&replaceExisting, &expiresAt, &consumedAt)
+		err := tx.QueryRowContext(ctx, `SELECT expires_at,consumed_at FROM pairing_sessions WHERE token_hash=?`, tokenHash[:]).Scan(&expiresAt, &consumedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrPairingTokenInvalid
 		}
@@ -162,20 +149,6 @@ func (s *Service) PairDevice(ctx context.Context, input PairDeviceInput) (PairDe
 		}
 		if now.UnixMilli() >= expiresAt {
 			return ErrPairingTokenExpired
-		}
-		var activeID string
-		activeErr := tx.QueryRowContext(ctx, `SELECT id FROM relay_devices WHERE enabled=1 LIMIT 1`).Scan(&activeID)
-		if activeErr != nil && !errors.Is(activeErr, sql.ErrNoRows) {
-			return fmt.Errorf("read active relay device: %w", activeErr)
-		}
-		if activeErr == nil && activeID != deviceID {
-			if replaceExisting != 1 {
-				return ErrRelayAlreadyActive
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE relay_devices SET enabled=0 WHERE id=? AND enabled=1`, activeID); err != nil {
-				return fmt.Errorf("disable replaced relay device: %w", err)
-			}
-			result.ReplacedDeviceID = activeID
 		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO relay_devices(
 			id,name,public_key_pem,enabled,enrolled_at,app_version,device_model,android_version)
@@ -260,45 +233,80 @@ func trimRunes(value string, max int) string {
 	return string(runes[:max])
 }
 
-func (s *Service) ActiveDevice(ctx context.Context) (*DeviceInfo, error) {
+func (s *Service) Devices(ctx context.Context) ([]DeviceInfo, error) {
 	if s == nil || s.DB == nil || s.DB.SQL == nil {
 		return nil, errors.New("relay storage is required")
 	}
-	var info DeviceInfo
-	var lastSeen, lastHeartbeat, lastDelivered sql.NullInt64
-	var appVersion, model, androidVersion, lastError sql.NullString
-	var notificationAccess, listenerConnected, batteryExempt, powerSave, backgroundRestricted, foregroundService sql.NullInt64
-	var pendingCount, failedCount sql.NullInt64
-	var enrolledAt int64
-	var enabled int
-	err := s.DB.SQL.QueryRowContext(ctx, `SELECT id,COALESCE(name,''),enabled,enrolled_at,last_seen_at,last_heartbeat_at,
+	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT id,COALESCE(name,''),enabled,enrolled_at,last_seen_at,last_heartbeat_at,
 		app_version,device_model,android_version,notification_access,listener_connected,battery_optimization_exempt,
 		power_save_mode,background_restricted,foreground_service,pending_count,failed_count,last_successful_delivery_at,last_client_error
-		FROM relay_devices WHERE enabled=1 LIMIT 1`).Scan(
-		&info.ID, &info.Name, &enabled, &enrolledAt, &lastSeen, &lastHeartbeat, &appVersion, &model, &androidVersion,
-		&notificationAccess, &listenerConnected, &batteryExempt, &powerSave, &backgroundRestricted, &foregroundService,
-		&pendingCount, &failedCount, &lastDelivered, &lastError)
-	if errors.Is(err, sql.ErrNoRows) {
+		FROM relay_devices WHERE enabled=1 ORDER BY COALESCE(last_heartbeat_at,last_seen_at,enrolled_at) DESC,id`)
+	if err != nil {
+		return nil, fmt.Errorf("read relay devices: %w", err)
+	}
+	defer rows.Close()
+	items := make([]DeviceInfo, 0)
+	for rows.Next() {
+		var info DeviceInfo
+		var lastSeen, lastHeartbeat, lastDelivered sql.NullInt64
+		var appVersion, model, androidVersion, lastError sql.NullString
+		var notificationAccess, listenerConnected, batteryExempt, powerSave, backgroundRestricted, foregroundService sql.NullInt64
+		var pendingCount, failedCount sql.NullInt64
+		var enrolledAt int64
+		var enabled int
+		if err := rows.Scan(&info.ID, &info.Name, &enabled, &enrolledAt, &lastSeen, &lastHeartbeat, &appVersion, &model, &androidVersion,
+			&notificationAccess, &listenerConnected, &batteryExempt, &powerSave, &backgroundRestricted, &foregroundService,
+			&pendingCount, &failedCount, &lastDelivered, &lastError); err != nil {
+			return nil, fmt.Errorf("scan relay device: %w", err)
+		}
+		info.Enabled = enabled == 1
+		info.EnrolledAt = time.UnixMilli(enrolledAt).UTC()
+		info.AppVersion, info.DeviceModel, info.AndroidVersion, info.LastClientError = appVersion.String, model.String, androidVersion.String, lastError.String
+		info.LastSeenAt = nullableTimePointer(lastSeen)
+		info.LastHeartbeatAt = nullableTimePointer(lastHeartbeat)
+		info.LastSuccessfulDeliveryAt = nullableTimePointer(lastDelivered)
+		info.NotificationAccess = nullableBoolPointer(notificationAccess)
+		info.ListenerConnected = nullableBoolPointer(listenerConnected)
+		info.BatteryOptimizationExempt = nullableBoolPointer(batteryExempt)
+		info.PowerSaveMode = nullableBoolPointer(powerSave)
+		info.BackgroundRestricted = nullableBoolPointer(backgroundRestricted)
+		info.ForegroundService = nullableBoolPointer(foregroundService)
+		info.PendingCount = nullableIntPointer(pendingCount)
+		info.FailedCount = nullableIntPointer(failedCount)
+		items = append(items, info)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate relay devices: %w", err)
+	}
+	return items, nil
+}
+
+func (s *Service) ActiveDevice(ctx context.Context) (*DeviceInfo, error) {
+	items, err := s.Devices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("read active relay device: %w", err)
+	return &items[0], nil
+}
+
+func (s *Service) Device(ctx context.Context, id string) (*DeviceInfo, error) {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if id == "" {
+		return nil, ErrInvalidDevice
 	}
-	info.Enabled = enabled == 1
-	info.EnrolledAt = time.UnixMilli(enrolledAt).UTC()
-	info.AppVersion, info.DeviceModel, info.AndroidVersion, info.LastClientError = appVersion.String, model.String, androidVersion.String, lastError.String
-	info.LastSeenAt = nullableTimePointer(lastSeen)
-	info.LastHeartbeatAt = nullableTimePointer(lastHeartbeat)
-	info.LastSuccessfulDeliveryAt = nullableTimePointer(lastDelivered)
-	info.NotificationAccess = nullableBoolPointer(notificationAccess)
-	info.ListenerConnected = nullableBoolPointer(listenerConnected)
-	info.BatteryOptimizationExempt = nullableBoolPointer(batteryExempt)
-	info.PowerSaveMode = nullableBoolPointer(powerSave)
-	info.BackgroundRestricted = nullableBoolPointer(backgroundRestricted)
-	info.ForegroundService = nullableBoolPointer(foregroundService)
-	info.PendingCount = nullableIntPointer(pendingCount)
-	info.FailedCount = nullableIntPointer(failedCount)
-	return &info, nil
+	items, err := s.Devices(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range items {
+		if items[i].ID == id {
+			return &items[i], nil
+		}
+	}
+	return nil, ErrInvalidDevice
 }
 
 func nullableTimePointer(value sql.NullInt64) *time.Time {

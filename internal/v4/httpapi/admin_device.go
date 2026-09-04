@@ -17,12 +17,16 @@ func (h *AdminHandler) getDevice(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "PayGate device is unavailable")
 		return
 	}
-	device, err := h.Relay.ActiveDevice(r.Context())
+	devices, err := h.Relay.Devices(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Could not load PayGate device")
+		writeError(w, http.StatusInternalServerError, "internal_error", "Could not load PayGate devices")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"device": device})
+	var primary any
+	if len(devices) > 0 {
+		primary = devices[0]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"device": primary, "devices": devices})
 }
 
 func (h *AdminHandler) createPairingSession(w http.ResponseWriter, r *http.Request) {
@@ -41,10 +45,6 @@ func (h *AdminHandler) createPairingSession(w http.ResponseWriter, r *http.Reque
 	}
 	session, err := h.Relay.CreatePairing(r.Context(), input.ReplaceExisting)
 	if err != nil {
-		if errors.Is(err, relay.ErrRelayAlreadyActive) {
-			writeError(w, http.StatusConflict, "device_already_connected", "A PayGate phone is already connected")
-			return
-		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Could not create pairing session")
 		return
 	}
