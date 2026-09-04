@@ -124,6 +124,10 @@ The v4 container expects persistent storage at:
 
 Use SQLite's online backup path rather than copying a live database file. Keep rollback images, the previous data volume and the final verified migration archive until the new version has passed acceptance.
 
+## Configuration
+
+Copy `.env.example` as a reference for the canonical v4 environment variables. A fresh database requires `PAYGATE_V4_ADMIN_PASSWORD` for the initial bootstrap; merchant API and webhook bootstrap values are optional and can also be configured through the operator settings after startup. The container provides defaults for the data, backup and listen paths.
+
 ## Build and test
 
 ```bash
@@ -138,7 +142,7 @@ go vet ./...
 docker build -f Dockerfile.v4 -t paygate:v4 .
 ```
 
-CI validates the frontend, Go tests/race tests/vet, static analysis and both production container targets.
+CI validates the v4 frontend, all retained Go packages, static analysis and the production v4 container.
 
 ## Security model
 

@@ -1,9 +1,9 @@
 # Dependencies
 node_modules/
 
-# Runtime data (PocketBase / legacy prototype)
-pb_data/
+# Runtime data
 data/
+backups/
 *.db
 *.db-shm
 *.db-wal
@@ -38,5 +38,3 @@ tmp/
 .vercel/
 .dev.vars
 .wrangler/
-
-.env.razorpay-test

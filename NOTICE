@@ -1,20 +1,8 @@
 PayGate
 Copyright (C) 2026 Sourav / Phloraxx contributors
 
-This project is distributed under GNU AGPL-3.0-or-later because it directly
-uses libgm from mautrix-gmessages.
+This project is distributed under GNU AGPL-3.0-or-later. See LICENSE for the
+complete terms.
 
-Third-party components include:
-
-- mautrix-gmessages / libgm
-  Copyright (C) Tulir Asokan and contributors
-  License: GNU Affero General Public License v3 or later
-  https://github.com/mautrix/gmessages
-
-- PocketBase
-  Copyright (c) 2022-present Gani Georgiev
-  License: MIT
-  https://github.com/pocketbase/pocketbase
-
-See each dependency's source distribution for its complete copyright and
-license notices.
+Third-party components retain their respective licences. See go.mod,
+package.json and package-lock.json for the current dependency set.

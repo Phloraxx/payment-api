@@ -593,7 +593,7 @@ Do not log full notification bodies by default.
 
 ## V4 container/runtime boundary — 2026-09-01
 
-`Dockerfile.v4` is the standalone v4 production-image path. It builds only the v4 dashboard plus `paygate-v4` and `paygate-v4-migrate`, then runs the server as the distroless `nonroot` user. The existing `Dockerfile` remains the legacy v3 image path until production cutover.
+`Dockerfile.v4` is the sole production-image path. It builds only the v4 dashboard plus `paygate-v4` and `paygate-v4-migrate`, then runs the server as the distroless `nonroot` user. The pre-v4 image definition was removed after cutover.
 
 The v4 image has a built-in `paygate-v4 healthcheck` command that calls its own `/health` route over loopback. A disposable image acceptance run verified Docker reports the container `healthy` with a fresh temporary SQLite database.
 

@@ -1,5 +1,7 @@
 # 08 — Migration and Implementation Plan
 
+Status: completed. This plan is retained as the migration, cutover and rollback record; imperative pre-cutover steps describe the historical sequence rather than current runtime operations.
+
 ## Strategy
 
 Do not rewrite production in place.
@@ -462,7 +464,7 @@ Choose a quiet period.
 - direct SQLite backup/restore drill complete;
 - Android signed upgrade tested in place;
 - rollback image/config/data prepared;
-- cutover credential bootstrap prepared: `PAYGATE_V4_ADMIN_PASSWORD` is explicit, while the existing v3 merchant key and outgoing webhook URL/secret may be imported once from `PAYGATE_API_KEY`, `OUTGOING_WEBHOOK_URL`, and `OUTGOING_WEBHOOK_SECRET` (or explicit `PAYGATE_V4_*` overrides) without logging their values.
+- cutover credential bootstrap used explicit `PAYGATE_V4_*` values. The temporary v3 environment-name aliases used during cutover were removed after production stabilized; current bootstrap and recovery use only the canonical v4 names.
 
 ### Drain v3 amount state
 
