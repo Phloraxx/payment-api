@@ -191,6 +191,92 @@ func TestParseGenericIncomingPaymentApplications(t *testing.T) {
 	}
 }
 
+func TestParseGenericBHIMIncomingNotifications(t *testing.T) {
+	posted := time.Date(2026, 9, 4, 10, 11, 12, 345_000_000, time.FixedZone("IST", 5*60*60+30*60))
+	cases := []struct {
+		name      string
+		text      string
+		amount    int64
+		payerName string
+		payerUPI  string
+	}{
+		{
+			name:      "superyes",
+			text:      "Received INR 1.25 in your State Bank Of India account(XX3492) from SOURAV P BIJOY (sourav.bijoy@superyes). For further details, please check the transaction history on your BHIM app.",
+			amount:    125,
+			payerName: "SOURAV P BIJOY",
+			payerUPI:  "sourav.bijoy@superyes",
+		},
+		{
+			name:      "okaxis",
+			text:      "Received INR 2.06 in your State Bank Of India account(XX3492) from SOURAV P BIJOY (souravpbijoy-2@okaxis). For further details, please check the transaction history on your BHIM app.",
+			amount:    206,
+			payerName: "SOURAV P BIJOY",
+			payerUPI:  "souravpbijoy-2@okaxis",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Parse(Snapshot{
+				PackageName: "in.org.npci.upiapp",
+				PostedAt:    posted,
+				Title:       "Bharat Interface for Money",
+				Text:        tc.text,
+			})
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if got.Source != GenericNotificationSource || got.AmountPaise != tc.amount ||
+				got.PayerName != tc.payerName || got.PayerUPIID != tc.payerUPI {
+				t.Fatalf("observation = %+v", got)
+			}
+			if !got.OccurredAt.Equal(posted.UTC()) || got.OccurredAtSource != "notification_posted_at" {
+				t.Fatalf("occurred = %s source=%s", got.OccurredAt, got.OccurredAtSource)
+			}
+		})
+	}
+}
+
+func TestGenericPayerCleanupCompatibility(t *testing.T) {
+	posted := time.UnixMilli(1_788_200_000_000).UTC()
+	cases := []struct {
+		name      string
+		text      string
+		payerName string
+		payerUPI  string
+	}{
+		{
+			name:      "dotted UPI before sentence-ending period",
+			text:      "Received INR 1.25 from Alice (alice.name@upi).",
+			payerName: "Alice",
+			payerUPI:  "alice.name@upi",
+		},
+		{
+			name:      "unrelated parenthesized name text survives",
+			text:      "Received INR 1.25 from Alice (VIP) (alice@upi)",
+			payerName: "Alice (VIP)",
+			payerUPI:  "alice@upi",
+		},
+		{
+			name:      "non-parenthesized UPI uses fallback removal",
+			text:      "Received INR 1.25 from Alice alice@upi",
+			payerName: "Alice",
+			payerUPI:  "alice@upi",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Parse(Snapshot{PackageName: "example.wallet", PostedAt: posted, Text: tc.text})
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if got.Source != GenericNotificationSource || got.PayerName != tc.payerName || got.PayerUPIID != tc.payerUPI {
+				t.Fatalf("observation = %+v", got)
+			}
+		})
+	}
+}
+
 func TestGenericParserRejectsMoneyThatIsNotIncomingPaymentEvidence(t *testing.T) {
 	posted := time.UnixMilli(1_788_200_000_000).UTC()
 	texts := []string{
