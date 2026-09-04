@@ -4,39 +4,31 @@
 
 The Android app does not know the active collection profile and does not match payments.
 
-It observes a tiny package allowlist, applies a cheap privacy-preserving decimal-money prefilter, stores a minimal notification snapshot locally and sends that snapshot to PayGate with a device signature.
+It applies a cheap privacy-preserving decimal-money prefilter to notifications from any package, stores a minimal candidate snapshot locally and sends only those candidates to PayGate with a device signature.
 
 The server decides:
 
-- whether the notification is actually an incoming credit;
-- whether it is Paytm or Kotak;
+- whether the candidate is actually an incoming credit;
+- whether a source-specific parser such as Paytm or Kotak applies;
 - what amount/payer/time can be trusted;
+- which historical collection profile can safely represent generic evidence;
 - whether any payment should change state.
 
-## v4.0 package allowlist
+## Universal package intake
 
-Only:
+Android does not maintain a payment-app package allowlist. A package name is retained as evidence, but package identity alone never authorizes a payment match. This allows BHIM, Google Pay, PhonePe, bank apps and future sources to work without an Android release when their visible notification text satisfies the generic server parser.
 
-```text
-com.paytm.business
-com.google.android.apps.messaging
-```
-
-GPay and Slice stay disabled for matching in v4.0.
-
-This keeps the Android architecture generic while intentionally limiting production source risk.
+Specialized server parsers remain useful for sources with stronger known semantics, but they are an optimization and confidence boundary rather than an Android transport restriction.
 
 ## Generic on-device prefilter
 
 Relay only when all are true:
 
-1. package is allowlisted;
-2. notification is not a group summary;
-3. visible/extracted notification text contains a plausible INR/money token;
-4. at least one amount-shaped token has two paise digits;
-5. at least one candidate has non-zero paise (`.01`–`.99`);
-6. notification event is not already queued locally;
-7. notification was posted after the current device enrollment epoch.
+1. notification is not a group summary;
+2. visible/extracted notification text contains a `₹`, `Rs` or `INR` amount with exactly two paise digits;
+3. at least one candidate has non-zero paise (`.01`–`.99`);
+4. notification event is not already queued locally;
+5. notification was posted after the current device enrollment epoch.
 
 Examples that should pass the cheap filter:
 
@@ -56,7 +48,7 @@ OTP 391204
 ordinary personal chat
 ```
 
-However, the phone does **not** need source-specific debit/credit grammar. If a decimal money notification passes the cheap filter but is actually a debit/balance message, the server parser rejects it.
+The phone deliberately does **not** apply source-specific debit/credit grammar. A debit, refund or unrelated notification containing a non-zero paise marker may reach the server; the server parser must reject it before matching. This keeps payment semantics centralized while still avoiding upload of ordinary notifications.
 
 ## Never trust the phone's amount hint
 
@@ -161,13 +153,13 @@ It extracts best-effort:
 
 Unknown decimal-money Google Messages notifications are ignored/unmatched; they are not treated as Kotak by default.
 
-### GPay / Amazon Pay / Slice
+### Generic incoming-payment notifications
 
-Deferred for v4.0. Their notifications may be enabled only in a future explicit rollout with real sanitized fixtures and parser tests.
+Any other package can produce `android_notification` evidence when the bounded visible text positively expresses an incoming payment and contains a PayGate decimal amount. Google Messages messages that are not recognized as Kotak use the equivalent `android_message` source. Real regression fixtures cover generic wallet/bank wording and BHIM notifications, including dotted UPI IDs.
 
-The normalized observation schema is intentionally not tied to a fixed source enum, so adding `gpay_notification`, `amazonpay_notification` or another vetted source later is a parser/routing change rather than a SQLite schema redesign.
+Generic evidence does **not** inherit whichever collection profile happens to be active when the HTTP request arrives. The server first searches historical amount reservations using the exact payable amount and trusted occurrence time. One qualifying profile is used; multiple qualifying profiles are ambiguous and cannot pay either candidate. With no historical candidate, the current active profile is retained only so unmatched diagnostic evidence can still be recorded.
 
-A future app-level notification source does **not** need to know the currently active collection profile. The server parser/routing layer must determine which collection profile(s) that source can represent. If the source cannot be mapped confidently to one profile, it must remain unmatched/ambiguous rather than guessing.
+The normalized observation schema is intentionally not tied to a fixed app package enum, so adding another wallet or bank notification usually requires only parser fixtures unless its wording needs a specialized parser.
 
 ## Normalized observation
 
