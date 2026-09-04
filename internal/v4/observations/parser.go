@@ -58,7 +58,7 @@ var (
 	nonPaymentPattern    = regexp.MustCompile(`(?i)\b(?:reversal|reversed|refund(?:ed)?|cashback|reward|interest|salary|chargeback|settlement|settled|loan|emi|bill|due|reminder)\b`)
 	debitPattern         = regexp.MustCompile(`(?i)\b(?:debited|sent|you\s+paid|paid\s+to|paid\s+for|withdrawn|purchase|spent|transferred\s+to)\b`)
 	upiPattern           = regexp.MustCompile(`(?i)[a-z0-9][a-z0-9._-]{0,127}@[a-z0-9][a-z0-9._-]{0,127}`)
-	fromPattern          = regexp.MustCompile(`(?i)\b(?:from|by)\s+(.+?)(?:\s+on\s+|\s+(?:upi\s+)?(?:ref|rrn|utr)|[.!|\n]|$)`)
+	fromPattern          = regexp.MustCompile(`(?i)\b(?:from|by)\s+(.+?)(?:\s+at\s+\d{1,2}:\d{2}(?:\s*[ap]m)?\b|\s+on\s+|\s+(?:upi\s+)?(?:ref|rrn|utr)|[.!|\n]|$)`)
 	paidYouPayerPattern  = regexp.MustCompile(`(?i)^(.{1,120}?)\s+paid\s+you\b`)
 	paytmOccurredPattern = regexp.MustCompile(`(?i)\breceived\s+on\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{1,2}:\d{2}\s+(?:AM|PM))\b`)
 )
