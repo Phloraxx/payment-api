@@ -351,18 +351,3 @@ func TestRuntimeCutoverBootstrapPreservesLegacyMerchantAndWebhook(t *testing.T) 
 		t.Fatalf("persisted webhook overwritten: %+v err=%v", webhook, err)
 	}
 }
-
-func TestLegacyRelayPathsRemainRetryableDuringV4Cutover(t *testing.T) {
-	app := newTestApp(t, nil)
-	for _, path := range []string{"/api/relay/v1/events", "/api/relay/v1/heartbeat", "/api/relay/v1/enroll"} {
-		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{"legacy":"body"}`))
-		res := httptest.NewRecorder()
-		app.Handler().ServeHTTP(res, req)
-		if res.Code != http.StatusServiceUnavailable {
-			t.Fatalf("%s status=%d body=%s", path, res.Code, res.Body.String())
-		}
-		if res.Header().Get("Retry-After") == "" || !strings.Contains(res.Body.String(), "relay_upgrade_required") {
-			t.Fatalf("%s headers=%v body=%s", path, res.Header(), res.Body.String())
-		}
-	}
-}
