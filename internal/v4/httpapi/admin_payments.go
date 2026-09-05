@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/v4/adminpayments"
+	"github.com/Phloraxx/payment-api/internal/v4/payments"
 )
 
 type adminPaymentResponse struct {
@@ -22,6 +23,7 @@ type adminPaymentResponse struct {
 	CollectionProfileID  string          `json:"collection_profile_id"`
 	UPIIDSnapshot        string          `json:"upi_id_snapshot"`
 	PayeeNameSnapshot    string          `json:"payee_name_snapshot,omitempty"`
+	TransactionNote      string          `json:"transaction_note"`
 	Status               string          `json:"status"`
 	CreatedAt            time.Time       `json:"created_at"`
 	ExpiresAt            time.Time       `json:"expires_at"`
@@ -38,7 +40,8 @@ func adminPayment(p adminpayments.Payment) adminPaymentResponse {
 		ID: p.ID, Name: p.Name, ExternalID: p.ExternalID, Metadata: p.Metadata,
 		RequestedAmountPaise: p.RequestedAmountPaise, PayableAmountPaise: p.PayableAmountPaise,
 		AdjustmentPaise: p.AdjustmentPaise, CollectionProfileID: p.CollectionProfileID,
-		UPIIDSnapshot: p.UPIIDSnapshot, PayeeNameSnapshot: p.PayeeNameSnapshot, Status: p.Status,
+		UPIIDSnapshot: p.UPIIDSnapshot, PayeeNameSnapshot: p.PayeeNameSnapshot,
+		TransactionNote: payments.TransactionNote(p.ID), Status: p.Status,
 		CreatedAt: p.CreatedAt, ExpiresAt: p.ExpiresAt, GraceUntil: p.GraceUntil, ReuseAfter: p.ReuseAfter,
 		PaidAt: p.PaidAt, PayerName: p.PayerName, PayerUPIID: p.PayerUPIID, InternalNote: p.InternalNote,
 	}

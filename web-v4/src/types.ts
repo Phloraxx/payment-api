@@ -38,6 +38,7 @@ export interface Payment {
   collection_profile_id: string;
   upi_id_snapshot: string;
   payee_name_snapshot?: string;
+  transaction_note: string;
   status: PaymentStatus;
   created_at: string;
   expires_at: string;

@@ -122,7 +122,8 @@ Example only; the actual payable amount is randomized from the server-owned free
   "requested_amount": "100.00",
   "payable_amount": "100.37",
   "adjustment": "0.37",
-  "upi_uri": "upi://pay?pa=merchant%40paytm&pn=Merchant&am=101.37&cu=INR",
+  "upi_uri": "upi://pay?am=100.37&cu=INR&pa=merchant%40paytm&pn=Merchant&tn=PayGate%20pay_01J...",
+  "transaction_note": "PayGate pay_01J...",
   "created_at": "2026-09-01T00:30:00+05:30",
   "expires_at": "2026-09-01T00:35:00+05:30",
   "grace_until": "2026-09-01T00:40:00+05:30",
@@ -130,7 +131,7 @@ Example only; the actual payable amount is randomized from the server-owned free
 }
 ```
 
-The response does not need to expose the active profile label to a normal merchant/customer integration. The UPI URI is the canonical payment instruction.
+The response does not need to expose the active profile label to a normal merchant/customer integration. The UPI URI is the canonical payment instruction. `transaction_note` is deterministically derived from the immutable payment ID as `PayGate <payment_id>`; it contains no attendee name, contact information or raw metadata.
 
 ## QR boundary
 
@@ -145,6 +146,8 @@ hosted checkout URL
 ```
 
 The consuming frontend turns `upi_uri` into a QR code and may also use the same URI for UPI intent/open-app behavior where appropriate.
+
+The `tn` query parameter is the human-readable `PayGate <payment_id>` reconciliation note. It is not payment authority: UPI apps may hide, edit, truncate or drop it, so notification parsing and payment matching never require the note. Existing QR codes without `tn` remain valid because destination, exact amount and the server-owned reservation are unchanged. A later GET for a pre-feature pending payment safely derives and returns the note in its canonical URI.
 
 ## Money representation
 
@@ -277,6 +280,7 @@ Example:
       "status": "paid",
       "requested_amount": "100.00",
       "payable_amount": "100.37",
+      "transaction_note": "PayGate pay_01J...",
       "paid_at": "...",
       "payer": {
         "name": "Bijoy P",
@@ -290,7 +294,7 @@ Example:
 }
 ```
 
-The merchant should key its payment handling on PayGate payment ID/webhook event ID, not on `external_id`, because one event ID may have many payments.
+The merchant should key its payment handling on PayGate payment ID/webhook event ID, not on `external_id`, because one event ID may have many payments. `transaction_note` is an additive reconciliation field and does not alter webhook signing or matching semantics.
 
 ## Webhook signing
 

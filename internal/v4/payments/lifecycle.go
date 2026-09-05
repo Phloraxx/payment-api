@@ -36,7 +36,7 @@ func (s *Service) Get(ctx context.Context, id string) (GetResult, error) {
 	if err != nil {
 		return GetResult{}, fmt.Errorf("get payment: %w", err)
 	}
-	return GetResult{Payment: payment, UPIURI: buildUPIURI(payment.UPIIDSnapshot, payment.PayeeNameSnapshot, payment.PayableAmountPaise)}, nil
+	return GetResult{Payment: payment, UPIURI: buildUPIURI(payment.UPIIDSnapshot, payment.PayeeNameSnapshot, payment.PayableAmountPaise, payment.ID)}, nil
 }
 func (s *Service) Cancel(ctx context.Context, id string) (Payment, error) {
 	if s == nil || s.DB == nil || s.DB.SQL == nil {
