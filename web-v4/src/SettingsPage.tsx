@@ -9,7 +9,7 @@ import { Badge, Dot, ErrorNotice, Modal, SectionHead, Spinner, copyText, dateTim
 
 export function SettingsPage({ onSignedOut }: { onSignedOut: () => void }) {
   return <>
-    <SectionHead eyebrow="Configuration" title="Settings" copy="Control where PayGate receives money, how merchants are notified, and which phone is trusted." />
+    <SectionHead eyebrow="Configuration" title="Settings" copy="Control where PayGate receives money, how merchants are notified, and which phones are trusted." />
     <div className="settings-stack">
       <ProfilesSettings />
       <WebhookSettingsPanel />
@@ -28,7 +28,7 @@ function ProfilesSettings() {
   return <section className="panel settings-panel"><div className="panel-head"><div><p className="eyebrow">Money destination</p><h3>Collection profiles</h3><p>Merchants never choose a rail. PayGate uses the one active profile when it creates a payment.</p></div><button className="button button-secondary button-small" onClick={() => setEditing("new")}>Add profile</button></div>
     {error && <ErrorNotice message={error}/>}<div className="profile-grid">{items.map((profile) => <article className={`profile-card ${profile.active ? "active" : ""}`} key={profile.id}>
       <div className="profile-top"><div><Badge tone={profile.active ? "blue" : profile.enabled ? "good" : "neutral"}>{profile.active ? "Active" : profile.enabled ? "Enabled" : "Disabled"}</Badge><h4>{profile.label}</h4></div><span className="profile-id">{profile.id}</span></div>
-      <dl><div><dt>UPI ID</dt><dd>{profile.upi_id}</dd></div><div><dt>Payee</dt><dd>{profile.payee_name || "—"}</dd></div><div><dt>Input</dt><dd>{parserLabel(profile.parser)}</dd></div></dl>
+      <dl><div><dt>UPI ID</dt><dd>{profile.upi_id}</dd></div><div><dt>Payee</dt><dd>{profile.payee_name || "—"}</dd></div><div><dt>Relay</dt><dd>{profile.parser === "legacy" ? "Historical" : "Universal notifications"}</dd></div></dl>
       <div className="profile-actions">{profile.parser !== "legacy" && <><button className="text-button" onClick={() => setDestination(profile)}>Change UPI ID</button><button className="text-button" onClick={() => setEditing(profile)}>Edit profile</button></>}{profile.enabled && !profile.active && <button className="button button-primary button-small" disabled={busy === profile.id} onClick={() => void activate(profile.id)}>{busy === profile.id ? <Spinner/> : "Make active"}</button>}{profile.parser === "legacy" && <span className="muted">Historical only</span>}</div>
     </article>)}</div>
     {editing && <ProfileModal profile={editing === "new" ? undefined : editing} onClose={() => setEditing(undefined)} onSaved={async () => { setEditing(undefined); await load(); }}/>}
@@ -37,14 +37,13 @@ function ProfilesSettings() {
 }
 
 function ProfileModal({ profile, onClose, onSaved }: { profile?: Profile; onClose: () => void; onSaved: () => Promise<void> }) {
-  const [id, setId] = useState(profile?.id ?? ""); const [label, setLabel] = useState(profile?.label ?? ""); const [upi, setUpi] = useState(profile?.upi_id ?? ""); const [payee, setPayee] = useState(profile?.payee_name ?? ""); const [parser, setParser] = useState(profile?.parser ?? "paytm_notification"); const [enabled, setEnabled] = useState(profile?.enabled ?? true); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
-  async function save() { setBusy(true); setError(""); try { await saveProfile({ id: id.trim(), label: label.trim(), upi_id: upi.trim(), payee_name: payee.trim(), parser, enabled }); await onSaved(); } catch (e) { setError(e instanceof ApiError ? e.message : "Could not save profile."); } finally { setBusy(false); } }
+  const [id, setId] = useState(profile?.id ?? ""); const [label, setLabel] = useState(profile?.label ?? ""); const [upi, setUpi] = useState(profile?.upi_id ?? ""); const [payee, setPayee] = useState(profile?.payee_name ?? ""); const compatibilityParser = profile?.parser ?? "paytm_notification"; const [enabled, setEnabled] = useState(profile?.enabled ?? true); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
+  async function save() { setBusy(true); setError(""); try { await saveProfile({ id: id.trim(), label: label.trim(), upi_id: upi.trim(), payee_name: payee.trim(), parser: compatibilityParser, enabled }); await onSaved(); } catch (e) { setError(e instanceof ApiError ? e.message : "Could not save profile."); } finally { setBusy(false); } }
   return <Modal title={profile ? `Edit ${profile.label}` : "Add collection profile"} onClose={onClose}><div className="form-stack">
     <label><span>Profile ID</span><input value={id} disabled={Boolean(profile)} onChange={(e) => setId(e.target.value.toLowerCase().replace(/\s/g, ""))} placeholder="paytm"/></label>
     <label><span>Label</span><input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Paytm"/></label>
     <label><span>Destination UPI ID</span><input value={upi} onChange={(e) => setUpi(e.target.value)} placeholder="merchant@upi"/></label>
     <label><span>Payee name</span><input value={payee} onChange={(e) => setPayee(e.target.value)} placeholder="PayGate"/></label>
-    <label><span>Incoming signal</span><select value={parser} onChange={(e) => setParser(e.target.value)}><option value="paytm_notification">Paytm Business notification</option><option value="kotak_sms">Kotak SMS via Google Messages</option></select></label>
     <label className="toggle-line"><input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)}/><span>Allow new payments on this profile</span></label>
     {error && <ErrorNotice message={error}/>}<div className="form-actions"><button className="button button-secondary" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={busy || !id || !label || !upi} onClick={() => void save()}>{busy ? <><Spinner/> Saving…</> : "Save profile"}</button></div>
   </div></Modal>;
@@ -110,7 +109,7 @@ function PairingModal({ pairing, onClose }: { pairing: PairingSession; onClose: 
 function PasswordPanel({ onSignedOut }: { onSignedOut: () => void }) {
   const [current, setCurrent] = useState(""); const [next, setNext] = useState(""); const [confirm, setConfirm] = useState(""); const [busy, setBusy] = useState(false); const [error, setError] = useState("");
   async function change() { if (next !== confirm) { setError("New passwords do not match."); return; } setBusy(true); setError(""); try { await changePassword(current, next); onSignedOut(); } catch (e) { setError(e instanceof ApiError ? e.message : "Could not change password."); } finally { setBusy(false); } }
-  return <section className="panel settings-panel"><div className="panel-head"><div><p className="eyebrow">Operator access</p><h3>Admin password</h3><p>PayGate has one operator password. Changing it signs out every active web and Android dashboard session; the phone relay itself keeps running.</p></div></div>
+  return <section className="panel settings-panel"><div className="panel-head"><div><p className="eyebrow">Operator access</p><h3>Admin password</h3><p>PayGate has one operator password. Changing it signs out active web admin sessions. QR-connected phones keep their own device identity and relay access until they are disconnected.</p></div></div>
     <div className="password-grid"><label><span>Current password</span><input type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)}/></label><label><span>New password</span><input type="password" autoComplete="new-password" value={next} onChange={(e) => setNext(e.target.value)}/></label><label><span>Confirm new password</span><input type="password" autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)}/></label></div>
     {error && <ErrorNotice message={error}/>}<div className="inline-actions"><button className="button button-primary" disabled={busy || !current || !next || !confirm} onClick={() => void change()}>{busy ? <Spinner/> : "Change password"}</button></div>
   </section>;
@@ -121,4 +120,3 @@ function SecretModal({ title, secret, warning, onClose }: { title: string; secre
 }
 function Prereq({ label, value }: { label: string; value?: boolean }) { return <div className="prereq"><Dot ok={value === true}/><span>{label}</span><strong>{value === undefined ? "Unknown" : value ? "OK" : "Check"}</strong></div>; }
 function isDeviceHealthy(device: DeviceInfo): boolean { return device.notification_access === true && device.listener_connected === true && device.battery_optimization_exempt === true && device.foreground_service === true && device.background_restricted !== true; }
-function parserLabel(value: string): string { return value === "paytm_notification" ? "Paytm Business notification" : value === "kotak_sms" ? "Kotak SMS" : "Historical"; }
