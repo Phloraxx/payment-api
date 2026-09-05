@@ -51,7 +51,7 @@ func (db *DB) BackupTo(ctx context.Context, destination string) (err error) {
 	}
 	defer func() {
 		if err != nil {
-			_ = os.Remove(tempPath)
+			_ = removeBackupTempArtifacts(tempPath)
 		}
 	}()
 
@@ -100,14 +100,25 @@ func (db *DB) BackupTo(ctx context.Context, destination string) (err error) {
 	if err := os.Link(tempPath, destination); err != nil {
 		return fmt.Errorf("publish backup without overwrite: %w", err)
 	}
-	if err := os.Remove(tempPath); err != nil {
+	if err := removeBackupTempArtifacts(tempPath); err != nil {
 		_ = os.Remove(destination)
-		return fmt.Errorf("remove published backup temp name: %w", err)
+		return fmt.Errorf("remove published backup temp artifacts: %w", err)
 	}
 	if err := syncDir(dir); err != nil {
 		return err
 	}
 	return nil
+}
+
+func removeBackupTempArtifacts(path string) error {
+	var errs []error
+	for _, suffix := range []string{"", "-wal", "-shm", "-journal"} {
+		artifact := path + suffix
+		if err := os.Remove(artifact); err != nil && !errors.Is(err, os.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove %s: %w", filepath.Base(artifact), err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 func verifyBackupFile(ctx context.Context, path string) error {

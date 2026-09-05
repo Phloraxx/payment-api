@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -26,6 +27,15 @@ func TestBackupToCreatesVerifiedStandaloneSQLiteCopy(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("backup mode=%o", info.Mode().Perm())
+	}
+	entries, err := os.ReadDir(filepath.Dir(destination))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".paygate-backup-") {
+			t.Fatalf("backup left temporary SQLite artifact %q", entry.Name())
+		}
 	}
 	backup, err := sql.Open("sqlite", (&url.URL{Scheme: "file", Path: destination, RawQuery: "mode=ro"}).String())
 	if err != nil {
