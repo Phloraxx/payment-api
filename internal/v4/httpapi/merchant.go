@@ -135,6 +135,7 @@ type merchantPaymentResponse struct {
 	PayableAmount   string          `json:"payable_amount"`
 	Adjustment      string          `json:"adjustment"`
 	UPIURI          string          `json:"upi_uri"`
+	TransactionNote string          `json:"transaction_note"`
 	CreatedAt       time.Time       `json:"created_at"`
 	ExpiresAt       time.Time       `json:"expires_at"`
 	GraceUntil      time.Time       `json:"grace_until"`
@@ -152,7 +153,8 @@ func paymentResponse(p payments.Payment, upiURI string) merchantPaymentResponse 
 		ID: p.ID, Object: "payment", Name: p.Name, ExternalID: p.ExternalID, Metadata: p.Metadata,
 		Status: p.Status, Currency: "INR", RequestedAmount: money(p.RequestedAmountPaise),
 		PayableAmount: money(p.PayableAmountPaise), Adjustment: money(p.AdjustmentPaise), UPIURI: upiURI,
-		CreatedAt: p.CreatedAt, ExpiresAt: p.ExpiresAt, GraceUntil: p.GraceUntil, PaidAt: p.PaidAt,
+		TransactionNote: payments.TransactionNote(p.ID),
+		CreatedAt:       p.CreatedAt, ExpiresAt: p.ExpiresAt, GraceUntil: p.GraceUntil, PaidAt: p.PaidAt,
 	}
 	if p.Status == "paid" || p.PayerName != "" || p.PayerUPIID != "" {
 		payer := &payerResponse{}

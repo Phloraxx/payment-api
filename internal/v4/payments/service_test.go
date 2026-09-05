@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -60,7 +61,13 @@ func TestCreatePaymentOwnsProfileAmountLifecycleAndUPIURI(t *testing.T) {
 	if p.CollectionProfileID != "paytm" || p.UPIIDSnapshot != "merchant@paytm" {
 		t.Fatalf("profile snapshot = %q %q", p.CollectionProfileID, p.UPIIDSnapshot)
 	}
-	if result.UPIURI != "upi://pay?am=100.37&cu=INR&pa=merchant%40paytm" {
+	parsed, err := url.Parse(result.UPIURI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	if parsed.Scheme != "upi" || parsed.Host != "pay" || query.Get("pa") != "merchant@paytm" ||
+		query.Get("am") != "100.37" || query.Get("cu") != "INR" || query.Get("tn") != TransactionNote(p.ID) {
 		t.Fatalf("UPI URI = %q", result.UPIURI)
 	}
 	if !p.ExpiresAt.Equal(now.Add(5*time.Minute)) || !p.GraceUntil.Equal(now.Add(10*time.Minute)) || !p.ReuseAfter.Equal(now.Add(15*time.Minute)) {
@@ -72,6 +79,39 @@ func TestCreatePaymentOwnsProfileAmountLifecycleAndUPIURI(t *testing.T) {
 	assertCount(t, db.SQL, "payment_history", 1)
 	assertCount(t, db.SQL, "webhook_deliveries", 1)
 	assertCount(t, db.SQL, "idempotency_keys", 1)
+}
+
+func TestUPIURIEncodesDestinationAndDeterministicReference(t *testing.T) {
+	paymentID := "pay_f4lds2mlrvejpxhu7qovszvoay"
+	uri := buildUPIURI("merchant+alias@upi", "Pay Gate Merchant", 10037, paymentID)
+	parsed, err := url.Parse(uri)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	if query.Get("pa") != "merchant+alias@upi" || query.Get("pn") != "Pay Gate Merchant" {
+		t.Fatalf("destination did not round-trip: %q", uri)
+	}
+	if query.Get("tn") != "PayGate "+paymentID {
+		t.Fatalf("transaction note = %q", query.Get("tn"))
+	}
+	if strings.Contains(uri, "Pay+Gate") || !strings.Contains(uri, "Pay%20Gate%20Merchant") {
+		t.Fatalf("spaces were not RFC 3986 encoded: %q", uri)
+	}
+}
+
+func TestGeneratedPaymentIDKeepsTransactionNoteWithinUPILimit(t *testing.T) {
+	paymentID, err := randomID("pay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paymentID) != len("pay_")+26 {
+		t.Fatalf("payment ID length = %d", len(paymentID))
+	}
+	note := TransactionNote(paymentID)
+	if note != "PayGate "+paymentID || len(note) > 80 {
+		t.Fatalf("transaction note = %q (%d characters)", note, len(note))
+	}
 }
 
 func TestDestinationChangeAffectsOnlyFuturePayments(t *testing.T) {
@@ -252,7 +292,7 @@ func TestProfileSwitchAffectsOnlyNewPayments(t *testing.T) {
 	if second.Payment.PayableAmountPaise != 10037 {
 		t.Fatalf("profile-scoped amount should allow same exact amount, got %d", second.Payment.PayableAmountPaise)
 	}
-	if !strings.Contains(second.UPIURI, "pa=merchant%40kotak") || !strings.Contains(second.UPIURI, "pn=PayGate+Kotak") {
+	if !strings.Contains(second.UPIURI, "pa=merchant%40kotak") || !strings.Contains(second.UPIURI, "pn=PayGate%20Kotak") {
 		t.Fatalf("Kotak UPI URI = %q", second.UPIURI)
 	}
 }
@@ -323,13 +363,21 @@ func TestWebhookPayloadUsesDurableDeliveryEventID(t *testing.T) {
 		t.Fatal(err)
 	}
 	var envelope struct {
-		ID string `json:"id"`
+		ID   string `json:"id"`
+		Data struct {
+			Payment struct {
+				TransactionNote string `json:"transaction_note"`
+			} `json:"payment"`
+		} `json:"data"`
 	}
 	if err := json.Unmarshal([]byte(payload), &envelope); err != nil {
 		t.Fatal(err)
 	}
 	if envelope.ID != eventID {
 		t.Fatalf("payload event ID %q != durable row ID %q", envelope.ID, eventID)
+	}
+	if envelope.Data.Payment.TransactionNote != TransactionNote(result.Payment.ID) {
+		t.Fatalf("webhook transaction note = %q", envelope.Data.Payment.TransactionNote)
 	}
 }
 

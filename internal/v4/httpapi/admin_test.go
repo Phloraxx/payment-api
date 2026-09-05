@@ -213,7 +213,9 @@ func TestAdminPaymentsFilterDetailAndEdit(t *testing.T) {
 	}
 
 	rr = adminRequest(t, f, http.MethodGet, "/admin/payments/"+one.ID, nil, false)
-	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"payer_name":"Bijoy P"`) || !strings.Contains(rr.Body.String(), `"payment.paid"`) {
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"payer_name":"Bijoy P"`) ||
+		!strings.Contains(rr.Body.String(), `"payment.paid"`) ||
+		!strings.Contains(rr.Body.String(), `"transaction_note":"PayGate `+one.ID+`"`) {
 		t.Fatalf("detail status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	for _, key := range []string{`"created_at"`, `"event_type"`, `"changes"`} {

@@ -86,6 +86,7 @@ function PaymentDrawer({ id, profiles, onClose, onChanged }: { id: string; profi
         <Detail label="Grace until" value={dateTime(payment.grace_until)}/><Detail label="Reusable after" value={dateTime(payment.reuse_after)}/>
         <Detail label="Paid at" value={dateTime(payment.paid_at)}/><Detail label="Observed payer" value={payment.payer_name || "—"}/>
         <Detail label="Payer UPI ID" value={payment.payer_upi_id || "—"}/><Detail label="Payee snapshot" value={payment.payee_name_snapshot || "—"}/>
+        <Detail label="Transaction note" value={payment.transaction_note}/>
       </div>
       <div className="drawer-actions"><button className="button button-primary" onClick={() => setEditing(true)}>Edit payment</button><button className="button button-secondary" onClick={() => void load()}>Refresh</button></div>
       {payment.internal_note && <div className="note-card"><span>Internal note</span><p>{payment.internal_note}</p></div>}

@@ -134,7 +134,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (CreateResult, 
 		}
 		if replayed != nil {
 			result.Payment = *replayed
-			result.UPIURI = buildUPIURI(replayed.UPIIDSnapshot, replayed.PayeeNameSnapshot, replayed.PayableAmountPaise)
+			result.UPIURI = buildUPIURI(replayed.UPIIDSnapshot, replayed.PayeeNameSnapshot, replayed.PayableAmountPaise, replayed.ID)
 			result.Replayed = true
 			return nil
 		}
@@ -205,7 +205,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (CreateResult, 
 		}
 
 		result.Payment = payment
-		result.UPIURI = buildUPIURI(profile.UPIID, profile.PayeeName, payable)
+		result.UPIURI = buildUPIURI(profile.UPIID, profile.PayeeName, payable, payment.ID)
 		return nil
 	})
 	if err != nil {
@@ -360,7 +360,11 @@ func loadPayment(ctx context.Context, tx paymentQueryRower, id string) (Payment,
 	return p, nil
 }
 
-func buildUPIURI(upiID, payeeName string, amountPaise int64) string {
+func TransactionNote(paymentID string) string {
+	return "PayGate " + paymentID
+}
+
+func buildUPIURI(upiID, payeeName string, amountPaise int64, paymentID string) string {
 	q := url.Values{}
 	q.Set("pa", upiID)
 	if strings.TrimSpace(payeeName) != "" {
@@ -368,7 +372,8 @@ func buildUPIURI(upiID, payeeName string, amountPaise int64) string {
 	}
 	q.Set("am", moneyString(amountPaise))
 	q.Set("cu", "INR")
-	return "upi://pay?" + q.Encode()
+	q.Set("tn", TransactionNote(paymentID))
+	return "upi://pay?" + strings.ReplaceAll(q.Encode(), "+", "%20")
 }
 
 func paymentEventPayload(eventID, eventType string, p Payment) ([]byte, error) {
@@ -379,7 +384,8 @@ func paymentEventPayloadAt(eventID, eventType string, p Payment, eventAt time.Ti
 	paymentData := map[string]any{
 		"id": p.ID, "name": p.Name, "external_id": p.ExternalID, "status": p.Status,
 		"requested_amount": moneyString(p.RequestedAmountPaise), "payable_amount": moneyString(p.PayableAmountPaise),
-		"metadata": json.RawMessage(p.Metadata),
+		"metadata":         json.RawMessage(p.Metadata),
+		"transaction_note": TransactionNote(p.ID),
 	}
 	if p.PaidAt != nil {
 		paymentData["paid_at"] = p.PaidAt.UTC().Format(time.RFC3339Nano)

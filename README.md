@@ -76,7 +76,7 @@ Content-Type: application/json
   "metadata": { "registration_id": "reg_284" }
 }
 ```
-The response is provider-blind and contains PayGate's payment ID, status, requested amount, exact payable amount, adjustment, lifecycle timestamps and the canonical `upi://` URI. Money is stored internally as integer paise.
+The response is provider-blind and contains PayGate's payment ID, status, requested amount, exact payable amount, adjustment, lifecycle timestamps, deterministic `transaction_note` (`PayGate <payment_id>`) and canonical `upi://` URI. The URI carries the same note in its RFC 3986-encoded `tn` parameter. Money is stored internally as integer paise.
 
 Useful routes:
 

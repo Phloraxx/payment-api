@@ -99,8 +99,14 @@ func TestMerchantCreatePaymentContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if parsed.Scheme != "upi" || parsed.Host != "pay" || parsed.Query().Get("pa") != "paygate@paytm" || parsed.Query().Get("am") != response.PayableAmount {
+	if parsed.Scheme != "upi" || parsed.Host != "pay" || parsed.Query().Get("pa") != "paygate@paytm" ||
+		parsed.Query().Get("am") != response.PayableAmount || parsed.Query().Get("tn") != response.TransactionNote {
 		t.Fatalf("upi_uri = %q", response.UPIURI)
+	}
+	if response.TransactionNote != "PayGate "+response.ID ||
+		strings.Contains(response.TransactionNote, response.Name) ||
+		strings.Contains(response.TransactionNote, "reg_284") {
+		t.Fatalf("unsafe transaction note = %q", response.TransactionNote)
 	}
 	if bytes.Contains(recorder.Body.Bytes(), []byte(`"collection_profile"`)) || bytes.Contains(recorder.Body.Bytes(), []byte(`"paymentAccount"`)) {
 		t.Fatalf("internal routing leaked: %s", recorder.Body.String())
@@ -123,7 +129,7 @@ func TestMerchantCreateReplayAndConflict(t *testing.T) {
 		t.Fatalf("replay status=%d body=%s", second.Code, second.Body.String())
 	}
 	two := decodePaymentResponse(t, second)
-	if one.ID != two.ID || one.PayableAmount != two.PayableAmount || one.UPIURI != two.UPIURI {
+	if one.ID != two.ID || one.PayableAmount != two.PayableAmount || one.UPIURI != two.UPIURI || one.TransactionNote != two.TransactionNote {
 		t.Fatalf("replay changed payment: one=%+v two=%+v", one, two)
 	}
 	conflict := merchantRequest(t, f, http.MethodPost, "/v1/payments", `{"amount":200,"name":"Sourav P Bijoy","external_id":"evt_1"}`, "idem-1")
@@ -173,15 +179,20 @@ func TestMerchantGetAndCancel(t *testing.T) {
 	create := merchantRequest(t, f, http.MethodPost, "/v1/payments", `{"amount":100,"name":"Sourav","external_id":"evt_1"}`, "idem-get")
 	payment := decodePaymentResponse(t, create)
 	got := merchantRequest(t, f, http.MethodGet, "/v1/payments/"+payment.ID, "", "")
-	if got.Code != http.StatusOK || decodePaymentResponse(t, got).ID != payment.ID {
+	gotPayment := decodePaymentResponse(t, got)
+	if got.Code != http.StatusOK || gotPayment.ID != payment.ID || gotPayment.TransactionNote != payment.TransactionNote || gotPayment.UPIURI != payment.UPIURI {
 		t.Fatalf("get status=%d body=%s", got.Code, got.Body.String())
 	}
 	cancelled := merchantRequest(t, f, http.MethodPost, "/v1/payments/"+payment.ID+"/cancel", "", "")
-	if cancelled.Code != http.StatusOK || decodePaymentResponse(t, cancelled).Status != "cancelled" {
+	cancelledPayment := decodePaymentResponse(t, cancelled)
+	if cancelled.Code != http.StatusOK || cancelledPayment.Status != "cancelled" ||
+		cancelledPayment.TransactionNote != payment.TransactionNote || cancelledPayment.UPIURI != payment.UPIURI {
 		t.Fatalf("cancel status=%d body=%s", cancelled.Code, cancelled.Body.String())
 	}
 	again := merchantRequest(t, f, http.MethodPost, "/v1/payments/"+payment.ID+"/cancel", "", "")
-	if again.Code != http.StatusOK || decodePaymentResponse(t, again).Status != "cancelled" {
+	againPayment := decodePaymentResponse(t, again)
+	if again.Code != http.StatusOK || againPayment.Status != "cancelled" ||
+		againPayment.TransactionNote != payment.TransactionNote || againPayment.UPIURI != payment.UPIURI {
 		t.Fatalf("idempotent cancel status=%d body=%s", again.Code, again.Body.String())
 	}
 }
