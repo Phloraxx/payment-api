@@ -131,16 +131,11 @@ func deviceOperationalRoute(method, path string) bool {
 			strings.HasPrefix(path, "/admin/payments/") || path == "/admin/settings" ||
 			path == "/admin/profiles" || path == "/admin/device"
 	}
-	if method == http.MethodPatch && strings.HasPrefix(path, "/admin/payments/") {
-		return true
-	}
-	if method == http.MethodPatch && path == "/admin/profiles/active/destination" {
-		return true
-	}
-	if method == http.MethodPost && strings.HasPrefix(path, "/admin/webhooks/") && strings.HasSuffix(path, "/retry") {
-		return true
-	}
-	return false
+	// A paired phone is evidence transport, not a payment authority. The only
+	// device-authenticated mutation is the operator-requested active UPI destination
+	// change. Payment edits, webhook retries, key/profile administration and pairing
+	// remain web-admin-only even if the Android UI accidentally exposes them.
+	return method == http.MethodPatch && path == "/admin/profiles/active/destination"
 }
 
 type adminLoginRequest struct {
