@@ -17,7 +17,10 @@ import (
 	"github.com/Phloraxx/payment-api/internal/v4/webhooks"
 )
 
-const adminCookieName = "paygate_admin"
+const (
+	adminCookieName       = "paygate_admin"
+	adminLoginConcurrency = 2
+)
 
 type AdminHandler struct {
 	Auth           *auth.Service
@@ -29,13 +32,15 @@ type AdminHandler struct {
 	Webhooks       *webhooks.Service
 	PairingBaseURL string
 	SecureCookies  bool
+	loginSlots     chan struct{}
 	mux            *http.ServeMux
 }
 
 func NewAdminHandler(authService *auth.Service, paymentService *adminpayments.Service, operatorService *operator.Service,
 	settingsService *operator.SettingsService, profileService *profiles.Service, relayService *relay.Service, webhookService *webhooks.Service) *AdminHandler {
 	h := &AdminHandler{Auth: authService, Payments: paymentService, Operator: operatorService, Settings: settingsService,
-		Profiles: profileService, Relay: relayService, Webhooks: webhookService, SecureCookies: true, mux: http.NewServeMux()}
+		Profiles: profileService, Relay: relayService, Webhooks: webhookService, SecureCookies: true,
+		loginSlots: make(chan struct{}, adminLoginConcurrency), mux: http.NewServeMux()}
 	h.registerRoutes()
 	return h
 }
@@ -158,6 +163,12 @@ func (h *AdminHandler) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	if !h.acquireLoginSlot() {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "login_busy", "Too many login attempts are already being verified")
+		return
+	}
+	defer h.releaseLoginSlot()
 	session, err := h.Auth.CreateAdminSession(r.Context(), input.Password)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidCredentials) || errors.Is(err, auth.ErrNotInitialized) {
@@ -173,6 +184,25 @@ func (h *AdminHandler) login(w http.ResponseWriter, r *http.Request) {
 		response.Token = session.Token
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (h *AdminHandler) acquireLoginSlot() bool {
+	if h == nil || h.loginSlots == nil {
+		return true
+	}
+	select {
+	case h.loginSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *AdminHandler) releaseLoginSlot() {
+	if h == nil || h.loginSlots == nil {
+		return
+	}
+	<-h.loginSlots
 }
 
 func (h *AdminHandler) logout(w http.ResponseWriter, r *http.Request) {
