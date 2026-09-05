@@ -3,12 +3,21 @@ package httpapi
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Phloraxx/payment-api/internal/v4/adminpayments"
 	"github.com/Phloraxx/payment-api/internal/v4/auth"
@@ -268,5 +277,109 @@ func TestAdminPasswordChangeRequiresCurrentAndRevokesAllSessions(t *testing.T) {
 	f.handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("new password login status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestDeviceOperationalRouteKeepsPhoneEvidenceOnly(t *testing.T) {
+	allowed := []struct{ method, path string }{
+		{http.MethodGet, "/admin/overview"},
+		{http.MethodGet, "/admin/activity"},
+		{http.MethodGet, "/admin/payments"},
+		{http.MethodGet, "/admin/payments/pay_test"},
+		{http.MethodGet, "/admin/settings"},
+		{http.MethodGet, "/admin/profiles"},
+		{http.MethodGet, "/admin/device"},
+		{http.MethodPatch, "/admin/profiles/active/destination"},
+	}
+	for _, tc := range allowed {
+		if !deviceOperationalRoute(tc.method, tc.path) {
+			t.Fatalf("expected device route %s %s to be allowed", tc.method, tc.path)
+		}
+	}
+
+	blocked := []struct{ method, path string }{
+		{http.MethodPatch, "/admin/payments/pay_test"},
+		{http.MethodPost, "/admin/webhooks/wh_test/retry"},
+		{http.MethodPost, "/admin/profiles/bhim/activate"},
+		{http.MethodPost, "/admin/api-keys"},
+		{http.MethodDelete, "/admin/device/device_test"},
+	}
+	for _, tc := range blocked {
+		if deviceOperationalRoute(tc.method, tc.path) {
+			t.Fatalf("device route %s %s must remain web-admin-only", tc.method, tc.path)
+		}
+	}
+}
+
+func pairAdminTestDevice(t *testing.T, f adminHTTPFixture) (*ecdsa.PrivateKey, string) {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+	session, err := f.handler.Relay.CreatePairing(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paired, err := f.handler.Relay.PairDevice(context.Background(), relay.PairDeviceInput{
+		Token: session.Token, Name: "evidence-only test phone", PublicKeyPEM: string(publicKeyPEM), AppVersion: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return privateKey, paired.DeviceID
+}
+
+func signedDeviceAdminRequest(t *testing.T, f adminHTTPFixture, privateKey *ecdsa.PrivateKey, deviceID, method, path string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	timestamp := strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
+	canonical := relay.CanonicalRequest(method, path, timestamp, body)
+	digest := sha256.Sum256([]byte(canonical))
+	signature, err := ecdsa.SignASN1(rand.Reader, privateKey, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("X-PayGate-Relay-Device", deviceID)
+	req.Header.Set("X-PayGate-Relay-Time", timestamp)
+	req.Header.Set("X-PayGate-Relay-Signature", base64.StdEncoding.EncodeToString(signature))
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, req)
+	return rr
+}
+
+func TestPairedDeviceCannotMutatePaymentOrWebhookAuthority(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	privateKey, deviceID := pairAdminTestDevice(t, f)
+	payment := createAdminTestPayment(t, f, "Evidence boundary", "evt_device_auth", "device-auth")
+
+	rr := signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/payments/"+payment.ID, []byte(`{"status":"paid"}`))
+	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), `"admin_required"`) {
+		t.Fatalf("device payment edit status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var status string
+	if err := f.db.SQL.QueryRow(`SELECT status FROM payments WHERE id=?`, payment.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" {
+		t.Fatalf("device changed payment status to %q", status)
+	}
+
+	rr = signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPost, "/admin/webhooks/wh_test/retry", nil)
+	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), `"admin_required"`) {
+		t.Fatalf("device webhook retry status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", []byte(`{"upi_id":"paygate-new@upi","payee_name":"PayGate"}`))
+	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"upi_id":"paygate-new@upi"`) {
+		t.Fatalf("device destination update status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }
