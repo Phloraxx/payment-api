@@ -42,7 +42,7 @@ func run() error {
 	server := &http.Server{
 		Addr: app.Config.ListenAddr, Handler: app.Handler(),
 		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second,
-		WriteTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second,
+		WriteTimeout: 30 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 64 << 10,
 	}
 	errCh := make(chan error, 1)
 	go func() {

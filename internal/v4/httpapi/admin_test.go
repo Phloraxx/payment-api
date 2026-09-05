@@ -161,6 +161,32 @@ func TestAdminSessionCookieAndAndroidBearer(t *testing.T) {
 		t.Fatalf("unauthenticated overview status=%d", rr.Code)
 	}
 }
+func TestAdminLoginRejectsWhenVerificationCapacityIsSaturated(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	for i := 0; i < cap(f.handler.loginSlots); i++ {
+		f.handler.loginSlots <- struct{}{}
+	}
+	defer func() {
+		for len(f.handler.loginSlots) > 0 {
+			<-f.handler.loginSlots
+		}
+	}()
+
+	body := `{"password":"correct horse battery staple"}`
+	req := httptest.NewRequest(http.MethodPost, "/admin/session", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") != "1" || !strings.Contains(rr.Body.String(), `"code":"login_busy"`) {
+		t.Fatalf("saturated login status=%d retry=%q body=%s", rr.Code, rr.Header().Get("Retry-After"), rr.Body.String())
+	}
+
+	for len(f.handler.loginSlots) > 0 {
+		<-f.handler.loginSlots
+	}
+	_ = loginAdmin(t, f.handler, false)
+}
+
 func TestAdminPaymentsFilterDetailAndEdit(t *testing.T) {
 	f := newAdminHTTPFixture(t)
 	one := createAdminTestPayment(t, f, "Sourav P Bijoy", "evt_shared", "p1")
