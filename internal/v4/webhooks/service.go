@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/v4/storage"
@@ -30,6 +32,9 @@ type Config struct {
 	Endpoint          string
 	Secret            string
 	AllowInsecureHTTP bool
+	// allowPrivateNetwork is test-only and intentionally not configurable by
+	// runtime settings or environment variables.
+	allowPrivateNetwork bool
 }
 type Service struct {
 	DB          *storage.DB
@@ -53,7 +58,7 @@ type Delivery struct {
 
 func NewService(db *storage.DB, cfg Config) *Service {
 	return &Service{
-		DB: db, config: cfg, HTTPClient: newHTTPClient(), Now: time.Now,
+		DB: db, config: cfg, HTTPClient: newHTTPClient(cfg.allowPrivateNetwork), Now: time.Now,
 		MaxAttempts: defaultMaxAttempts, BatchSize: defaultBatchSize,
 		Lease: defaultLease, wake: make(chan struct{}, 1),
 	}
@@ -264,13 +269,21 @@ func (s *Service) RetryOne(ctx context.Context, id string) error {
 	if id == "" {
 		return errors.New("webhook id is required")
 	}
-	result, err := s.DB.SQL.ExecContext(ctx, `UPDATE webhook_deliveries
-		SET status='pending',attempts=0,next_attempt_at=?,last_http_status=NULL,last_error=NULL,delivered_at=NULL
-		WHERE id=? AND status IN ('retry','exhausted')`, s.now().UnixMilli(), id)
+	var rowsAffected int64
+	err := s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE webhook_deliveries
+			SET status='pending',attempts=0,next_attempt_at=?,last_http_status=NULL,last_error=NULL,delivered_at=NULL
+			WHERE id=? AND status IN ('retry','exhausted')`, s.now().UnixMilli(), id)
+		if err != nil {
+			return fmt.Errorf("retry webhook: %w", err)
+		}
+		rowsAffected, _ = result.RowsAffected()
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("retry webhook: %w", err)
+		return err
 	}
-	if rows, _ := result.RowsAffected(); rows != 1 {
+	if rowsAffected != 1 {
 		return errors.New("webhook is not retryable")
 	}
 	s.Wake()
@@ -296,6 +309,11 @@ func ValidateConfig(cfg Config) error {
 	}
 	if u.Scheme != "https" && !(cfg.AllowInsecureHTTP && u.Scheme == "http") {
 		return fmt.Errorf("%w: HTTPS endpoint is required", ErrInvalidConfig)
+	}
+	if !cfg.allowPrivateNetwork {
+		if ip := net.ParseIP(u.Hostname()); ip != nil && restrictedIP(ip) {
+			return fmt.Errorf("%w: endpoint must not target a private or local address", ErrInvalidConfig)
+		}
 	}
 	return nil
 }
@@ -340,17 +358,68 @@ func (s *Service) now() time.Time {
 
 func (s *Service) client() *http.Client {
 	if s.HTTPClient == nil {
-		return newHTTPClient()
+		cfg := s.ConfigSnapshot()
+		return newHTTPClient(cfg.allowPrivateNetwork)
 	}
 	return s.HTTPClient
 }
-func newHTTPClient() *http.Client {
+
+func newHTTPClient(allowPrivateNetwork bool) *http.Client {
 	return &http.Client{
 		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			Proxy:       nil,
+			DialContext: restrictedDialer(allowPrivateNetwork),
+		},
 		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
+}
+
+func restrictedDialer(allowPrivateNetwork bool) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+	if !allowPrivateNetwork {
+		dialer.ControlContext = func(_ context.Context, network, address string, _ syscall.RawConn) error {
+			if network != "tcp" && network != "tcp4" && network != "tcp6" {
+				return fmt.Errorf("unsupported webhook network %q", network)
+			}
+			host, _, err := net.SplitHostPort(address)
+			if err != nil {
+				return fmt.Errorf("parse webhook destination %q: %w", address, err)
+			}
+			ip := net.ParseIP(strings.Trim(host, "[]"))
+			if ip == nil {
+				return errors.New("webhook destination did not resolve to an IP address")
+			}
+			if restrictedIP(ip) {
+				return errors.New("webhook destination resolves to a private address")
+			}
+			return nil
+		}
+	}
+	return dialer.DialContext
+}
+
+func restrictedIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return v4[0] == 0 ||
+			(v4[0] == 10) ||
+			(v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127) ||
+			(v4[0] == 127) ||
+			(v4[0] == 169 && v4[1] == 254) ||
+			(v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31) ||
+			(v4[0] == 192 && (v4[1] == 0 || v4[1] == 168)) ||
+			(v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)) ||
+			(v4[0] == 224 || v4[0] >= 240) ||
+			(v4[0] == 255 && v4[1] == 255)
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsUnspecified() || ip.IsMulticast() ||
+		(ip[0] == 0xfe && ip[1]&0xc0 == 0xc0)
 }
 
 func nullableStatus(status int) any {
