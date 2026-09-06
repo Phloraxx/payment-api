@@ -135,14 +135,9 @@ Operator auth controls management UI only.
 
 ## NotificationListenerService
 
-Initial allowlist:
+The listener captures notifications from any package; package identity is retained as evidence and is not an Android payment allowlist. Paytm and Google Messages have specialized server parsers, while unknown packages remain eligible for the generic decimal-money prefilter.
 
-```text
-com.paytm.business
-com.google.android.apps.messaging
-```
-
-GPay/Slice are deferred.
+GPay/Slice are deferred as automatic confirmation sources. Their notifications may still be captured as evidence and remain ambiguous/manual when a payment candidate exists.
 
 Phone applies only the generic non-`.00` decimal-money prefilter. It does not decide incoming-credit semantics/profile/payment match.
 
@@ -230,16 +225,17 @@ No permanent aggressive wake lock.
 
 No manual server URL/device ID/pairing secret in normal UX.
 
-## One active phone
+## Additive relay phones
 
-V4.0 assumes one payment-notification phone.
+V4.0 supports one or more payment-notification phones concurrently. Each device has its own signed identity, queue and health state.
 
-Pairing another should be a **Replace phone** action:
+Pairing another phone is an **Add phone** action:
 
-- new phone enrolls successfully first;
-- server activates new device and revokes/disables old one atomically or in one controlled flow;
-- old historical device record remains for audit;
-- avoid two active devices delivering the same payment stream.
+- the new phone enrolls successfully;
+- existing enabled phones remain enabled;
+- each device can be revoked independently;
+- historical device records remain for audit;
+- duplicate source events are deduplicated server-side without disabling a healthy peer.
 
 ## Existing production phone
 
@@ -313,7 +309,7 @@ Immutable:
 
 ```text
 Paytm payment detected · ₹100.37 · matched to Sourav P Bijoy
-Kotak payment detected · ₹500.42 · unmatched
+Kotak payment detected · ₹500.42 · ambiguous; operator confirmation required
 Payment updated · operator
 Webhook delivered · 200
 Phone replaced
@@ -325,7 +321,7 @@ Primary UI should not expose implementation words such as `evidence_reference`, 
 
 ### Notification/queue
 
-- allowlist Paytm + Google Messages only;
+- source-agnostic capture from any package; specialized Paytm/Google Messages parser routing;
 - decimal money with non-zero paise passes;
 - `.00` is filtered;
 - unrelated personal message never queues;
@@ -340,7 +336,7 @@ Primary UI should not expose implementation words such as `evidence_reference`, 
 - valid one-time App Link enrollment;
 - expired/used token rejected;
 - existing key reused after app upgrade;
-- Replace phone leaves one active relay device;
+- multiple relay phones may remain enabled concurrently;
 - revoke blocks signed relay requests;
 - operator logout does not stop relay.
 

@@ -8,7 +8,7 @@
 
 # PayGate
 
-PayGate creates a payment instruction with a unique exact payable amount, watches supported incoming-payment notifications through one trusted Android phone, and marks the matching payment only when the server can do so unambiguously.
+PayGate creates a payment instruction with a unique exact payable amount, watches supported incoming-payment notifications through one or more independently revocable Android relay phones, and changes payment state only when the server has an origin-bound confirmation it can trust.
 
 The payer sends money directly to the configured UPI account. PayGate does not custody, route, or settle funds; notification matching is an evidence mechanism rather than a bank/acquirer settlement guarantee.
 
@@ -54,6 +54,7 @@ v4.0 currently supports:
 
 - **Paytm for Business** payment notifications;
 - **Kotak** credit notifications delivered by Google Messages on the PayGate phone.
+Paytm package-bound notifications are currently the only automatic confirmation source. Kotak/Google Messages and package-agnostic notifications remain signed evidence for web-admin confirmation until an independent sender/provider proof is available.
 
 The merchant does not select Paytm or Kotak. PayGate snapshots the active profile and destination when the payment is created, so later profile changes cannot alter an existing payment.
 
@@ -108,7 +109,7 @@ The web UI is embedded in the v4 server image. The Android app remains a separat
 
 The PayGate phone uses `NotificationListenerService`, a durable local queue and a P-256 ECDSA key stored in Android Keystore.
 
-Android performs only cheap source allowlisting and notification capture. The server owns source-specific parsing, incoming-credit semantics, profile inference, matching, deduplication and payment mutation.
+Android performs only cheap source-agnostic notification capture. The server owns source-specific parsing, incoming-credit semantics, profile inference, source trust, matching, deduplication and payment mutation.
 
 The foreground relay is intentionally independent of operator login and is designed to survive screen lock, Doze, process recreation, temporary network loss and normal Battery Saver when the app is exempt from battery optimization.
 ## Persistence and recovery
@@ -150,7 +151,7 @@ CI validates the v4 frontend, all retained Go packages, static analysis and the 
 - plaintext merchant/webhook secrets are never persisted when a verifier/hash is sufficient;
 - Android private signing keys remain non-exportable in Android Keystore;
 - payer identity and raw notification detail stay out of unauthenticated/public payment views;
-- a false-positive confirmation is considered worse than a delayed/manual outcome, so matching fails closed;
+- a false-positive confirmation is considered worse than a delayed/manual outcome, so only origin-bound evidence may transition payment state; generic notifications and Google Messages/SMS remain evidence for operator confirmation;
 - never run a second PayGate process against the live SQLite volume.
 
 ## Documentation

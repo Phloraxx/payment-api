@@ -272,7 +272,7 @@ device_model TEXT
 android_version TEXT
 ```
 
-v4.0 should prefer **one active payment-relay device** to avoid duplicate phone streams. Pairing a replacement phone should be an explicit operator action.
+Multiple payment-relay devices may remain enabled concurrently. Pairing adds a device row; explicit operator revocation disables only the selected device, while historical device records remain for audit.
 
 ### `pairing_sessions`
 
@@ -489,7 +489,7 @@ Plus application checks:
 - payment count plausible;
 - latest payments/history readable;
 - collection profile state valid;
-- one active relay device invariant valid;
+- every enabled relay device is independently valid; no singleton active-device invariant;
 - pending webhook counts readable.
 
 Do not run a full integrity scan on every request/health check.

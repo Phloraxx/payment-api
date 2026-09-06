@@ -92,7 +92,7 @@ Owns:
 - short-lived QR pairing sessions;
 - enrolled Android public key;
 - signed request verification;
-- one active relay-device policy for v4.0;
+- additive relay-device enrollment and independent revocation;
 - heartbeat/device health;
 - event deduplication.
 
@@ -243,7 +243,7 @@ not requested amount.
 
 ### Android
 
-- package allowlist;
+- capture package identity as evidence; do not maintain an Android payment-package allowlist;
 - cheap generic decimal-money prefilter;
 - capture notification package/key/text/post time;
 - stable local event ID;
@@ -290,9 +290,8 @@ Oracle/Docker host
   local paygate.db + WAL/SHM
   completed-backup exporter
 
-Android phone
-  one PayGate APK
-```
+Android phones
+  one or more additive PayGate APK relay clients
 
 Production invariant remains one PayGate process owning the live SQLite database.
 
@@ -311,11 +310,11 @@ Production invariant remains one PayGate process owning the live SQLite database
 
 ## Future-source extension rule
 
-Adding GPay/Slice later should require only:
+Adding GPay/Slice or another source later should require only:
 
-1. allowlist a new Android package if necessary;
-2. add server parser + sanitized fixtures;
-3. map parser to a collection profile/source;
+1. add parser + sanitized fixtures while the source-agnostic transport remains unchanged;
+2. map parser output to a collection profile/source;
+3. independently authenticate the source before allowing automatic confirmation; otherwise retain evidence for operator confirmation;
 4. pass the same observation/matching pipeline.
 
 It must not require changing merchant payment creation or Android/server ownership boundaries.

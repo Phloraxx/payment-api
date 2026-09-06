@@ -414,7 +414,7 @@ func restrictedIP(ip net.IP) bool {
 			(v4[0] == 172 && v4[1] >= 16 && v4[1] <= 31) ||
 			(v4[0] == 192 && (v4[1] == 0 || v4[1] == 168)) ||
 			(v4[0] == 198 && (v4[1] == 18 || v4[1] == 19)) ||
-			(v4[0] == 224 || v4[0] >= 240) ||
+			(v4[0] >= 224) ||
 			(v4[0] == 255 && v4[1] == 255)
 	}
 	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||

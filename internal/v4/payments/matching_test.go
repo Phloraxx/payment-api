@@ -275,6 +275,45 @@ func TestCancelledPaymentRejectsMoneyAfterCancellation(t *testing.T) {
 		t.Fatalf("payment status = %s", got.Payment.Status)
 	}
 }
+func TestLatePreCancellationMatchDoesNotOpenPostCancellationWindow(t *testing.T) {
+	ctx := context.Background()
+	db := openAllocatorDB(t)
+	base := time.UnixMilli(1_788_200_000_000).UTC()
+	s := newTestService(t, db, base)
+	created, err := s.Create(ctx, validCreateInput("cancel-late-match"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelAt := base.Add(2 * time.Minute)
+	s.Now = func() time.Time { return cancelAt }
+	if _, err := s.Cancel(ctx, created.Payment.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	preOccurred := base.Add(time.Minute)
+	preReceived := base.Add(5 * time.Minute)
+	insertRelayEvent(t, db, "relay_cancel_late_pre", "source_cancel_late_pre", observations.PaytmBusinessPackage, preOccurred, preReceived)
+	s.Now = func() time.Time { return preReceived }
+	pre, err := s.ApplyObservation(ctx, "relay_cancel_late_pre", paytmObservation(created.Payment.PayableAmountPaise, preOccurred, "notification_posted_at"), preReceived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pre.Result != "matched" || !pre.Transitioned {
+		t.Fatalf("late pre-cancel result = %+v", pre)
+	}
+
+	postOccurred := base.Add(4 * time.Minute)
+	postReceived := base.Add(6 * time.Minute)
+	insertRelayEvent(t, db, "relay_cancel_late_post", "source_cancel_late_post", observations.PaytmBusinessPackage, postOccurred, postReceived)
+	s.Now = func() time.Time { return postReceived }
+	post, err := s.ApplyObservation(ctx, "relay_cancel_late_post", paytmObservation(created.Payment.PayableAmountPaise, postOccurred, "notification_posted_at"), postReceived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if post.Result != "unmatched" || post.PaymentID != "" || post.Transitioned {
+		t.Fatalf("post-cancel result = %+v", post)
+	}
+}
 func insertHistoricalReservation(t *testing.T, db *storage.DB, paymentID, profileID string, created time.Time, releasedAt *time.Time, status string) {
 	t.Helper()
 	if profileID == "kotak" {

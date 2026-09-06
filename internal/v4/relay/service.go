@@ -349,7 +349,7 @@ func (s *Service) acceptEvent(ctx context.Context, device verifiedDevice, in Eve
 	var result IngestResult
 	needsProcessing := false
 	err := s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
-		updated, err := tx.ExecContext(ctx, `UPDATE relay_devices SET last_seen_at=? WHERE id=? AND enabled=1`, now.UnixMilli(), device.ID)
+		updated, err := tx.ExecContext(ctx, `UPDATE relay_devices SET last_seen_at=? WHERE id=? AND enabled=1 AND enrolled_at=?`, now.UnixMilli(), device.ID, device.EnrolledAt.UnixMilli())
 		if err != nil {
 			return fmt.Errorf("refresh relay device: %w", err)
 		}

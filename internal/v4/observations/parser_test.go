@@ -372,7 +372,21 @@ func TestGoogleMessagesKotakMentionWithoutBankCreditStaysGeneric(t *testing.T) {
 		t.Fatalf("observation = %+v, want generic Google Messages evidence", got)
 	}
 }
+func TestGoogleMessagesWeakKotakCreditStaysKotakEvidence(t *testing.T) {
+	got, err := Parse(Snapshot{
+		PackageName: GoogleMessagesPackage,
+		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
+		Title:       "Kotak Mahindra Bank",
+		Text:        "Kotak: Received Rs. 100.37 from Maya",
+	})
+	if err != nil {
+		t.Fatalf("weak Kotak credit error = %v", err)
+	}
+	if got.Source != "kotak_sms" || got.CollectionProfileID != "kotak" || got.AmountPaise != 10037 {
+		t.Fatalf("weak Kotak observation = %+v", got)
+	}
 
+}
 func TestPayerUPIUsesIncomingPayerClause(t *testing.T) {
 	got, err := Parse(Snapshot{
 		PackageName: "example.wallet",

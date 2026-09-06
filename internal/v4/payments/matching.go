@@ -106,29 +106,35 @@ func (s *Service) ApplyObservation(ctx context.Context, relayEventID string, obs
 			matchResult = "ambiguous"
 		} else if len(candidates) == 1 {
 			candidate := candidates[0]
-			unsafe, err := reusedLowConfidenceLatest(ctx, tx, obs, candidate)
-			if err != nil {
-				return err
-			}
-			if unsafe {
+			if !sourceCanAutoConfirm(obs.Source) {
+				// Generic package text and Google Messages/SMS evidence are
+				// retained for operator review but cannot confirm payment.
 				matchResult = "ambiguous"
 			} else {
-				matchResult = "matched"
-				if candidate.Status == "paid" {
-					prior, err := hasConfirmedObservation(ctx, tx, candidate.PaymentID)
-					if err != nil {
-						return err
-					}
-					if prior {
-						matchResult = "corroborated"
-					}
-				}
-				matchedID = candidate.PaymentID
-				transitioned, err := applyMatchedPayment(ctx, tx, idFn, candidate, obs, now)
+				unsafe, err := reusedLowConfidenceLatest(ctx, tx, obs, candidate)
 				if err != nil {
 					return err
 				}
-				result.Transitioned = transitioned
+				if unsafe {
+					matchResult = "ambiguous"
+				} else {
+					matchResult = "matched"
+					if candidate.Status == "paid" {
+						prior, err := hasConfirmedObservation(ctx, tx, candidate.PaymentID)
+						if err != nil {
+							return err
+						}
+						if prior {
+							matchResult = "corroborated"
+						}
+					}
+					matchedID = candidate.PaymentID
+					transitioned, err := applyMatchedPayment(ctx, tx, idFn, candidate, obs, now)
+					if err != nil {
+						return err
+					}
+					result.Transitioned = transitioned
+				}
 			}
 		}
 		observationID, err := idFn("obs")
@@ -197,6 +203,13 @@ func expectedPackage(source string) string {
 		return observations.GoogleMessagesPackage
 	}
 	return ""
+}
+
+// sourceCanAutoConfirm identifies evidence with an origin-bound package
+// contract. Generic notifications and Google Messages/SMS remain evidence-only
+// until an independent provider signal or explicit operator confirmation exists.
+func sourceCanAutoConfirm(source string) bool {
+	return source == "paytm_notification"
 }
 func existingObservationResult(ctx context.Context, tx *storage.ImmediateTx, relayEventID string) (MatchResult, bool, error) {
 	var matchResult string
@@ -345,7 +358,9 @@ func occurredDuringCancellation(ctx context.Context, tx *storage.ImmediateTx, pa
 				_ = rows.Close()
 				return true, nil
 			}
-			cancelledAt = nil
+			if transition.Status.From == "cancelled" && transition.Status.To == "pending" {
+				cancelledAt = nil
+			}
 		}
 	}
 	if err := rows.Err(); err != nil {

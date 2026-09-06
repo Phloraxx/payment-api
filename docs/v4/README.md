@@ -33,9 +33,10 @@ A create request contains context such as:
 2. v4.0 supports Paytm and Kotak. GPay and Slice are deferred.
 3. PayGate snapshots profile/destination onto each payment, so switching the active profile never changes existing sessions.
 4. PayGate returns the canonical `upi://pay?...` string. The frontend renders the QR; PayGate does not need SVG/PNG/hosted-checkout output.
-5. Android does not know the active profile or expected payment. It relays a minimal signed notification snapshot from allowlisted packages when it contains a plausible non-`.00` money value.
+5. Android does not know the active profile or expected payment. It relays a minimal signed notification snapshot from any package when it contains a plausible non-`.00` money value; the server applies the source-trust gate.
 6. Server parses source-specific wording, infers Paytm/Kotak, validates incoming-credit semantics and performs matching.
 7. Target v4 has no server-side Google Messages/libgm connector. Kotak arrives through the phone's Google Messages notification.
+- Paytm package-bound notifications are the current automatic confirmation source; generic and Google Messages/Kotak evidence remains manual until independently authenticated.
 8. UTR/RRN is not part of v4 matching.
 9. Payable amounts use **ordered random buckets**: for a ₹N request, PayGate randomly chooses among free `₹N.01…₹N.99` values first. It only considers `₹(N+1).01…₹(N+1).99` when the entire base-rupee bucket is unavailable.
 10. The default v4.0 capacity is therefore two 99-value buckets (maximum adjustment `₹1.99`), always skipping `.00`. Randomness applies **inside the current bucket**, never across both buckets at once.

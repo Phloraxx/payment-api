@@ -607,15 +607,15 @@ func TestSignedKotakGoogleMessagesEventMatchesKotakPayment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "matched" || result.PaymentID != created.Payment.ID || !result.Transitioned {
+	if result.Status != "ambiguous" || result.PaymentID != "" || result.Transitioned {
 		t.Fatalf("Kotak result = %+v", result)
 	}
 	got, err := paymentService.Get(ctx, created.Payment.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Payment.Status != "paid" || got.Payment.PayerUPIID != "maya@okaxis" {
-		t.Fatalf("Kotak paid payment = %+v", got.Payment)
+	if got.Payment.Status != "pending" || got.Payment.PayerUPIID != "" {
+		t.Fatalf("Kotak payment = %+v", got.Payment)
 	}
 }
 
@@ -636,14 +636,14 @@ func TestGenericWalletNotificationMatchesActiveProfilePayment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "matched" || result.PaymentID != created.Payment.ID || !result.Transitioned {
+	if result.Status != "ambiguous" || result.PaymentID != "" || result.Transitioned {
 		t.Fatalf("generic wallet result=%+v", result)
 	}
 	got, err := paymentService.Get(context.Background(), created.Payment.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Payment.Status != "paid" {
+	if got.Payment.Status != "pending" {
 		t.Fatalf("payment status=%s", got.Payment.Status)
 	}
 }
@@ -652,7 +652,7 @@ func TestGenericWalletNotificationUsesReservationProfileAfterActiveSwitch(t *tes
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 5, 8, 15, 0, 0, time.UTC)
 	insertProfile(t, db, "old-profile", "paytm_notification", "old@upi", true, now.Add(-time.Hour))
-	paymentService, created := createPayment(t, db, now, "generic-profile-switch")
+	paymentService, _ := createPayment(t, db, now, "generic-profile-switch")
 	if _, err := db.SQL.Exec(`UPDATE collection_profiles SET active=0,updated_at=? WHERE id='old-profile'`, now.Add(20*time.Second).UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
@@ -672,15 +672,15 @@ func TestGenericWalletNotificationUsesReservationProfileAfterActiveSwitch(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "matched" || result.PaymentID != created.Payment.ID || !result.Transitioned {
+	if result.Status != "ambiguous" || result.PaymentID != "" || result.Transitioned {
 		t.Fatalf("generic delayed result=%+v", result)
 	}
-	var profileID string
-	if err := db.SQL.QueryRow(`SELECT collection_profile_id FROM payment_observations WHERE matched_payment_id=?`, created.Payment.ID).Scan(&profileID); err != nil {
+	var profileID, matchResult string
+	if err := db.SQL.QueryRow(`SELECT collection_profile_id,match_result FROM payment_observations WHERE relay_event_id=?`, result.RelayEventID).Scan(&profileID, &matchResult); err != nil {
 		t.Fatal(err)
 	}
-	if profileID != "old-profile" {
-		t.Fatalf("observation profile=%q want old-profile", profileID)
+	if profileID != "old-profile" || matchResult != "ambiguous" {
+		t.Fatalf("observation profile=%q result=%q", profileID, matchResult)
 	}
 }
 
@@ -738,12 +738,12 @@ func TestOneEnabledPhoneCanRelaySameIncomingPaymentSafely(t *testing.T) {
 	relayService := NewService(db, paymentService)
 	occurred := now.Add(time.Minute)
 	relayService.Now = func() time.Time { return occurred.Add(time.Second) }
-	first := marshalEvent(t, EventInput{SchemaVersion: 1, EventID: strings.Repeat("b", 64), PackageName: "com.example.wallet", PostedAtMS: occurred.UnixMilli(), Text: "₹100.37 received from Rahul"})
+	first := marshalEvent(t, EventInput{SchemaVersion: 1, EventID: strings.Repeat("b", 64), PackageName: observations.PaytmBusinessPackage, PostedAtMS: occurred.UnixMilli(), Text: "₹100.37 received from Rahul"})
 	one, err := relayService.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, occurred.Add(time.Second), first), first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := marshalEvent(t, EventInput{SchemaVersion: 1, EventID: strings.Repeat("c", 64), PackageName: "com.example.wallet", PostedAtMS: occurred.Add(500 * time.Millisecond).UnixMilli(), Text: "₹100.37 received from Rahul"})
+	second := marshalEvent(t, EventInput{SchemaVersion: 1, EventID: strings.Repeat("c", 64), PackageName: observations.PaytmBusinessPackage, PostedAtMS: occurred.Add(500 * time.Millisecond).UnixMilli(), Text: "₹100.37 received from Rahul"})
 	two, err := relayService.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, occurred.Add(2*time.Second), second), second)
 	if err != nil {
 		t.Fatal(err)

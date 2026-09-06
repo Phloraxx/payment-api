@@ -276,7 +276,7 @@ func TestRestrictedDialerRejectsLocalDestination(t *testing.T) {
 }
 
 func TestRestrictedIPRejectsSpecialRanges(t *testing.T) {
-	for _, value := range []string{"0.0.0.1", "100.64.0.1", "192.0.0.1", "198.18.0.1", "255.255.255.255", "fec0::1"} {
+	for _, value := range []string{"0.0.0.1", "100.64.0.1", "192.0.0.1", "198.18.0.1", "225.1.2.3", "239.255.255.255", "255.255.255.255", "fec0::1"} {
 		if !restrictedIP(net.ParseIP(value)) {
 			t.Fatalf("restrictedIP(%q) = false", value)
 		}

@@ -57,15 +57,16 @@ var (
 		regexp.MustCompile(`(?i)` + currencyAmount + `.{0,60}?\breceived\b`),
 		regexp.MustCompile(`(?i)\breceived\b.{0,60}?` + currencyAmount),
 	}
-	nonPaymentPattern    = regexp.MustCompile(`(?i)\b(?:reversal|reversed|refund(?:ed)?|cashback|reward|interest|salary|chargeback|settlement|settled|loan|emi|bill|due|reminder)\b`)
-	debitPattern         = regexp.MustCompile(`(?i)\b(?:debited|sent|you\s+paid|paid\s+to|paid\s+for|withdrawn|purchase|spent|transferred\s+to)\b`)
-	failedPattern        = regexp.MustCompile(`(?i)\b(?:failed|failure|declined|decline|unsuccessful|rejected|pending|processing)\b`)
-	kotakPattern         = regexp.MustCompile(`(?i)\bkotak[a-z-]*\b`)
-	kotakIncomingPattern = regexp.MustCompile(`(?i)(?:\b(?:from|by)\b.{0,100}\b(?:upi|ref(?:erence)?|rrn|utr)\b|\b(?:a/c|account)\b.{0,40}\b(?:received|credited|deposited)\b|\b(?:received|credited|deposited)\b.{0,100}\b(?:upi|ref(?:erence)?|rrn|utr)\b)`)
-	upiPattern           = regexp.MustCompile(`(?i)[a-z0-9][a-z0-9._-]{0,127}@[a-z0-9][a-z0-9._-]{0,127}`)
-	fromPattern          = regexp.MustCompile(`(?i)\b(?:from|by)\s+(.+?)(?:\s+(?:to|via)\b|\s+at\s+\d{1,2}:\d{2}(?:\s*[ap]m)?\b|\s+on\s+|\s+(?:upi\s+)?(?:ref|rrn|utr)|[!|\n]|\.(?:\s|$)|$)`)
-	paidYouPayerPattern  = regexp.MustCompile(`(?i)^(.{1,120}?)\s+paid\s+you\b`)
-	paytmOccurredPattern = regexp.MustCompile(`(?i)\breceived\s+on\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{1,2}:\d{2}\s+(?:AM|PM))\b`)
+	nonPaymentPattern              = regexp.MustCompile(`(?i)\b(?:reversal|reversed|refund(?:ed)?|cashback|reward|interest|salary|chargeback|settlement|settled|loan|emi|bill|due|reminder)\b`)
+	debitPattern                   = regexp.MustCompile(`(?i)\b(?:debited|sent|you\s+paid|paid\s+to|paid\s+for|withdrawn|purchase|spent|transferred\s+to)\b`)
+	failedPattern                  = regexp.MustCompile(`(?i)\b(?:failed|failure|declined|decline|unsuccessful|rejected|pending|processing)\b`)
+	kotakPattern                   = regexp.MustCompile(`(?i)\bkotak[a-z-]*\b`)
+	kotakIncomingPattern           = regexp.MustCompile(`(?i)(?:\b(?:from|by)\b.{0,100}\b(?:upi|ref(?:erence)?|rrn|utr)\b|\b(?:a/c|account)\b.{0,40}\b(?:received|credited|deposited)\b|\b(?:received|credited|deposited)\b.{0,100}\b(?:upi|ref(?:erence)?|rrn|utr)\b)`)
+	kotakUnverifiedIncomingPattern = regexp.MustCompile(`(?i)(?:\b(?:received|credited|deposited)\b.{0,100}\b(?:from|by)\b|\b(?:from|by)\b.{0,100}\b(?:received|credited|deposited)\b)`)
+	upiPattern                     = regexp.MustCompile(`(?i)[a-z0-9][a-z0-9._-]{0,127}@[a-z0-9][a-z0-9._-]{0,127}`)
+	fromPattern                    = regexp.MustCompile(`(?i)\b(?:from|by)\s+(.+?)(?:\s+(?:to|via)\b|\s+at\s+\d{1,2}:\d{2}(?:\s*[ap]m)?\b|\s+on\s+|\s+(?:upi\s+)?(?:ref|rrn|utr)|[!|\n]|\.(?:\s|$)|$)`)
+	paidYouPayerPattern            = regexp.MustCompile(`(?i)^(.{1,120}?)\s+paid\s+you\b`)
+	paytmOccurredPattern           = regexp.MustCompile(`(?i)\breceived\s+on\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{1,2}:\d{2}\s+(?:AM|PM))\b`)
 )
 
 func Parse(snapshot Snapshot) (Observation, error) {
@@ -77,8 +78,16 @@ func Parse(snapshot Snapshot) (Observation, error) {
 	if pkg == PaytmBusinessPackage {
 		return parsePaytm(text, snapshot.PostedAt)
 	}
-	if pkg == GoogleMessagesPackage && isKotakIncoming(text) {
-		return parseKotak(text, snapshot.PostedAt)
+	if pkg == GoogleMessagesPackage {
+		if isKotakIncoming(text) {
+			return parseKotak(text, snapshot.PostedAt)
+		}
+		if kotakPattern.MatchString(text) && kotakUnverifiedIncomingPattern.MatchString(text) {
+			if _, err := parseGeneric(text, snapshot.PostedAt, GenericMessageSource); err != nil {
+				return Observation{}, err
+			}
+			return parseKotak(text, snapshot.PostedAt)
+		}
 	}
 	source := GenericNotificationSource
 	if pkg == GoogleMessagesPackage {

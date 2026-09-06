@@ -114,11 +114,11 @@ The frontend never chooses the collection profile and never constructs a destina
 
 ## Android responsibility
 
-The phone is a trustworthy sensor, not the payment engine.
+The phone is a transport sensor, not the payment engine or a payment-proof authority.
 
 It knows:
 
-- allowed notification packages;
+- package identity as evidence, without a payment-app allowlist;
 - a cheap generic decimal-money prefilter;
 - notification package/key/text/post time;
 - durable local queue/retry;

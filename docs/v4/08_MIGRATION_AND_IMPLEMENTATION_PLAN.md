@@ -17,8 +17,8 @@ Before implementation, confirm these product rules:
 - `name` = merchant-supplied person/payee identifier, not event title;
 - `external_id` = merchant/event ID and is allowed to repeat across many payments;
 - idempotency uses `Idempotency-Key`, not `external_id`;
-- Paytm + Kotak only for v4.0;
-- GPay, Amazon Pay and Slice active matching deferred;
+- Paytm package-bound automatic confirmation; Kotak/Google Messages and generic package-agnostic evidence remain manual until an independent provider/source proof exists;
+- GPay, Amazon Pay and Slice may be captured as evidence, but active automatic confirmation is deferred;
 - merchant never selects collection profile;
 - PayGate returns UPI URI string; frontend renders QR;
 - no hosted checkout requirement;
@@ -28,7 +28,7 @@ Before implementation, confirm these product rules:
 - 5m active + 5m grace + 5m hard quarantine;
 - soft recent-use avoidance after hard release;
 - direct SQLite only; no PocketBase runtime;
-- one active Android relay device for v4.0;
+- one or more additive Android relay devices with independent revocation;
 - Razorpay-inspired dark navy/blue UI.
 
 Capture sanitized real notification fixtures before parser implementation.
@@ -182,7 +182,7 @@ Implement/verify:
 - bounded text payload;
 - server event dedupe;
 - timestamp confidence/source;
-- one active relay phone policy;
+- additive relay phones with independent revocation;
 - QR/App-Link pairing session.
 
 ### Relay edge cases
@@ -266,14 +266,13 @@ unique relay event
 - grace match;
 - delayed relay during quarantine with original post time;
 - event delivered after amount release but occurrence belongs to old reservation;
-- same amount reused later + high-confidence old timestamp -> old payment only;
+- same amount reused later + high-confidence old timestamp -> trusted old payment only;
 - same amount reused later + ambiguous/low-confidence timestamp -> no auto-match;
 - unknown decimal payment -> unmatched Activity;
 - duplicate relay event -> exact replay, no second observation or paid webhook;
-- different source event for the same already-paid reservation -> `corroborated`, no second transition/webhook;
-- future Kotak SMS + GPay/Amazon Pay observations converge on the payment as dedupe anchor;
-- reused amount + weak timing never becomes false corroboration;
-- inactive historical profile still matchable;
+- generic, Kotak and future untrusted-source observations -> ambiguous evidence, never automatic state transition/webhook;
+- multiple independently trusted observations for the same already-paid reservation -> `corroborated`, no second transition/webhook;
+- inactive historical profile still matchable for trusted evidence;
 - active profile switch never affects match decision.
 
 ## Phase 9 — Admin auth and web dashboard
@@ -314,7 +313,7 @@ Order:
 5. Settings;
 6. password-only login;
 7. QR/App-Link Connect/Replace phone UX;
-8. Paytm + Google Messages package allowlist;
+8. source-agnostic Android capture; server parser and independent source-trust gate;
 9. generic decimal prefilter;
 10. queue/heartbeat/Doze regression tests.
 

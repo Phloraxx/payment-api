@@ -101,6 +101,43 @@ func TestPairDeviceConsumesTokenAndEnablesFingerprintDevice(t *testing.T) {
 		t.Fatalf("replay error = %v", err)
 	}
 }
+func TestRePairRefreshesEnrollmentEpoch(t *testing.T) {
+	db := openRelayDB(t)
+	firstAt := time.Date(2026, 9, 1, 6, 20, 0, 0, time.UTC)
+	service := NewService(db, payments.NewService(db))
+	service.Now = func() time.Time { return firstAt }
+	session, err := service.CreatePairing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, deviceID := newPairingPublicKey(t)
+	input := PairDeviceInput{Token: session.Token, Name: "Phone", PublicKeyPEM: publicKey}
+	if _, err := service.PairDevice(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	var firstEpoch int64
+	if err := db.SQL.QueryRow(`SELECT enrolled_at FROM relay_devices WHERE id=?`, deviceID).Scan(&firstEpoch); err != nil {
+		t.Fatal(err)
+	}
+
+	secondAt := firstAt.Add(time.Minute)
+	service.Now = func() time.Time { return secondAt }
+	second, err := service.CreatePairing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Token = second.Token
+	if _, err := service.PairDevice(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	var secondEpoch int64
+	if err := db.SQL.QueryRow(`SELECT enrolled_at FROM relay_devices WHERE id=?`, deviceID).Scan(&secondEpoch); err != nil {
+		t.Fatal(err)
+	}
+	if secondEpoch != secondAt.UnixMilli() || secondEpoch <= firstEpoch {
+		t.Fatalf("enrollment epoch first=%d second=%d want second=%d", firstEpoch, secondEpoch, secondAt.UnixMilli())
+	}
+}
 func TestAdditionalDevicePairingKeepsExistingDeviceEnabled(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 1, 6, 30, 0, 0, time.UTC)

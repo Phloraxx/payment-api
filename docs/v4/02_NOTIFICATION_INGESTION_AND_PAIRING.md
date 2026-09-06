@@ -16,9 +16,9 @@ The server decides:
 
 ## Universal package intake
 
-Android does not maintain a payment-app package allowlist. A package name is retained as evidence, but package identity alone never authorizes a payment match. This allows BHIM, Google Pay, PhonePe, bank apps and future sources to work without an Android release when their visible notification text satisfies the generic server parser.
+Android does not maintain a payment-app package allowlist. A package name is retained as evidence, but package identity and visible text alone never authorize a payment match. This keeps BHIM, Google Pay, PhonePe, bank apps and future sources capturable without an Android release; automatic payment confirmation still requires an independently trusted source.
 
-Specialized server parsers remain useful for sources with stronger known semantics, but they are an optimization and confidence boundary rather than an Android transport restriction.
+Specialized server parsers remain useful for sources with stronger origin-bound semantics. Generic and Google Messages/SMS evidence is retained for diagnostics and operator confirmation, not automatic payment confirmation.
 
 ## Generic on-device prefilter
 
@@ -152,12 +152,13 @@ It extracts best-effort:
 - transaction time when text contains one.
 
 Unknown decimal-money Google Messages notifications are ignored/unmatched; they are not treated as Kotak by default.
+Even a positively recognized Kotak credit remains evidence-only: Google Messages exposes SMS text, not an authenticated bank/provider assertion, so it is stored as ambiguous when it has a payment candidate and cannot enqueue `payment.paid`.
 
 ### Generic incoming-payment notifications
 
 Any other package can produce `android_notification` evidence when the bounded visible text positively expresses an incoming payment and contains a PayGate decimal amount. Google Messages messages that are not recognized as Kotak use the equivalent `android_message` source. Real regression fixtures cover generic wallet/bank wording and BHIM notifications, including dotted UPI IDs.
 
-Generic evidence does **not** inherit whichever collection profile happens to be active when the HTTP request arrives. The server first searches historical amount reservations using the exact payable amount and trusted occurrence time. One qualifying profile is used; multiple qualifying profiles are ambiguous and cannot pay either candidate. With no historical candidate, the current active profile is retained only so unmatched diagnostic evidence can still be recorded.
+Generic evidence does **not** inherit whichever collection profile happens to be active when the HTTP request arrives. The server first searches historical amount reservations using the exact payable amount and trusted occurrence time. One qualifying profile is used for evidence attribution; multiple qualifying profiles are ambiguous. Even one qualifying generic candidate is stored as ambiguous/manual evidence and cannot change payment state or enqueue a webhook. With no historical candidate, the current active profile is retained only so unmatched diagnostic evidence can still be recorded.
 
 The normalized observation schema is intentionally not tied to a fixed app package enum, so adding another wallet or bank notification usually requires only parser fixtures unless its wording needs a specialized parser.
 
@@ -233,10 +234,10 @@ One real UPI credit may create more than one phone notification. Example: a Kota
 
 PayGate must not try to collapse those notifications on the phone. Each source event remains independently signed and stored. The **payment** is the dedupe anchor:
 
-1. first safe observation -> `matched`; if needed, transition payment to `paid` and enqueue exactly one `payment.paid` webhook;
-2. later independent observation for the same historical reservation -> `corroborated`, attach to the same payment and optionally enrich missing payer fields;
-3. exact retry of the same relay event ID -> replay prior result without a second observation;
-4. reused amount + insufficient timestamp confidence -> `ambiguous`, never assume it corroborates the newest payment.
+1. a trusted origin-bound observation may match and enqueue exactly one `payment.paid` webhook;
+2. generic/GPay and Google Messages/Kotak observations remain ambiguous evidence for operator confirmation, even when their amount/profile/time candidate is unique;
+3. later trusted evidence for the same historical reservation may be `corroborated` without a second payment transition/webhook;
+4. exact retry of the same relay event ID replays the prior result; reused amount + insufficient timestamp confidence remains ambiguous.
 
 This makes duplicate handling provider-agnostic and does not require UTR/RRN or fragile notification-text hashes.
 
@@ -246,7 +247,7 @@ Android should not upload unrelated personal notifications.
 
 Rules:
 
-- allowlist only required apps;
+- capture unrelated package text only when the cheap decimal-money candidate filter passes;
 - cheap decimal-money filter before persistence/upload;
 - bounded title/text/big-text sizes;
 - short local retention;
@@ -326,19 +327,17 @@ https://pay.mulearnscet.in/device/pair/<single-use-token>
 - consumption and device enrollment happen atomically;
 - failed/expired/used token cannot be replayed.
 
-## One active relay phone in v4.0
+## Additive relay phones
 
-Because the product currently needs one phone, keep the operational model simple:
+Relay phones are additive and may remain enabled concurrently:
 
 ```text
-one active payment relay device
+one or more independently revocable payment relay devices
 ```
 
-Pairing a second phone should require an explicit **Replace device** flow that revokes/disables the old relay only after the new enrollment succeeds.
+Pairing a new phone adds its device-key row. It does not disable or replace existing phones. Operators revoke a specific device explicitly when it is lost, retired or no longer trusted.
 
-This avoids two phones delivering duplicate notifications for the same bank/payment stream.
-
-Historical device records may remain for audit.
+Historical device records remain for audit, and each device's signed events are deduplicated independently.
 
 ## Device signing
 

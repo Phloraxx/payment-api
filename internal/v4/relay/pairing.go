@@ -150,7 +150,7 @@ func (s *Service) PairDevice(ctx context.Context, input PairDeviceInput) (PairDe
 			id,name,public_key_pem,enabled,enrolled_at,app_version,device_model,android_version)
 			VALUES(?,?,?,1,?,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name,public_key_pem=excluded.public_key_pem,
-				enabled=1,app_version=excluded.app_version,device_model=excluded.device_model,android_version=excluded.android_version`,
+				enabled=1,enrolled_at=excluded.enrolled_at,app_version=excluded.app_version,device_model=excluded.device_model,android_version=excluded.android_version`,
 			deviceID, normalized.Name, normalized.PublicKeyPEM, now.UnixMilli(), nullableText(normalized.AppVersion),
 			nullableText(normalized.DeviceModel), nullableText(normalized.AndroidVersion))
 		if err != nil {
