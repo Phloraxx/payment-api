@@ -349,7 +349,14 @@ func (h *AdminHandler) pruneLoginFailuresLocked(now time.Time) {
 func (h *AdminHandler) logout(w http.ResponseWriter, r *http.Request) {
 	token, err := h.adminToken(r)
 	if err == nil {
-		_ = h.Auth.RevokeAdminSession(r.Context(), token)
+		err = h.Auth.RevokeAdminSession(r.Context(), token)
+		if err != nil && !errors.Is(err, auth.ErrInvalidSession) {
+			if writeStorageBusyError(w, err) {
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal_error", "Could not revoke admin session")
+			return
+		}
 	}
 	h.clearAdminCookie(w)
 	w.WriteHeader(http.StatusNoContent)

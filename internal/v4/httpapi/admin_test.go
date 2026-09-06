@@ -254,6 +254,87 @@ func TestAdminLoginDatabaseBusyIsRetryable(t *testing.T) {
 		t.Fatalf("unexpected busy response: %s", body)
 	}
 }
+func TestAdminLogoutDatabaseBusyPreservesSession(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	ctx := context.Background()
+	f.db.SQL.SetMaxOpenConns(2)
+	first, err := f.db.SQL.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.db.SQL.Conn(ctx)
+	if err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	for _, conn := range []*sql.Conn{first, second} {
+		if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=1`); err != nil {
+			first.Close()
+			second.Close()
+			t.Fatal(err)
+		}
+	}
+	first.Close()
+	second.Close()
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	txErr := make(chan error, 1)
+	go func() {
+		txErr <- f.db.WithImmediateTx(ctx, func(*storage.ImmediateTx) error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case err := <-txErr:
+		t.Fatalf("lock transaction failed before starting: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("lock transaction did not start")
+	}
+
+	failed := adminRequest(t, f, http.MethodDelete, "/admin/session", nil, false)
+	close(release)
+	if err := <-txErr; err != nil {
+		t.Fatal(err)
+	}
+	if failed.Code != http.StatusServiceUnavailable || failed.Header().Get("Retry-After") != "1" {
+		t.Fatalf("busy status=%d retry=%q body=%s", failed.Code, failed.Header().Get("Retry-After"), failed.Body.String())
+	}
+	if strings.Contains(failed.Body.String(), `"code":"retryable_busy"`) == false ||
+		strings.Contains(strings.ToLower(failed.Body.String()), "sqlite") {
+		t.Fatalf("unexpected busy response: %s", failed.Body.String())
+	}
+	if failed.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("failed logout cleared cookie: %s", failed.Header().Get("Set-Cookie"))
+	}
+
+	stillValid := adminRequest(t, f, http.MethodGet, "/admin/overview", nil, false)
+	if stillValid.Code != http.StatusOK {
+		t.Fatalf("session after retryable logout status=%d body=%s", stillValid.Code, stillValid.Body.String())
+	}
+
+	succeeded := adminRequest(t, f, http.MethodDelete, "/admin/session", nil, false)
+	if succeeded.Code != http.StatusNoContent {
+		t.Fatalf("successful logout status=%d body=%s", succeeded.Code, succeeded.Body.String())
+	}
+	cleared := false
+	for _, cookie := range succeeded.Result().Cookies() {
+		if cookie.Name == adminCookieName && cookie.MaxAge < 0 {
+			cleared = true
+			break
+		}
+	}
+	if !cleared {
+		t.Fatalf("successful logout did not clear cookie: %s", succeeded.Header().Get("Set-Cookie"))
+	}
+	afterLogout := adminRequest(t, f, http.MethodGet, "/admin/overview", nil, false)
+	if afterLogout.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked session status=%d body=%s", afterLogout.Code, afterLogout.Body.String())
+	}
+}
 func TestStorageBusyHTTPMappingsAreRetryable(t *testing.T) {
 	t.Parallel()
 	err := fmt.Errorf("transaction failed: %w", storage.ErrBusy)
