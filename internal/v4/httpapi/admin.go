@@ -405,6 +405,9 @@ func (h *AdminHandler) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.Auth.ChangePassword(r.Context(), input.CurrentPassword, input.NewPassword); err != nil {
+		if writeStorageBusyError(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, auth.ErrInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "Current password is incorrect")

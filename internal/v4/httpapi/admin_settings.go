@@ -62,6 +62,9 @@ func (h *AdminHandler) updateWebhookSettings(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusBadRequest, "invalid_webhook", err.Error())
 			return
 		}
+		if writeStorageBusyError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Could not update webhook settings")
 		return
 	}
@@ -175,6 +178,9 @@ func (h *AdminHandler) activateProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"profile": profile})
 }
 func writeProfileError(w http.ResponseWriter, err error) {
+	if writeStorageBusyError(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, profiles.ErrProfileNotFound):
 		writeError(w, http.StatusNotFound, "profile_not_found", "Collection profile not found")

@@ -142,6 +142,9 @@ func (h *AdminHandler) editAdminPayment(w http.ResponseWriter, r *http.Request) 
 }
 
 func writeAdminPaymentError(w http.ResponseWriter, err error) {
+	if writeStorageBusyError(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, adminpayments.ErrPaymentNotFound):
 		writeError(w, http.StatusNotFound, "payment_not_found", "Payment not found")

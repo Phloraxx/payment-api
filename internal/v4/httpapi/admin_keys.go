@@ -15,6 +15,9 @@ type apiKeyCreateRequest struct {
 func (h *AdminHandler) listAPIKeys(w http.ResponseWriter, r *http.Request) {
 	items, err := h.Auth.ListAPIKeys(r.Context())
 	if err != nil {
+		if writeStorageBusyError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Could not load API keys")
 		return
 	}
@@ -37,6 +40,9 @@ func (h *AdminHandler) createAPIKey(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid_api_key", err.Error())
 			return
 		}
+		if writeStorageBusyError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Could not create API key")
 		return
 	}
@@ -51,6 +57,9 @@ func (h *AdminHandler) revokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	if err := h.Auth.RevokeAPIKey(r.Context(), id); err != nil {
 		if errors.Is(err, auth.ErrInvalidAPIKey) {
 			writeError(w, http.StatusNotFound, "api_key_not_found", "API key not found or already revoked")
+			return
+		}
+		if writeStorageBusyError(w, err) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Could not revoke API key")

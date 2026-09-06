@@ -44,6 +44,9 @@ func (h *AdminHandler) createPairingSession(w http.ResponseWriter, r *http.Reque
 	}
 	session, err := h.Relay.CreatePairing(r.Context())
 	if err != nil {
+		if writeStorageBusyError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Could not create pairing session")
 		return
 	}
@@ -66,6 +69,9 @@ func (h *AdminHandler) revokeDevice(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "device_not_found", "PayGate device not found or already revoked")
 			return
 		}
+		if writeStorageBusyError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "Could not revoke PayGate device")
 		return
 	}
@@ -78,6 +84,9 @@ func (h *AdminHandler) retryWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.Webhooks.RetryOne(r.Context(), r.PathValue("id")); err != nil {
+		if writeStorageBusyError(w, err) {
+			return
+		}
 		writeError(w, http.StatusConflict, "webhook_not_retryable", "Webhook is not retryable")
 		return
 	}

@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -251,6 +252,30 @@ func TestAdminLoginDatabaseBusyIsRetryable(t *testing.T) {
 	body := rr.Body.String()
 	if !strings.Contains(body, `"code":"login_retryable"`) || strings.Contains(strings.ToLower(body), "sqlite") {
 		t.Fatalf("unexpected busy response: %s", body)
+	}
+}
+func TestStorageBusyHTTPMappingsAreRetryable(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("transaction failed: %w", storage.ErrBusy)
+	cases := map[string]func(http.ResponseWriter, error){
+		"merchant payment": writePaymentError,
+		"relay pairing":    writeRelayPairError,
+		"relay request":    writeRelayError,
+		"profile":          writeProfileError,
+		"admin payment":    writeAdminPaymentError,
+	}
+	for name, write := range cases {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			write(recorder, err)
+			if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") != "1" {
+				t.Fatalf("status=%d retry=%q body=%s", recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
+			}
+			body := recorder.Body.String()
+			if !strings.Contains(body, `"code":"retryable_busy"`) || strings.Contains(strings.ToLower(body), "sqlite") {
+				t.Fatalf("unexpected busy response: %s", body)
+			}
+		})
 	}
 }
 func TestAdminLoginThrottlesRepeatedFailuresByRemoteAddress(t *testing.T) {

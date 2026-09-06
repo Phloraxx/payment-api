@@ -12,6 +12,7 @@ import (
 
 	"github.com/Phloraxx/payment-api/internal/v4/auth"
 	"github.com/Phloraxx/payment-api/internal/v4/payments"
+	"github.com/Phloraxx/payment-api/internal/v4/storage"
 )
 
 const (
@@ -193,7 +194,19 @@ func decodeStrictJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	}
 	return nil
 }
+func writeStorageBusyError(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, storage.ErrBusy) {
+		return false
+	}
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "retryable_busy", "PayGate is temporarily busy; try again shortly")
+	return true
+}
+
 func writePaymentError(w http.ResponseWriter, err error) {
+	if writeStorageBusyError(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, payments.ErrInvalidPaymentInput):
 		writeError(w, http.StatusBadRequest, "invalid_payment", "Invalid payment request")

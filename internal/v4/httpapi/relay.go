@@ -144,6 +144,9 @@ func readRelayBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	return raw, true
 }
 func writeRelayPairError(w http.ResponseWriter, err error) {
+	if writeStorageBusyError(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, relay.ErrPairingTokenInvalid), errors.Is(err, relay.ErrPairingTokenExpired), errors.Is(err, relay.ErrPairingTokenUsed):
 		writeError(w, http.StatusUnauthorized, "invalid_pairing", "Pairing link is invalid or expired")
@@ -155,6 +158,9 @@ func writeRelayPairError(w http.ResponseWriter, err error) {
 }
 
 func writeRelayError(w http.ResponseWriter, err error) {
+	if writeStorageBusyError(w, err) {
+		return
+	}
 	var relayErr *relay.Error
 	if errors.As(err, &relayErr) {
 		writeError(w, relayErr.HTTPStatus, strings.ToLower(relayErr.Code), relayErr.Message)
