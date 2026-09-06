@@ -115,6 +115,50 @@ func TestRelayPairHeartbeatAndHealthPersistence(t *testing.T) {
 		t.Fatalf("devices=%+v err=%v", devices, err)
 	}
 }
+func TestRelayHeartbeatDatabaseBusyIsRetryable(t *testing.T) {
+	f := newRelayHTTPFixture(t)
+	pairRelayHTTP(t, f)
+	ctx := context.Background()
+	f.db.SQL.SetMaxOpenConns(2)
+	for i := 0; i < 2; i++ {
+		conn, err := f.db.SQL.Conn(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=1`); err != nil {
+			conn.Close()
+			t.Fatal(err)
+		}
+		conn.Close()
+	}
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	txErr := make(chan error, 1)
+	go func() {
+		txErr <- f.db.WithImmediateTx(ctx, func(*storage.ImmediateTx) error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	<-locked
+
+	body := []byte(`{"schema_version":1,"app_version":"0.5.0","android_version":"16","device_model":"motorola edge 60 stylus","notification_access":true,"listener_connected":true,"battery_optimization_exempt":true,"power_save_mode":false,"background_restricted":false,"foreground_service":true,"pending_count":0,"failed_count":2}`)
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, signedRelayRequest(t, f, relay.HeartbeatPath, body))
+	close(release)
+	if err := <-txErr; err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Retry-After") != "1" {
+		t.Fatalf("busy status=%d retry=%q body=%s", rr.Code, rr.Header().Get("Retry-After"), rr.Body.String())
+	}
+	response := rr.Body.String()
+	if !strings.Contains(response, `"code":"retryable_busy"`) || strings.Contains(strings.ToLower(response), "sqlite") {
+		t.Fatalf("unexpected busy response: %s", response)
+	}
+}
 func TestRelaySignedEventAndSignatureFailure(t *testing.T) {
 	f := newRelayHTTPFixture(t)
 	pairRelayHTTP(t, f)

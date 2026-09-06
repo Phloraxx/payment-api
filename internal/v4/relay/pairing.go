@@ -176,11 +176,19 @@ func (s *Service) RevokeDevice(ctx context.Context, deviceID string) error {
 	if s == nil || s.DB == nil || s.DB.SQL == nil || deviceID == "" {
 		return ErrInvalidDevice
 	}
-	result, err := s.DB.SQL.ExecContext(ctx, `UPDATE relay_devices SET enabled=0 WHERE id=? AND enabled=1`, deviceID)
+	var rowsAffected int64
+	err := s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE relay_devices SET enabled=0 WHERE id=? AND enabled=1`, deviceID)
+		if err != nil {
+			return fmt.Errorf("revoke relay device: %w", err)
+		}
+		rowsAffected, _ = result.RowsAffected()
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("revoke relay device: %w", err)
+		return err
 	}
-	if rows, _ := result.RowsAffected(); rows != 1 {
+	if rowsAffected != 1 {
 		return ErrInvalidDevice
 	}
 	return nil
