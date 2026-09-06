@@ -538,6 +538,10 @@ Reference: https://www.sqlite.org/pragma.html#pragma_secure_delete
 ### Admin
 
 One password, hashed with Argon2id. Password change invalidates existing admin sessions.
+Password-only login is bounded to two concurrent Argon2 verifications and
+throttled per observed remote address after five failures in fifteen minutes.
+The temporary block is one minute; `Retry-After` is returned and password
+content is never logged.
 
 Web session cookie:
 
@@ -551,6 +555,11 @@ Path=/admin
 ### Android device
 
 Keep ECDSA signing and Android Keystore private key. Pairing token is short-lived and single-use; server stores public key only.
+
+The sole device-authenticated mutation, active collection-destination update,
+is checked inside the same immediate transaction against both `enabled=1` and
+the exact enrollment epoch authenticated for the request. Revocation or
+re-pairing therefore wins before an in-flight phone write can commit.
 
 ### Merchant API
 

@@ -17,6 +17,7 @@ var (
 	ErrProfileDisabled            = errors.New("collection profile is disabled")
 	ErrCannotDisableActiveProfile = errors.New("cannot disable active collection profile")
 	ErrInvalidProfile             = errors.New("invalid collection profile")
+	ErrRelayDeviceNotAuthorized   = errors.New("relay device is not authorized")
 )
 
 type Service struct {
@@ -101,6 +102,31 @@ func (s *Service) Upsert(ctx context.Context, in UpsertInput) (Profile, error) {
 }
 
 func (s *Service) UpdateDestination(ctx context.Context, id string, in DestinationInput) (Profile, error) {
+	return s.updateDestination(ctx, "", time.Time{}, id, in)
+}
+
+func (s *Service) UpdateActiveDestination(ctx context.Context, in DestinationInput) (Profile, error) {
+	return s.updateDestination(ctx, "", time.Time{}, "active", in)
+}
+
+func (s *Service) UpdateActiveDestinationForRelay(ctx context.Context, deviceID string, enrolledAt time.Time, in DestinationInput) (Profile, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" || enrolledAt.IsZero() {
+		return Profile{}, ErrRelayDeviceNotAuthorized
+	}
+	return s.updateDestination(ctx, deviceID, enrolledAt, "active", in)
+}
+
+func (s *Service) UpdateDestinationForRelay(ctx context.Context, deviceID string, enrolledAt time.Time, id string, in DestinationInput) (Profile, error) {
+	deviceID = strings.TrimSpace(deviceID)
+	if deviceID == "" || enrolledAt.IsZero() {
+		return Profile{}, ErrRelayDeviceNotAuthorized
+	}
+	return s.updateDestination(ctx, deviceID, enrolledAt, id, in)
+}
+
+func (s *Service) updateDestination(ctx context.Context, deviceID string, enrolledAt time.Time, id string, in DestinationInput) (Profile, error) {
+
 	if s == nil || s.DB == nil || s.DB.SQL == nil {
 		return Profile{}, errors.New("profile storage is required")
 	}
@@ -120,6 +146,31 @@ func (s *Service) UpdateDestination(ctx context.Context, id string, in Destinati
 	now := nowFn().UTC()
 	var out Profile
 	err := s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		if deviceID != "" {
+			var enabled int
+			err := tx.QueryRowContext(ctx, `SELECT enabled FROM relay_devices WHERE id=? AND enabled=1 AND enrolled_at=?`,
+				deviceID, enrolledAt.UTC().UnixMilli()).Scan(&enabled)
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrRelayDeviceNotAuthorized
+			}
+			if err != nil {
+				return fmt.Errorf("read relay device authorization: %w", err)
+			}
+			if enabled != 1 {
+				return ErrRelayDeviceNotAuthorized
+			}
+		}
+		if id == "active" {
+			var activeID string
+			err := tx.QueryRowContext(ctx, `SELECT id FROM collection_profiles WHERE active=1 LIMIT 1`).Scan(&activeID)
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrProfileNotFound
+			}
+			if err != nil {
+				return fmt.Errorf("read active collection profile: %w", err)
+			}
+			id = activeID
+		}
 		if _, err := getWith(ctx, tx, id); err != nil {
 			return err
 		}

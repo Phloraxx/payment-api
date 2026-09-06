@@ -195,6 +195,27 @@ func TestAdminLoginRejectsWhenVerificationCapacityIsSaturated(t *testing.T) {
 	}
 	_ = loginAdmin(t, f.handler, false)
 }
+func TestAdminLoginThrottlesRepeatedFailuresByRemoteAddress(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	for attempt := 0; attempt < adminLoginFailureLimit; attempt++ {
+		req := httptest.NewRequest(http.MethodPost, "/admin/session", strings.NewReader(`{"password":"wrong password"}`))
+		req.RemoteAddr = "198.51.100.17:4567"
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		f.handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("failed attempt %d status=%d body=%s", attempt+1, rr.Code, rr.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/session", strings.NewReader(`{"password":"wrong password"}`))
+	req.RemoteAddr = "198.51.100.17:4567"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") == "" || !strings.Contains(rr.Body.String(), `"code":"login_rate_limited"`) {
+		t.Fatalf("throttled login status=%d retry=%q body=%s", rr.Code, rr.Header().Get("Retry-After"), rr.Body.String())
+	}
+}
 
 func TestAdminPaymentsFilterDetailAndEdit(t *testing.T) {
 	f := newAdminHTTPFixture(t)
@@ -383,5 +404,14 @@ func TestPairedDeviceCannotMutatePaymentOrWebhookAuthority(t *testing.T) {
 	rr = signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", []byte(`{"upi_id":"paygate-new@upi","payee_name":"PayGate"}`))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"upi_id":"paygate-new@upi"`) {
 		t.Fatalf("device destination update status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = adminRequest(t, f, http.MethodDelete, "/admin/device/"+deviceID, nil, false)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("device revoke status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", []byte(`{"upi_id":"revoked@upi"}`))
+	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), `"unauthorized"`) {
+		t.Fatalf("revoked device destination status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }

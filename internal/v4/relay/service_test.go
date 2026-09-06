@@ -549,6 +549,32 @@ func TestPreEnrollmentNotificationIsStoredButIgnored(t *testing.T) {
 		t.Fatalf("pre-enrollment result = %+v", result)
 	}
 }
+func TestMissingNotificationTimestampIsStoredButIgnored(t *testing.T) {
+	db := openRelayDB(t)
+	now := time.Date(2026, 9, 1, 4, 45, 0, 0, time.UTC)
+	priv, deviceID := enrollTestDevice(t, db, now.Add(-time.Minute))
+	service := NewService(db, payments.NewService(db))
+	service.Now = func() time.Time { return now }
+	body := marshalEvent(t, EventInput{
+		SchemaVersion: 1, EventID: strings.Repeat("d", 64),
+		PackageName: observations.PaytmBusinessPackage,
+		Title:       "Payment Received on Paytm", Text: "₹100.37 Received from Rahul",
+	})
+	result, err := service.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, now, body), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "ignored" || countRows(t, db, "payment_observations") != 0 {
+		t.Fatalf("missing timestamp result = %+v", result)
+	}
+	var status, errorText string
+	if err := db.SQL.QueryRow(`SELECT status,error FROM relay_events WHERE id=?`, result.RelayEventID).Scan(&status, &errorText); err != nil {
+		t.Fatal(err)
+	}
+	if status != "ignored" || errorText != "notification posting time is missing or invalid" {
+		t.Fatalf("stored missing timestamp state=%q error=%q", status, errorText)
+	}
+}
 func TestRetryResumesPreviouslyReceivedRelayEvent(t *testing.T) {
 	ctx := context.Background()
 	db := openRelayDB(t)

@@ -132,17 +132,28 @@ func (h *AdminHandler) updateProfileDestination(w http.ResponseWriter, r *http.R
 		return
 	}
 	id := strings.TrimSpace(r.PathValue("id"))
-	if id == "active" {
-		active, err := h.Profiles.Active(r.Context())
-		if err != nil {
-			writeProfileError(w, err)
-			return
+	var profile profiles.Profile
+	var err error
+	deviceAuth, hasDevice := adminDeviceAuthorizationFromContext(r.Context())
+	if hasDevice {
+		if id == "active" {
+			profile, err = h.Profiles.UpdateActiveDestinationForRelay(r.Context(), deviceAuth.ID, deviceAuth.EnrolledAt, profiles.DestinationInput{
+				UPIID: input.UPIID, PayeeName: input.PayeeName,
+			})
+		} else {
+			profile, err = h.Profiles.UpdateDestinationForRelay(r.Context(), deviceAuth.ID, deviceAuth.EnrolledAt, id, profiles.DestinationInput{
+				UPIID: input.UPIID, PayeeName: input.PayeeName,
+			})
 		}
-		id = active.ID
+	} else if id == "active" {
+		profile, err = h.Profiles.UpdateActiveDestination(r.Context(), profiles.DestinationInput{
+			UPIID: input.UPIID, PayeeName: input.PayeeName,
+		})
+	} else {
+		profile, err = h.Profiles.UpdateDestination(r.Context(), id, profiles.DestinationInput{
+			UPIID: input.UPIID, PayeeName: input.PayeeName,
+		})
 	}
-	profile, err := h.Profiles.UpdateDestination(r.Context(), id, profiles.DestinationInput{
-		UPIID: input.UPIID, PayeeName: input.PayeeName,
-	})
 	if err != nil {
 		writeProfileError(w, err)
 		return
@@ -171,6 +182,8 @@ func writeProfileError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "profile_disabled", "Disabled collection profile cannot be activated")
 	case errors.Is(err, profiles.ErrCannotDisableActiveProfile):
 		writeError(w, http.StatusConflict, "active_profile", "Activate another profile before disabling this one")
+	case errors.Is(err, profiles.ErrRelayDeviceNotAuthorized):
+		writeError(w, http.StatusUnauthorized, "relay_device_revoked", "Relay device is no longer authorized")
 	case errors.Is(err, profiles.ErrInvalidProfile):
 		writeError(w, http.StatusBadRequest, "invalid_profile", err.Error())
 	default:

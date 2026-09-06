@@ -116,18 +116,33 @@ func verifyRequest(ctx context.Context, db *storage.DB, auth RequestAuth, body [
 // It is shared by relay ingestion and the Android operational dashboard; callers
 // decide which application routes a device identity is authorized to use.
 func (s *Service) AuthenticateDevice(ctx context.Context, auth RequestAuth, body []byte) (string, error) {
+	device, err := s.authenticateDevice(ctx, auth, body)
+	if err != nil {
+		return "", err
+	}
+	return device.ID, nil
+}
+
+// AuthenticateDeviceWithEpoch returns the enrollment epoch used to verify the request.
+// Mutation handlers bind their write transaction to this epoch so re-pairing invalidates
+// an in-flight request even when the device key itself is reused.
+func (s *Service) AuthenticateDeviceWithEpoch(ctx context.Context, auth RequestAuth, body []byte) (string, time.Time, error) {
+	device, err := s.authenticateDevice(ctx, auth, body)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return device.ID, device.EnrolledAt, nil
+}
+
+func (s *Service) authenticateDevice(ctx context.Context, auth RequestAuth, body []byte) (verifiedDevice, error) {
 	if s == nil || s.DB == nil || s.DB.SQL == nil {
-		return "", errors.New("relay storage is required")
+		return verifiedDevice{}, errors.New("relay storage is required")
 	}
 	nowFn := s.Now
 	if nowFn == nil {
 		nowFn = time.Now
 	}
-	device, err := verifyRequest(ctx, s.DB, auth, body, nowFn().UTC())
-	if err != nil {
-		return "", err
-	}
-	return device.ID, nil
+	return verifyRequest(ctx, s.DB, auth, body, nowFn().UTC())
 }
 
 func parsePublicKey(value string) (*ecdsa.PublicKey, []byte, error) {

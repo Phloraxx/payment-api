@@ -503,9 +503,10 @@ After meaningful v4 payments exist, rollback cannot simply restore old v3 databa
 
 ## 14. Security edge cases
 
-### Admin password brute force
-
-Rate-limit/throttle password-only login and log security events without password content.
+Rate-limit/throttle password-only login and log security events without
+password content. PayGate enforces two concurrent Argon2 verifications,
+five failures per remote address within fifteen minutes, and a one-minute
+temporary block.
 
 ### Merchant API key leaked
 

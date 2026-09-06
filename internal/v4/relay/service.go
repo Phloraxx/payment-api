@@ -175,7 +175,11 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 		return result, err
 	}
 	if !postedReliable {
-		postedAt = now
+		if err := s.finishIgnored(ctx, result.RelayEventID, errors.New("notification posting time is missing or invalid")); err != nil {
+			return IngestResult{}, err
+		}
+		result.Status = "ignored"
+		return result, nil
 	}
 	obs, parseErr := observations.Parse(observations.Snapshot{
 		PackageName: input.PackageName,
@@ -198,10 +202,6 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 		}
 		result.Status = "ignored"
 		return result, nil
-	}
-	if !postedReliable && obs.OccurredAtSource == "notification_posted_at" {
-		obs.OccurredAt = now
-		obs.OccurredAtSource = "server_received_at"
 	}
 	if obs.OccurredAt.After(now.Add(2 * time.Minute)) {
 		if err := s.finishIgnored(ctx, result.RelayEventID, errors.New("payment occurrence time is implausibly in the future")); err != nil {
