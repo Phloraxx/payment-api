@@ -76,11 +76,11 @@ func (s *Service) HeartbeatSigned(ctx context.Context, auth RequestAuth, rawBody
 		last_seen_at=?,last_heartbeat_at=?,app_version=?,device_model=?,android_version=?,
 		notification_access=?,listener_connected=?,battery_optimization_exempt=?,power_save_mode=?,
 		background_restricted=?,foreground_service=?,pending_count=?,failed_count=?,last_successful_delivery_at=?,last_client_error=?
-		WHERE id=? AND enabled=1`,
+		WHERE id=? AND enabled=1 AND enrolled_at=?`,
 		now.UnixMilli(), now.UnixMilli(), nullableText(input.AppVersion), nullableText(input.DeviceModel), nullableText(input.AndroidVersion),
 		boolInt(input.NotificationAccess), boolInt(input.ListenerConnected), boolInt(input.BatteryOptimizationExempt), boolInt(input.PowerSaveMode),
 		boolInt(input.BackgroundRestricted), boolInt(input.ForegroundService), input.PendingCount, input.FailedCount,
-		delivered, nullableText(input.LastClientError), device.ID)
+		delivered, nullableText(input.LastClientError), device.ID, device.EnrolledAt.UnixMilli())
 	if err != nil {
 		return HeartbeatResult{}, fmt.Errorf("persist relay heartbeat: %w", err)
 	}

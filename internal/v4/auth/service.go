@@ -163,19 +163,29 @@ func (s *Service) CreateAdminSession(ctx context.Context, password string) (Admi
 	if err := s.ready(); err != nil {
 		return AdminSession{}, err
 	}
+	var encoded string
+	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE singleton=1`).Scan(&encoded); errors.Is(err, sql.ErrNoRows) {
+		return AdminSession{}, ErrNotInitialized
+	} else if err != nil {
+		return AdminSession{}, fmt.Errorf("read admin password: %w", err)
+	}
+	ok, err := verifyPassword(encoded, password)
+	if err != nil {
+		return AdminSession{}, fmt.Errorf("verify admin password: %w", err)
+	}
+	if !ok {
+		return AdminSession{}, ErrInvalidCredentials
+	}
+
 	var session AdminSession
-	err := s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
-		var encoded string
-		if err := tx.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE singleton=1`).Scan(&encoded); errors.Is(err, sql.ErrNoRows) {
+	err = s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		var current string
+		if err := tx.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE singleton=1`).Scan(&current); errors.Is(err, sql.ErrNoRows) {
 			return ErrNotInitialized
 		} else if err != nil {
-			return fmt.Errorf("read admin password: %w", err)
+			return fmt.Errorf("re-read admin password: %w", err)
 		}
-		ok, err := verifyPassword(encoded, password)
-		if err != nil {
-			return fmt.Errorf("verify admin password: %w", err)
-		}
-		if !ok {
+		if current != encoded {
 			return ErrInvalidCredentials
 		}
 		token, err := s.randomToken("pg_admin_", 32)

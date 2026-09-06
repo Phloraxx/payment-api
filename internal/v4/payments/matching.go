@@ -34,6 +34,17 @@ type matchCandidate struct {
 }
 
 func (s *Service) ApplyObservation(ctx context.Context, relayEventID string, obs observations.Observation, receivedAt time.Time) (MatchResult, error) {
+	return s.applyObservation(ctx, relayEventID, obs, receivedAt, "", time.Time{})
+}
+
+func (s *Service) ApplyObservationForRelay(ctx context.Context, relayEventID string, obs observations.Observation, receivedAt time.Time, deviceID string, enrolledAt time.Time) (MatchResult, error) {
+	if strings.TrimSpace(deviceID) == "" || enrolledAt.IsZero() {
+		return MatchResult{}, ErrRelayEventNotFound
+	}
+	return s.applyObservation(ctx, relayEventID, obs, receivedAt, strings.TrimSpace(deviceID), enrolledAt.UTC())
+}
+
+func (s *Service) applyObservation(ctx context.Context, relayEventID string, obs observations.Observation, receivedAt time.Time, deviceID string, enrolledAt time.Time) (MatchResult, error) {
 	if s == nil || s.DB == nil || s.DB.SQL == nil {
 		return MatchResult{}, errors.New("payment storage is required")
 	}
@@ -70,8 +81,9 @@ func (s *Service) ApplyObservation(ctx context.Context, relayEventID string, obs
 			result.Replayed = true
 			return nil
 		}
-		var relayStatus string
-		err = tx.QueryRowContext(ctx, `SELECT status FROM relay_events WHERE id=?`, relayEventID).Scan(&relayStatus)
+		var relayStatus, relayDeviceID string
+		err = tx.QueryRowContext(ctx, `SELECT status,device_id FROM relay_events WHERE id=?`, relayEventID).
+			Scan(&relayStatus, &relayDeviceID)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrRelayEventNotFound
 		}
@@ -80,6 +92,24 @@ func (s *Service) ApplyObservation(ctx context.Context, relayEventID string, obs
 		}
 		if relayStatus != "received" {
 			return ErrRelayEventNotFound
+		}
+		if deviceID != "" {
+			if relayDeviceID != deviceID {
+				return ErrRelayEventNotFound
+			}
+			var enabled int
+			var currentEnrolledAt int64
+			err = tx.QueryRowContext(ctx, `SELECT enabled,enrolled_at FROM relay_devices WHERE id=?`, deviceID).
+				Scan(&enabled, &currentEnrolledAt)
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrRelayEventNotFound
+			}
+			if err != nil {
+				return fmt.Errorf("read relay device authorization: %w", err)
+			}
+			if enabled != 1 || currentEnrolledAt != enrolledAt.UnixMilli() {
+				return ErrRelayEventNotFound
+			}
 		}
 		packageName, err := relayPackage(ctx, tx, relayEventID)
 		if err != nil {

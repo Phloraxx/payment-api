@@ -17,6 +17,7 @@ import (
 	"github.com/Phloraxx/payment-api/internal/v4/operator"
 	"github.com/Phloraxx/payment-api/internal/v4/profiles"
 	"github.com/Phloraxx/payment-api/internal/v4/relay"
+	"github.com/Phloraxx/payment-api/internal/v4/storage"
 	"github.com/Phloraxx/payment-api/internal/v4/webhooks"
 )
 
@@ -211,6 +212,9 @@ func (h *AdminHandler) login(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "Password is incorrect")
 			return
 		}
+		if writeAdminLoginServiceError(w, err) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "PayGate could not create the admin session")
 		return
 	}
@@ -221,6 +225,15 @@ func (h *AdminHandler) login(w http.ResponseWriter, r *http.Request) {
 		response.Token = session.Token
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func writeAdminLoginServiceError(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, storage.ErrBusy) {
+		return false
+	}
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "login_retryable", "PayGate is temporarily busy; try again shortly")
+	return true
 }
 
 func (h *AdminHandler) acquireLoginSlot() bool {

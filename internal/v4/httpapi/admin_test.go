@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -194,6 +195,63 @@ func TestAdminLoginRejectsWhenVerificationCapacityIsSaturated(t *testing.T) {
 		<-f.handler.loginSlots
 	}
 	_ = loginAdmin(t, f.handler, false)
+}
+func TestAdminLoginDatabaseBusyIsRetryable(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	ctx := context.Background()
+	f.db.SQL.SetMaxOpenConns(2)
+	first, err := f.db.SQL.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.db.SQL.Conn(ctx)
+	if err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	for _, conn := range []*sql.Conn{first, second} {
+		if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=1`); err != nil {
+			first.Close()
+			second.Close()
+			t.Fatal(err)
+		}
+	}
+	first.Close()
+	second.Close()
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	txErr := make(chan error, 1)
+	go func() {
+		txErr <- f.db.WithImmediateTx(ctx, func(*storage.ImmediateTx) error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case err := <-txErr:
+		t.Fatalf("lock transaction failed before starting: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("lock transaction did not start")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/session", strings.NewReader(`{"password":"correct horse battery staple"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, req)
+	close(release)
+	if err := <-txErr; err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Retry-After") != "1" {
+		t.Fatalf("busy status=%d retry=%q body=%s", rr.Code, rr.Header().Get("Retry-After"), rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"code":"login_retryable"`) || strings.Contains(strings.ToLower(body), "sqlite") {
+		t.Fatalf("unexpected busy response: %s", body)
+	}
 }
 func TestAdminLoginThrottlesRepeatedFailuresByRemoteAddress(t *testing.T) {
 	f := newAdminHTTPFixture(t)

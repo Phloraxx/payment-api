@@ -66,6 +66,45 @@ func TestApplyObservationMarksPendingPaidAtomically(t *testing.T) {
 	assertCount(t, db.SQL, "webhook_deliveries", 2)
 }
 
+func TestApplyObservationRejectsStaleRelayEnrollment(t *testing.T) {
+	ctx := context.Background()
+	db := openAllocatorDB(t)
+	createdAt := time.UnixMilli(1_788_200_000_000).UTC()
+	s := newTestService(t, db, createdAt)
+	created, err := s.Create(ctx, validCreateInput("match-stale-epoch"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	occurred := createdAt.Add(2 * time.Minute)
+	received := occurred.Add(time.Second)
+	insertRelayEvent(t, db, "relay_stale_epoch", "source_stale_epoch", observations.PaytmBusinessPackage, occurred, received)
+	var enrolledAt int64
+	if err := db.SQL.QueryRow(`SELECT enrolled_at FROM relay_devices WHERE id='device_1'`).Scan(&enrolledAt); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`UPDATE relay_devices SET enrolled_at=? WHERE id='device_1'`, enrolledAt+1); err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.ApplyObservationForRelay(ctx, "relay_stale_epoch", paytmObservation(created.Payment.PayableAmountPaise, occurred, "notification_posted_at"), received, "device_1", time.UnixMilli(enrolledAt).UTC())
+	if !errors.Is(err, ErrRelayEventNotFound) {
+		t.Fatalf("stale relay enrollment error = %v", err)
+	}
+	var status string
+	if err := db.SQL.QueryRow(`SELECT status FROM relay_events WHERE id='relay_stale_epoch'`).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "received" {
+		t.Fatalf("stale relay event status = %q", status)
+	}
+	got, err := s.Get(ctx, created.Payment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Payment.Status != "pending" {
+		t.Fatalf("stale relay event changed payment to %q", got.Payment.Status)
+	}
+}
+
 func TestGenericProfileIsRevalidatedInsideMatchingTransaction(t *testing.T) {
 	ctx := context.Background()
 	db := openAllocatorDB(t)

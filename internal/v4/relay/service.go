@@ -236,10 +236,13 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 		}
 		obs.CollectionProfileID = profileID
 	}
-	matched, err := s.Payments.ApplyObservation(ctx, result.RelayEventID, obs, now)
+	matched, err := s.Payments.ApplyObservationForRelay(ctx, result.RelayEventID, obs, now, device.ID, device.EnrolledAt)
 	if errors.Is(err, payments.ErrRelayEventNotFound) {
-		// A retention worker may have finalized this stale event while
-		// parsing was in flight. Do not apply its in-memory payload.
+		// A retention worker or device revocation may have finalized this
+		// stale event while parsing was in flight. Do not apply its payload.
+		if finishErr := s.finishIgnored(ctx, result.RelayEventID, errors.New("relay event was no longer authorized for processing")); finishErr != nil {
+			return IngestResult{}, finishErr
+		}
 		result.Status = "ignored"
 		return result, nil
 	}
