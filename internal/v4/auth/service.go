@@ -163,38 +163,43 @@ func (s *Service) CreateAdminSession(ctx context.Context, password string) (Admi
 	if err := s.ready(); err != nil {
 		return AdminSession{}, err
 	}
-	var encoded string
-	err := s.DB.SQL.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE singleton=1`).Scan(&encoded)
-	if errors.Is(err, sql.ErrNoRows) {
-		return AdminSession{}, ErrNotInitialized
-	}
+	var session AdminSession
+	err := s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		var encoded string
+		if err := tx.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE singleton=1`).Scan(&encoded); errors.Is(err, sql.ErrNoRows) {
+			return ErrNotInitialized
+		} else if err != nil {
+			return fmt.Errorf("read admin password: %w", err)
+		}
+		ok, err := verifyPassword(encoded, password)
+		if err != nil {
+			return fmt.Errorf("verify admin password: %w", err)
+		}
+		if !ok {
+			return ErrInvalidCredentials
+		}
+		token, err := s.randomToken("pg_admin_", 32)
+		if err != nil {
+			return fmt.Errorf("generate admin session: %w", err)
+		}
+		hash := sha256.Sum256([]byte(token))
+		now := s.now()
+		ttl := s.SessionTTL
+		if ttl <= 0 {
+			ttl = 24 * time.Hour
+		}
+		expires := now.Add(ttl)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO admin_sessions(token_hash,created_at,expires_at,last_seen_at) VALUES(?,?,?,?)`,
+			hash[:], now.UnixMilli(), expires.UnixMilli(), now.UnixMilli()); err != nil {
+			return fmt.Errorf("store admin session: %w", err)
+		}
+		session = AdminSession{Token: token, ExpiresAt: expires}
+		return nil
+	})
 	if err != nil {
-		return AdminSession{}, fmt.Errorf("read admin password: %w", err)
+		return AdminSession{}, err
 	}
-	ok, err := verifyPassword(encoded, password)
-	if err != nil {
-		return AdminSession{}, fmt.Errorf("verify admin password: %w", err)
-	}
-	if !ok {
-		return AdminSession{}, ErrInvalidCredentials
-	}
-	token, err := s.randomToken("pg_admin_", 32)
-	if err != nil {
-		return AdminSession{}, fmt.Errorf("generate admin session: %w", err)
-	}
-	hash := sha256.Sum256([]byte(token))
-	now := s.now()
-	ttl := s.SessionTTL
-	if ttl <= 0 {
-		ttl = 24 * time.Hour
-	}
-	expires := now.Add(ttl)
-	_, err = s.DB.SQL.ExecContext(ctx, `INSERT INTO admin_sessions(token_hash,created_at,expires_at,last_seen_at) VALUES(?,?,?,?)`,
-		hash[:], now.UnixMilli(), expires.UnixMilli(), now.UnixMilli())
-	if err != nil {
-		return AdminSession{}, fmt.Errorf("store admin session: %w", err)
-	}
-	return AdminSession{Token: token, ExpiresAt: expires}, nil
+	return session, nil
 }
 
 func (s *Service) AuthenticateAdminSession(ctx context.Context, token string) error {
@@ -228,11 +233,19 @@ func (s *Service) RevokeAdminSession(ctx context.Context, token string) error {
 		return err
 	}
 	hash := sha256.Sum256([]byte(strings.TrimSpace(token)))
-	result, err := s.DB.SQL.ExecContext(ctx, `UPDATE admin_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL`, s.now().UnixMilli(), hash[:])
+	var rowsAffected int64
+	err := s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE admin_sessions SET revoked_at=? WHERE token_hash=? AND revoked_at IS NULL`, s.now().UnixMilli(), hash[:])
+		if err != nil {
+			return fmt.Errorf("revoke admin session: %w", err)
+		}
+		rowsAffected, _ = result.RowsAffected()
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("revoke admin session: %w", err)
+		return err
 	}
-	if rows, _ := result.RowsAffected(); rows != 1 {
+	if rowsAffected != 1 {
 		return ErrInvalidSession
 	}
 	return nil
@@ -247,19 +260,20 @@ func (s *Service) BootstrapAPIKey(ctx context.Context, label, secret string) err
 	if label == "" || len([]rune(label)) > 120 || len(secret) < 32 {
 		return fmt.Errorf("%w: bootstrap API key requires a label and at least 32 characters", ErrInvalidInput)
 	}
-	var count int
-	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_keys`).Scan(&count); err != nil {
-		return fmt.Errorf("read API key bootstrap state: %w", err)
-	}
-	if count > 0 {
-		return nil
-	}
 	hash := sha256.Sum256([]byte(secret))
-	_, err := s.DB.SQL.ExecContext(ctx, `INSERT INTO api_keys(id,label,secret_hash,enabled,created_at) VALUES('key_legacy_v3',?,?,1,?)`, label, hash[:], s.now().UnixMilli())
-	if err != nil {
-		return fmt.Errorf("bootstrap API key: %w", err)
-	}
-	return nil
+	return s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_keys`).Scan(&count); err != nil {
+			return fmt.Errorf("read API key bootstrap state: %w", err)
+		}
+		if count > 0 {
+			return nil
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO api_keys(id,label,secret_hash,enabled,created_at) VALUES('key_legacy_v3',?,?,1,?)`, label, hash[:], s.now().UnixMilli()); err != nil {
+			return fmt.Errorf("bootstrap API key: %w", err)
+		}
+		return nil
+	})
 }
 
 func (s *Service) CreateAPIKey(ctx context.Context, label string) (APIKey, error) {
@@ -282,9 +296,15 @@ func (s *Service) CreateAPIKey(ctx context.Context, label string) (APIKey, error
 	secret := "pg_live_" + id + "_" + base64.RawURLEncoding.EncodeToString(secretPart)
 	hash := sha256.Sum256([]byte(secret))
 	now := s.now()
-	_, err = s.DB.SQL.ExecContext(ctx, `INSERT INTO api_keys(id,label,secret_hash,enabled,created_at) VALUES(?,?,?,1,?)`, id, label, hash[:], now.UnixMilli())
+	err = s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO api_keys(id,label,secret_hash,enabled,created_at) VALUES(?,?,?,1,?)`, id, label, hash[:], now.UnixMilli())
+		if err != nil {
+			return fmt.Errorf("store API key: %w", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return APIKey{}, fmt.Errorf("store API key: %w", err)
+		return APIKey{}, err
 	}
 	return APIKey{ID: id, Label: label, Secret: secret, CreatedAt: now}, nil
 }
@@ -321,11 +341,19 @@ func (s *Service) RevokeAPIKey(ctx context.Context, id string) error {
 		return err
 	}
 	id = strings.TrimSpace(id)
-	result, err := s.DB.SQL.ExecContext(ctx, `UPDATE api_keys SET enabled=0 WHERE id=? AND enabled=1`, id)
+	var rowsAffected int64
+	err := s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		result, err := tx.ExecContext(ctx, `UPDATE api_keys SET enabled=0 WHERE id=? AND enabled=1`, id)
+		if err != nil {
+			return fmt.Errorf("revoke API key: %w", err)
+		}
+		rowsAffected, _ = result.RowsAffected()
+		return nil
+	})
 	if err != nil {
-		return fmt.Errorf("revoke API key: %w", err)
+		return err
 	}
-	if rows, _ := result.RowsAffected(); rows != 1 {
+	if rowsAffected != 1 {
 		return ErrInvalidAPIKey
 	}
 	return nil

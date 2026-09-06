@@ -9,7 +9,6 @@ import (
 )
 
 type pairingSessionRequest struct {
-	ReplaceExisting bool `json:"replace_existing,omitempty"`
 }
 
 func (h *AdminHandler) getDevice(w http.ResponseWriter, r *http.Request) {
@@ -43,14 +42,13 @@ func (h *AdminHandler) createPairingSession(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
-	session, err := h.Relay.CreatePairing(r.Context(), input.ReplaceExisting)
+	session, err := h.Relay.CreatePairing(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Could not create pairing session")
 		return
 	}
 	response := map[string]any{
 		"token": session.Token, "expires_at": session.ExpiresAt,
-		"replace_existing": session.ReplaceExisting,
 	}
 	if base := strings.TrimRight(strings.TrimSpace(h.PairingBaseURL), "/"); base != "" {
 		response["pairing_url"] = base + "/device/pair/" + session.Token

@@ -137,6 +137,5 @@ export interface DeviceInfo {
 export interface PairingSession {
   token: string;
   expires_at: string;
-  replace_existing: boolean;
   pairing_url?: string;
 }

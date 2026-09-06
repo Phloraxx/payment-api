@@ -324,7 +324,7 @@ func pairAdminTestDevice(t *testing.T, f adminHTTPFixture) (*ecdsa.PrivateKey, s
 		t.Fatal(err)
 	}
 	publicKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-	session, err := f.handler.Relay.CreatePairing(context.Background(), false)
+	session, err := f.handler.Relay.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

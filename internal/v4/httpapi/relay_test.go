@@ -68,7 +68,7 @@ func (f relayHTTPFixture) publicKeyPEM(t *testing.T) string {
 
 func pairRelayHTTP(t *testing.T, f relayHTTPFixture) {
 	t.Helper()
-	session, err := f.service.CreatePairing(context.Background(), false)
+	session, err := f.service.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,9 +110,9 @@ func TestRelayPairHeartbeatAndHealthPersistence(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("heartbeat status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	device, err := f.service.ActiveDevice(context.Background())
-	if err != nil || device == nil || device.LastHeartbeatAt == nil || device.NotificationAccess == nil || !*device.NotificationAccess || device.FailedCount == nil || *device.FailedCount != 2 {
-		t.Fatalf("device=%+v err=%v", device, err)
+	devices, err := f.service.Devices(context.Background())
+	if err != nil || len(devices) != 1 || devices[0].LastHeartbeatAt == nil || devices[0].NotificationAccess == nil || !*devices[0].NotificationAccess || devices[0].FailedCount == nil || *devices[0].FailedCount != 2 {
+		t.Fatalf("devices=%+v err=%v", devices, err)
 	}
 }
 func TestRelaySignedEventAndSignatureFailure(t *testing.T) {
@@ -142,5 +142,15 @@ func TestRelayRejectsQueryParameters(t *testing.T) {
 	f.handler.ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("query status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRelayDeviceCannotSelfRevoke(t *testing.T) {
+	f := newRelayHTTPFixture(t)
+	req := httptest.NewRequest(http.MethodDelete, relay.DevicePath, nil)
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("self-revoke status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }

@@ -20,16 +20,14 @@ var (
 	ErrPairingTokenInvalid = errors.New("pairing token is invalid")
 	ErrPairingTokenExpired = errors.New("pairing token has expired")
 	ErrPairingTokenUsed    = errors.New("pairing token has already been used")
-	ErrRelayAlreadyActive  = errors.New("an active relay device already exists")
 	ErrInvalidDevice       = errors.New("invalid relay device")
 )
 
 const defaultPairingTTL = 2 * time.Minute
 
 type PairingSession struct {
-	Token           string
-	ExpiresAt       time.Time
-	ReplaceExisting bool
+	Token     string
+	ExpiresAt time.Time
 }
 
 type PairDeviceInput struct {
@@ -42,9 +40,8 @@ type PairDeviceInput struct {
 }
 
 type PairDeviceResult struct {
-	DeviceID         string
-	ReplacedDeviceID string
-	Enabled          bool
+	DeviceID string
+	Enabled  bool
 }
 
 type DeviceInfo struct {
@@ -69,7 +66,7 @@ type DeviceInfo struct {
 	LastClientError           string     `json:"last_client_error,omitempty"`
 }
 
-func (s *Service) CreatePairing(ctx context.Context, replaceExisting bool) (PairingSession, error) {
+func (s *Service) CreatePairing(ctx context.Context) (PairingSession, error) {
 	if s == nil || s.DB == nil || s.DB.SQL == nil {
 		return PairingSession{}, errors.New("relay storage is required")
 	}
@@ -103,11 +100,9 @@ func (s *Service) CreatePairing(ctx context.Context, replaceExisting bool) (Pair
 		return PairingSession{}, fmt.Errorf("generate pairing session id: %w", err)
 	}
 	tokenHash := sha256.Sum256([]byte(token))
-	// replaceExisting is retained only for wire compatibility with older clients.
-	// Pairing is additive in v5: every valid QR enrolls one independently revocable device.
 	err = s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO pairing_sessions(id,token_hash,replace_existing,created_at,expires_at)
-			VALUES(?,?,?,?,?)`, sessionID, tokenHash[:], 0, now.UnixMilli(), expiresAt.UnixMilli())
+		_, err := tx.ExecContext(ctx, `INSERT INTO pairing_sessions(id,token_hash,created_at,expires_at)
+			VALUES(?,?,?,?)`, sessionID, tokenHash[:], now.UnixMilli(), expiresAt.UnixMilli())
 		if err != nil {
 			return fmt.Errorf("create pairing session: %w", err)
 		}
@@ -116,7 +111,7 @@ func (s *Service) CreatePairing(ctx context.Context, replaceExisting bool) (Pair
 	if err != nil {
 		return PairingSession{}, err
 	}
-	return PairingSession{Token: token, ExpiresAt: expiresAt, ReplaceExisting: false}, nil
+	return PairingSession{Token: token, ExpiresAt: expiresAt}, nil
 }
 
 func (s *Service) PairDevice(ctx context.Context, input PairDeviceInput) (PairDeviceResult, error) {
@@ -279,17 +274,6 @@ func (s *Service) Devices(ctx context.Context) ([]DeviceInfo, error) {
 		return nil, fmt.Errorf("iterate relay devices: %w", err)
 	}
 	return items, nil
-}
-
-func (s *Service) ActiveDevice(ctx context.Context) (*DeviceInfo, error) {
-	items, err := s.Devices(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if len(items) == 0 {
-		return nil, nil
-	}
-	return &items[0], nil
 }
 
 func (s *Service) Device(ctx context.Context, id string) (*DeviceInfo, error) {

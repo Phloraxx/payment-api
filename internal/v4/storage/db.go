@@ -3,8 +3,10 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -16,6 +18,8 @@ const (
 	defaultBusyTimeoutMS = 5000
 	schemaVersion        = 4
 )
+
+var ErrBusy = errors.New("sqlite database busy")
 
 type DB struct {
 	SQL  *sql.DB
@@ -40,6 +44,30 @@ func (tx *ImmediateTx) QueryRowContext(ctx context.Context, query string, args .
 	return tx.conn.QueryRowContext(ctx, query, args...)
 }
 
+type sqliteCodeError interface {
+	Code() int
+}
+
+func isSQLiteBusy(err error) bool {
+	if errors.Is(err, ErrBusy) {
+		return true
+	}
+	var coded sqliteCodeError
+	if errors.As(err, &coded) {
+		baseCode := coded.Code() & 0xff
+		return baseCode == 5 || baseCode == 6
+	}
+	message := strings.ToUpper(err.Error())
+	return strings.Contains(message, "SQLITE_BUSY") || strings.Contains(message, "SQLITE_LOCKED")
+}
+
+func wrapTransactionError(operation string, err error) error {
+	if isSQLiteBusy(err) {
+		return fmt.Errorf("%w: %s: %w", ErrBusy, operation, err)
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
 // WithImmediateTx runs fn inside BEGIN IMMEDIATE on a dedicated pooled connection.
 // Use it for short payment-critical write transactions. Network calls must never
 // happen inside fn. Ordinary reads should use DB.SQL directly.
@@ -51,7 +79,7 @@ func (db *DB) WithImmediateTx(ctx context.Context, fn func(*ImmediateTx) error) 
 	defer conn.Close()
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
-		return fmt.Errorf("begin immediate transaction: %w", err)
+		return wrapTransactionError("begin immediate transaction", err)
 	}
 	done := false
 	defer func() {
@@ -61,12 +89,65 @@ func (db *DB) WithImmediateTx(ctx context.Context, fn func(*ImmediateTx) error) 
 	}()
 
 	if err := fn(&ImmediateTx{conn: conn}); err != nil {
+		if isSQLiteBusy(err) {
+			return wrapTransactionError("immediate transaction callback", err)
+		}
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("commit immediate transaction: %w", err)
+		return wrapTransactionError("commit immediate transaction", err)
 	}
 	done = true
+	return nil
+}
+
+const databaseFileMode os.FileMode = 0o600
+
+func prepareDatabaseFile(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		file, createErr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, databaseFileMode)
+		if createErr != nil {
+			return fmt.Errorf("create sqlite database: %w", createErr)
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			return fmt.Errorf("close sqlite database: %w", closeErr)
+		}
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect sqlite database: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("sqlite database must be a regular file")
+	}
+	if info.Mode().Perm() != databaseFileMode {
+		if err := os.Chmod(path, databaseFileMode); err != nil {
+			return fmt.Errorf("harden sqlite database permissions: %w", err)
+		}
+	}
+	return nil
+}
+
+func verifyDatabaseSidecars(path string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		sidecar := path + suffix
+		info, err := os.Lstat(sidecar)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect sqlite %s file: %w", suffix, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("sqlite %s file must be a regular file", suffix)
+		}
+		if info.Mode().Perm() != databaseFileMode {
+			if err := os.Chmod(sidecar, databaseFileMode); err != nil {
+				return fmt.Errorf("harden sqlite %s permissions: %w", suffix, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -77,6 +158,12 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return nil, fmt.Errorf("resolve sqlite path: %w", err)
+	}
+	if err := prepareDatabaseFile(abs); err != nil {
+		return nil, err
+	}
+	if err := verifyDatabaseSidecars(abs); err != nil {
+		return nil, err
 	}
 	q := url.Values{}
 	q.Add("_pragma", "journal_mode(WAL)")
@@ -100,6 +187,10 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		raw.Close()
 		return nil, fmt.Errorf("ping sqlite: %w", err)
 	}
+	if err := verifyDatabaseSidecars(abs); err != nil {
+		raw.Close()
+		return nil, err
+	}
 	if err := db.verifyPragmas(ctx); err != nil {
 		raw.Close()
 		return nil, err
@@ -109,6 +200,10 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, err
 	}
 	if err := db.ensureMultiRelayCompatibility(ctx); err != nil {
+		raw.Close()
+		return nil, err
+	}
+	if err := verifyDatabaseSidecars(abs); err != nil {
 		raw.Close()
 		return nil, err
 	}
