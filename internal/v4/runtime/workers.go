@@ -45,16 +45,26 @@ func (a *App) expiryWorker(ctx context.Context) {
 	}
 }
 func (a *App) rawEventWorker(ctx context.Context) {
-	const interval = time.Hour
+	const (
+		interval = time.Hour
+		batch    = 500
+	)
 	redact := func() {
-		before := time.Now().UTC().Add(-a.Config.RawEventRetention)
-		count, err := a.Relay.RedactRawEvents(ctx, before, 500)
-		if err != nil {
-			slog.Error("redact expired relay notification bodies", "error", err)
-			return
+		var total int64
+		for {
+			before := time.Now().UTC().Add(-a.Config.RawEventRetention)
+			count, err := a.Relay.RedactRawEvents(ctx, before, batch)
+			if err != nil {
+				slog.Error("redact expired relay notification bodies", "error", err)
+				return
+			}
+			total += count
+			if count < batch {
+				break
+			}
 		}
-		if count > 0 {
-			slog.Info("redacted expired relay notification bodies", "count", count)
+		if total > 0 {
+			slog.Info("redacted expired relay notification bodies", "count", total)
 		}
 	}
 	redact()
