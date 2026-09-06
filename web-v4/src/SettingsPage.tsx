@@ -119,4 +119,6 @@ function SecretModal({ title, secret, warning, onClose }: { title: string; secre
   const [copied, setCopied] = useState(false); return <Modal title={title} onClose={onClose}><div className="secret-modal"><p>{warning}</p><code>{secret}</code><button className="button button-primary" onClick={() => void copyText(secret).then((ok) => { if (ok) setCopied(true); })}>{copied ? "Copied" : "Copy secret"}</button><button className="button button-secondary" onClick={onClose}>I have stored it</button></div></Modal>;
 }
 function Prereq({ label, value }: { label: string; value?: boolean }) { return <div className="prereq"><Dot ok={value === true}/><span>{label}</span><strong>{value === undefined ? "Unknown" : value ? "OK" : "Check"}</strong></div>; }
-function isDeviceHealthy(device: DeviceInfo): boolean { return device.notification_access === true && device.listener_connected === true && device.battery_optimization_exempt === true && device.foreground_service === true && device.background_restricted !== true; }
+function isDeviceHealthy(device: DeviceInfo): boolean {
+  return device.operational === true;
+}

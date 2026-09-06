@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"strings"
 	"testing"
@@ -310,6 +311,18 @@ func TestCreateUsesOverflowOnlyAfterBaseBucketExhausted(t *testing.T) {
 	if result.Payment.PayableAmountPaise != 10137 {
 		t.Fatalf("payable = %d, want 10137", result.Payment.PayableAmountPaise)
 	}
+}
+
+func TestCreateRejectsRequestedAmountThatOverflowsPayableBucket(t *testing.T) {
+	db := openAllocatorDB(t)
+	now := time.UnixMilli(1_788_200_000_000).UTC()
+	s := newTestService(t, db, now)
+	input := validCreateInput("overflow-boundary")
+	input.RequestedAmountPaise = math.MaxInt64 - math.MaxInt64%100
+	if _, err := s.Create(context.Background(), input); !errors.Is(err, ErrInvalidPaymentInput) {
+		t.Fatalf("boundary amount error = %v, want ErrInvalidPaymentInput", err)
+	}
+	assertCount(t, db.SQL, "payments", 0)
 }
 
 func TestCreateFailsClosedWithoutActiveProfile(t *testing.T) {

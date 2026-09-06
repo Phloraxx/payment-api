@@ -141,6 +141,80 @@ func (db *DB) ensureMultiRelayCompatibility(ctx context.Context) error {
 	return nil
 }
 
+func (db *DB) ensureRelayPayloadIntegrity(ctx context.Context) error {
+	return db.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		rows, err := tx.QueryContext(ctx, `PRAGMA table_info(relay_events)`)
+		if err != nil {
+			return fmt.Errorf("inspect relay event columns: %w", err)
+		}
+		hasPayloadHash := false
+		for rows.Next() {
+			var cid, notNull, primaryKey int
+			var name, columnType string
+			var defaultValue sql.NullString
+			if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+				rows.Close()
+				return fmt.Errorf("scan relay event columns: %w", err)
+			}
+			if name == "payload_hash" {
+				hasPayloadHash = true
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return fmt.Errorf("iterate relay event columns: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return fmt.Errorf("close relay event columns: %w", err)
+		}
+		if !hasPayloadHash {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE relay_events ADD COLUMN payload_hash BLOB`); err != nil {
+				return fmt.Errorf("add relay event payload hash: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, relayPayloadIntegritySQL); err != nil {
+			return fmt.Errorf("create payment reservation consistency triggers: %w", err)
+		}
+		return nil
+	})
+}
+
+const relayPayloadIntegritySQL = `
+CREATE TRIGGER IF NOT EXISTS amount_reservations_payment_consistency_insert
+BEFORE INSERT ON amount_reservations
+WHEN NOT EXISTS (
+    SELECT 1 FROM payments
+    WHERE id = NEW.payment_id
+      AND collection_profile_id = NEW.collection_profile_id
+      AND payable_amount_paise = NEW.payable_amount_paise
+)
+BEGIN
+    SELECT RAISE(ABORT, 'amount reservation does not match payment');
+END;
+CREATE TRIGGER IF NOT EXISTS amount_reservations_payment_consistency_update
+BEFORE UPDATE OF payment_id,collection_profile_id,payable_amount_paise ON amount_reservations
+WHEN NOT EXISTS (
+    SELECT 1 FROM payments
+    WHERE id = NEW.payment_id
+      AND collection_profile_id = NEW.collection_profile_id
+      AND payable_amount_paise = NEW.payable_amount_paise
+)
+BEGIN
+    SELECT RAISE(ABORT, 'amount reservation does not match payment');
+END;
+CREATE TRIGGER IF NOT EXISTS payments_reservation_consistency_update
+BEFORE UPDATE OF collection_profile_id,payable_amount_paise ON payments
+WHEN EXISTS (
+    SELECT 1 FROM amount_reservations
+    WHERE payment_id = NEW.id
+      AND (collection_profile_id <> NEW.collection_profile_id
+           OR payable_amount_paise <> NEW.payable_amount_paise)
+)
+BEGIN
+    SELECT RAISE(ABORT, 'payment does not match amount reservation');
+END;
+`
+
 func applyV4(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, schemaV4); err != nil {
 		return fmt.Errorf("apply schema v4: %w", err)
@@ -179,6 +253,7 @@ func applyV2(ctx context.Context, tx *sql.Tx) error {
 }
 
 const schemaV2 = `
+
 ALTER TABLE relay_devices ADD COLUMN notification_access INTEGER CHECK(notification_access IS NULL OR notification_access IN (0,1));
 ALTER TABLE relay_devices ADD COLUMN listener_connected INTEGER CHECK(listener_connected IS NULL OR listener_connected IN (0,1));
 ALTER TABLE relay_devices ADD COLUMN battery_optimization_exempt INTEGER CHECK(battery_optimization_exempt IS NULL OR battery_optimization_exempt IN (0,1));

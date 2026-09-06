@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -54,6 +55,19 @@ func TestAllocatorRandomizesInsideBaseBucket(t *testing.T) {
 	}
 	if got != 10037 {
 		t.Fatalf("got %d, want 10037", got)
+	}
+}
+
+func TestAllocatorRejectsAmountWhosePayableBucketWouldOverflow(t *testing.T) {
+	db := openAllocatorDB(t)
+	now := time.UnixMilli(1_788_200_000_000)
+	requested := int64(math.MaxInt64) - int64(math.MaxInt64)%100
+	err := db.WithImmediateTx(context.Background(), func(tx *storage.ImmediateTx) error {
+		_, err := NewAllocator().Select(context.Background(), tx, "paytm", requested, now)
+		return err
+	})
+	if err == nil {
+		t.Fatal("overflowing payable bucket was accepted")
 	}
 }
 

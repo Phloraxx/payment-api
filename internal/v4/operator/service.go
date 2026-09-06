@@ -186,7 +186,8 @@ func (s *Service) activeProfile(ctx context.Context) (*ProfileSummary, error) {
 }
 
 func (s *Service) loadRelay(ctx context.Context, out *RelaySummary) error {
-	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT COALESCE(name,''),COALESCE(last_heartbeat_at,last_seen_at),app_version
+	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT COALESCE(name,''),last_seen_at,last_heartbeat_at,app_version,
+		notification_access,listener_connected,battery_optimization_exempt,background_restricted,foreground_service
 		FROM relay_devices WHERE enabled=1`)
 	if err != nil {
 		return fmt.Errorf("read relay summary: %w", err)
@@ -194,35 +195,48 @@ func (s *Service) loadRelay(ctx context.Context, out *RelaySummary) error {
 	defer rows.Close()
 
 	var fallbackName, fallbackVersion string
-	var bestSeen, bestConnected *time.Time
+	var bestSeenAt, bestConnectedAt, bestConnectedLastSeen *time.Time
 	var bestSeenName, bestSeenVersion, bestConnectedName, bestConnectedVersion string
 	for rows.Next() {
 		var name string
-		var lastSeen sql.NullInt64
+		var lastSeen, lastHeartbeat sql.NullInt64
 		var appVersion sql.NullString
-		if err := rows.Scan(&name, &lastSeen, &appVersion); err != nil {
+		var notificationAccess, listenerConnected, batteryExempt, backgroundRestricted, foregroundService sql.NullInt64
+		if err := rows.Scan(&name, &lastSeen, &lastHeartbeat, &appVersion,
+			&notificationAccess, &listenerConnected, &batteryExempt, &backgroundRestricted, &foregroundService); err != nil {
 			return fmt.Errorf("scan relay summary: %w", err)
 		}
 		out.EnabledDevices++
 		if fallbackName == "" {
 			fallbackName, fallbackVersion = name, appVersion.String
 		}
-		if !lastSeen.Valid {
-			continue
+		diagnosticAt := lastSeen
+		if !diagnosticAt.Valid {
+			diagnosticAt = lastHeartbeat
 		}
-		seen := time.UnixMilli(lastSeen.Int64).UTC()
-		if bestSeen == nil || seen.After(*bestSeen) {
-			value := seen
-			bestSeen = &value
-			bestSeenName, bestSeenVersion = name, appVersion.String
+		if diagnosticAt.Valid {
+			seen := time.UnixMilli(diagnosticAt.Int64).UTC()
+			if bestSeenAt == nil || seen.After(*bestSeenAt) {
+				bestSeenAt = &seen
+				bestSeenName, bestSeenVersion = name, appVersion.String
+			}
 		}
-		age := s.now().Sub(seen)
-		if age >= -5*time.Minute && age <= time.Hour {
-			out.ConnectedDevices++
-			if bestConnected == nil || seen.After(*bestConnected) {
-				value := seen
-				bestConnected = &value
-				bestConnectedName, bestConnectedVersion = name, appVersion.String
+		ready := lastHeartbeat.Valid && relayHeartbeatReady(notificationAccess, listenerConnected, batteryExempt, backgroundRestricted, foregroundService)
+		if ready {
+			heartbeatAt := time.UnixMilli(lastHeartbeat.Int64).UTC()
+			age := s.now().Sub(heartbeatAt)
+			if age >= -5*time.Minute && age <= time.Hour {
+				out.ConnectedDevices++
+				if bestConnectedAt == nil || heartbeatAt.After(*bestConnectedAt) {
+					bestConnectedAt = &heartbeatAt
+					bestConnectedName, bestConnectedVersion = name, appVersion.String
+					if lastSeen.Valid {
+						lastSeenAt := time.UnixMilli(lastSeen.Int64).UTC()
+						bestConnectedLastSeen = &lastSeenAt
+					} else {
+						bestConnectedLastSeen = &heartbeatAt
+					}
+				}
 			}
 		}
 	}
@@ -231,14 +245,23 @@ func (s *Service) loadRelay(ctx context.Context, out *RelaySummary) error {
 	}
 	out.Connected = out.ConnectedDevices > 0
 	switch {
-	case bestConnected != nil:
-		out.Name, out.AppVersion, out.LastSeenAt = bestConnectedName, bestConnectedVersion, bestConnected
-	case bestSeen != nil:
-		out.Name, out.AppVersion, out.LastSeenAt = bestSeenName, bestSeenVersion, bestSeen
+	case bestConnectedAt != nil:
+		out.Name, out.AppVersion, out.LastSeenAt = bestConnectedName, bestConnectedVersion, bestConnectedLastSeen
+	case bestSeenAt != nil:
+		out.Name, out.AppVersion = bestSeenName, bestSeenVersion
+		value := *bestSeenAt
+		out.LastSeenAt = &value
 	default:
 		out.Name, out.AppVersion = fallbackName, fallbackVersion
 	}
 	return nil
+}
+func relayHeartbeatReady(notificationAccess, listenerConnected, batteryExempt, backgroundRestricted, foregroundService sql.NullInt64) bool {
+	return notificationAccess.Valid && notificationAccess.Int64 == 1 &&
+		listenerConnected.Valid && listenerConnected.Int64 == 1 &&
+		batteryExempt.Valid && batteryExempt.Int64 == 1 &&
+		backgroundRestricted.Valid && backgroundRestricted.Int64 == 0 &&
+		foregroundService.Valid && foregroundService.Int64 == 1
 }
 
 func (s *Service) loadWebhookSummary(ctx context.Context, out *WebhookSummary) error {

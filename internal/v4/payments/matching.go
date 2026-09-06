@@ -14,8 +14,9 @@ import (
 )
 
 var (
-	ErrRelayEventNotFound = errors.New("relay event not found")
-	ErrInvalidObservation = errors.New("invalid payment observation")
+	ErrRelayEventNotFound   = errors.New("relay event not found")
+	ErrInvalidObservation   = errors.New("invalid payment observation")
+	ErrObservationAmbiguous = errors.New("observation profile changed during matching")
 )
 
 type MatchResult struct {
@@ -69,12 +70,30 @@ func (s *Service) ApplyObservation(ctx context.Context, relayEventID string, obs
 			result.Replayed = true
 			return nil
 		}
+		var relayStatus string
+		err = tx.QueryRowContext(ctx, `SELECT status FROM relay_events WHERE id=?`, relayEventID).Scan(&relayStatus)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrRelayEventNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("read relay event status: %w", err)
+		}
+		if relayStatus != "received" {
+			return ErrRelayEventNotFound
+		}
 		packageName, err := relayPackage(ctx, tx, relayEventID)
 		if err != nil {
 			return err
 		}
 		if expected := expectedPackage(obs.Source); expected != "" && packageName != expected {
 			return fmt.Errorf("%w: source %s does not match relay package %s", ErrInvalidObservation, obs.Source, packageName)
+		}
+		if obs.Source == observations.GenericNotificationSource || obs.Source == observations.GenericMessageSource {
+			profileID, err := resolveGenericProfileAtApply(ctx, tx, obs)
+			if err != nil {
+				return err
+			}
+			obs.CollectionProfileID = profileID
 		}
 
 		candidates, err := matchingCandidates(ctx, tx, obs)
@@ -125,11 +144,11 @@ func (s *Service) ApplyObservation(ctx context.Context, relayEventID string, obs
 			obs.OccurredAtSource, receivedAt.UnixMilli(), nullableString(matchedID), matchResult); err != nil {
 			return fmt.Errorf("insert payment observation: %w", err)
 		}
-		relayStatus := matchResult
-		if relayStatus == "corroborated" {
-			relayStatus = "matched"
+		relayEventStatus := matchResult
+		if relayEventStatus == "corroborated" {
+			relayEventStatus = "matched"
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE relay_events SET status=?,error=NULL WHERE id=?`, relayStatus, relayEventID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE relay_events SET status=?,error=NULL WHERE id=?`, relayEventStatus, relayEventID); err != nil {
 			return fmt.Errorf("update relay event status: %w", err)
 		}
 		result.Result = matchResult
@@ -204,6 +223,51 @@ func relayPackage(ctx context.Context, tx *storage.ImmediateTx, relayEventID str
 	return packageName, nil
 }
 
+func resolveGenericProfileAtApply(ctx context.Context, tx *storage.ImmediateTx, obs observations.Observation) (string, error) {
+	occurred := obs.OccurredAt.UnixMilli()
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT r.collection_profile_id
+		FROM amount_reservations r JOIN payments p ON p.id=r.payment_id
+		WHERE r.payable_amount_paise=? AND p.created_at<=? AND r.reserved_until>=?
+		AND (p.status<>'cancelled' OR EXISTS(
+			SELECT 1 FROM payment_history h
+			WHERE h.payment_id=p.id AND h.type='payment.cancelled' AND h.created_at>=?
+		))
+		ORDER BY r.collection_profile_id`, obs.AmountPaise, occurred, occurred, occurred)
+	if err != nil {
+		return "", fmt.Errorf("revalidate generic notification profile: %w", err)
+	}
+	defer rows.Close()
+	profileIDs := make([]string, 0, 2)
+	for rows.Next() {
+		var profileID string
+		if err := rows.Scan(&profileID); err != nil {
+			return "", fmt.Errorf("scan generic notification profile: %w", err)
+		}
+		profileIDs = append(profileIDs, profileID)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("iterate generic notification profiles: %w", err)
+	}
+	if len(profileIDs) > 1 {
+		return "", ErrObservationAmbiguous
+	}
+	if len(profileIDs) == 1 {
+		if profileIDs[0] != obs.CollectionProfileID {
+			return "", ErrObservationAmbiguous
+		}
+		return profileIDs[0], nil
+	}
+	var activeProfileID string
+	err = tx.QueryRowContext(ctx, `SELECT id FROM collection_profiles WHERE active=1 AND enabled=1 LIMIT 1`).Scan(&activeProfileID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: no active collection profile is available for generic notification evidence", ErrInvalidObservation)
+	}
+	if err != nil {
+		return "", fmt.Errorf("read active collection profile: %w", err)
+	}
+	return activeProfileID, nil
+}
+
 func matchingCandidates(ctx context.Context, tx *storage.ImmediateTx, obs observations.Observation) ([]matchCandidate, error) {
 	occurred := obs.OccurredAt.UnixMilli()
 	rows, err := tx.QueryContext(ctx, `SELECT p.id,p.status,r.reserved_at,r.reserved_until
@@ -231,32 +295,64 @@ func matchingCandidates(ctx context.Context, tx *storage.ImmediateTx, obs observ
 
 	candidates := make([]matchCandidate, 0, len(raw))
 	for _, c := range raw {
-		if c.Status == "cancelled" {
-			allowed, err := occurredBeforeCancellation(ctx, tx, c.PaymentID, occurred)
-			if err != nil {
-				return nil, err
-			}
-			if !allowed {
-				continue
-			}
+		cancelled, err := occurredDuringCancellation(ctx, tx, c.PaymentID, occurred)
+		if err != nil {
+			return nil, err
+		}
+		if cancelled {
+			continue
 		}
 		candidates = append(candidates, c)
 	}
 	return candidates, nil
 }
 
-func occurredBeforeCancellation(ctx context.Context, tx *storage.ImmediateTx, paymentID string, occurredAt int64) (bool, error) {
-	var cancelledAt int64
-	err := tx.QueryRowContext(ctx, `SELECT created_at FROM payment_history WHERE payment_id=? AND type='payment.cancelled' ORDER BY created_at DESC LIMIT 1`, paymentID).Scan(&cancelledAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+func occurredDuringCancellation(ctx context.Context, tx *storage.ImmediateTx, paymentID string, occurredAt int64) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT type,created_at,changes_json FROM payment_history
+		WHERE payment_id=? ORDER BY created_at,id`, paymentID)
 	if err != nil {
-		return false, fmt.Errorf("read cancellation time: %w", err)
+		return false, fmt.Errorf("read payment status history: %w", err)
 	}
-	return occurredAt <= cancelledAt, nil
+	defer rows.Close()
+	var cancelledAt *int64
+	for rows.Next() {
+		var historyType, changes string
+		var createdAt int64
+		if err := rows.Scan(&historyType, &createdAt, &changes); err != nil {
+			return false, fmt.Errorf("scan payment status history: %w", err)
+		}
+		if historyType == "payment.cancelled" {
+			value := createdAt
+			cancelledAt = &value
+			continue
+		}
+		var transition struct {
+			Status struct {
+				From string `json:"from"`
+				To   string `json:"to"`
+			} `json:"status"`
+		}
+		if err := json.Unmarshal([]byte(changes), &transition); err != nil || transition.Status.To == "" {
+			continue
+		}
+		if transition.Status.To == "cancelled" {
+			value := createdAt
+			cancelledAt = &value
+			continue
+		}
+		if cancelledAt != nil {
+			if occurredAt > *cancelledAt && occurredAt < createdAt {
+				_ = rows.Close()
+				return true, nil
+			}
+			cancelledAt = nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate payment status history: %w", err)
+	}
+	return cancelledAt != nil && occurredAt > *cancelledAt, nil
 }
-
 func hasConfirmedObservation(ctx context.Context, tx *storage.ImmediateTx, paymentID string) (bool, error) {
 	var found int
 	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM payment_observations WHERE matched_payment_id=? AND match_result IN ('matched','corroborated'))`, paymentID).Scan(&found)

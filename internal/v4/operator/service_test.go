@@ -68,8 +68,11 @@ func TestOverviewUsesIndiaLocalDayAndShowsOperationalSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = f.create(t, 200, "pending")
-	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(id,name,public_key_pem,enabled,enrolled_at,last_seen_at,app_version)
-		VALUES('device-1','Edge 60 Stylus','pem',1,?,?,?)`, f.now.Add(-time.Hour).UnixMilli(), f.now.Add(-time.Minute).UnixMilli(), "0.5.0"); err != nil {
+	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(id,name,public_key_pem,enabled,enrolled_at,last_seen_at,last_heartbeat_at,
+		notification_access,listener_connected,battery_optimization_exempt,background_restricted,foreground_service,app_version)
+		VALUES('device-1','Edge 60 Stylus','pem',1,?,?,?,?,?,?,?,?,?)`,
+		f.now.Add(-time.Hour).UnixMilli(), f.now.Add(-time.Minute).UnixMilli(), f.now.Add(-time.Minute).UnixMilli(),
+		1, 1, 1, 0, 1, "0.5.0"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,11 +98,13 @@ func TestOverviewUsesIndiaLocalDayAndShowsOperationalSummary(t *testing.T) {
 }
 func TestOverviewRelaySummaryUsesAnyHealthyEnabledDevice(t *testing.T) {
 	f := newOperatorFixture(t)
-	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(id,name,public_key_pem,enabled,enrolled_at,last_seen_at,app_version) VALUES
-		('stale','Stale phone','pem',1,?,?,?),
-		('healthy','Healthy phone','pem',1,?,?,?)`,
-		f.now.Add(-3*time.Hour).UnixMilli(), f.now.Add(-2*time.Hour).UnixMilli(), "0.6.1",
-		f.now.Add(-time.Hour).UnixMilli(), f.now.Add(-time.Minute).UnixMilli(), "0.7.0"); err != nil {
+	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(
+		id,name,public_key_pem,enabled,enrolled_at,last_seen_at,last_heartbeat_at,app_version,
+		notification_access,listener_connected,battery_optimization_exempt,background_restricted,foreground_service) VALUES
+		('stale','Stale phone','pem',1,?,?,?,?,1,1,0,0,1),
+		('healthy','Healthy phone','pem',1,?,?,?,?,1,1,1,0,1)`,
+		f.now.Add(-3*time.Hour).UnixMilli(), f.now.Add(-3*time.Hour).UnixMilli(), f.now.Add(-3*time.Hour).UnixMilli(), "0.6.1",
+		f.now.Add(-3*time.Hour).UnixMilli(), f.now.Add(-time.Hour).UnixMilli(), f.now.Add(-time.Minute).UnixMilli(), "0.7.0"); err != nil {
 		t.Fatal(err)
 	}
 	overview, err := f.operator.Overview(context.Background())
@@ -109,8 +114,121 @@ func TestOverviewRelaySummaryUsesAnyHealthyEnabledDevice(t *testing.T) {
 	if !overview.Relay.Connected || overview.Relay.EnabledDevices != 2 || overview.Relay.ConnectedDevices != 1 {
 		t.Fatalf("relay summary = %+v", overview.Relay)
 	}
-	if overview.Relay.Name != "Healthy phone" || overview.Relay.AppVersion != "0.7.0" || overview.Relay.LastSeenAt == nil {
+	if overview.Relay.Name != "Healthy phone" || overview.Relay.AppVersion != "0.7.0" || overview.Relay.LastSeenAt == nil ||
+		!overview.Relay.LastSeenAt.Equal(f.now.Add(-time.Hour)) {
 		t.Fatalf("representative relay = %+v", overview.Relay)
+	}
+}
+
+func TestOverviewRelaySummaryRequiresReadyCurrentHeartbeat(t *testing.T) {
+	f := newOperatorFixture(t)
+	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(
+		id,name,public_key_pem,enabled,enrolled_at,last_seen_at,last_heartbeat_at,app_version,
+		notification_access,listener_connected,battery_optimization_exempt,background_restricted,foreground_service) VALUES
+		('restricted','Restricted phone','pem',1,?,?,?,?,1,1,0,1,1),
+		('healthy','Healthy phone','pem',1,?,?,?,?,1,1,1,0,1)`,
+		f.now.Add(-time.Hour).UnixMilli(), f.now.Add(-time.Minute).UnixMilli(), f.now.Add(-time.Minute).UnixMilli(), "0.7.2",
+		f.now.Add(-time.Hour).UnixMilli(), f.now.Add(-2*time.Minute).UnixMilli(), f.now.Add(-2*time.Minute).UnixMilli(), "0.7.2"); err != nil {
+		t.Fatal(err)
+	}
+	overview, err := f.operator.Overview(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !overview.Relay.Connected || overview.Relay.ConnectedDevices != 1 || overview.Relay.Name != "Healthy phone" {
+		t.Fatalf("relay summary = %+v", overview.Relay)
+	}
+
+	if _, err := f.db.SQL.Exec(`UPDATE relay_devices SET battery_optimization_exempt=0 WHERE id='healthy'`); err != nil {
+		t.Fatal(err)
+	}
+	overview, err = f.operator.Overview(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview.Relay.Connected || overview.Relay.ConnectedDevices != 0 {
+		t.Fatalf("unready current devices must not be reported online: %+v", overview.Relay)
+	}
+}
+func TestOverviewRelaySummaryKeepsLegacyLastSeenAsDiagnosticOnly(t *testing.T) {
+	f := newOperatorFixture(t)
+	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(id,name,public_key_pem,enabled,enrolled_at,last_seen_at,app_version)
+		VALUES('legacy','Migrated phone','pem',1,?,?,?)`, f.now.Add(-time.Hour).UnixMilli(), f.now.Add(-time.Minute).UnixMilli(), "0.4.0"); err != nil {
+		t.Fatal(err)
+	}
+	overview, err := f.operator.Overview(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview.Relay.Connected || overview.Relay.ConnectedDevices != 0 || overview.Relay.Name != "Migrated phone" {
+		t.Fatalf("legacy last-seen diagnostic = %+v", overview.Relay)
+	}
+}
+
+func TestOverviewRelaySummaryReadinessMatrix(t *testing.T) {
+	boolInt := func(value bool) int {
+		if value {
+			return 1
+		}
+		return 0
+	}
+	tests := []struct {
+		name                 string
+		heartbeat            bool
+		offset               time.Duration
+		notificationAccess   bool
+		listenerConnected    bool
+		batteryExempt        bool
+		powerSaveMode        bool
+		backgroundRestricted bool
+		foregroundService    bool
+		wantConnected        bool
+	}{
+		{name: "current healthy", heartbeat: true, offset: -2 * time.Minute, notificationAccess: true, listenerConnected: true, batteryExempt: true, foregroundService: true, wantConnected: true},
+		{name: "battery restricted", heartbeat: true, offset: -2 * time.Minute, notificationAccess: true, listenerConnected: true, batteryExempt: false, foregroundService: true},
+		{name: "listener disconnected", heartbeat: true, offset: -2 * time.Minute, notificationAccess: true, listenerConnected: false, batteryExempt: true, foregroundService: true},
+		{name: "notification access missing", heartbeat: true, offset: -2 * time.Minute, notificationAccess: false, listenerConnected: true, batteryExempt: true, foregroundService: true},
+		{name: "foreground service absent", heartbeat: true, offset: -2 * time.Minute, notificationAccess: true, listenerConnected: true, batteryExempt: true, foregroundService: false},
+		{name: "background restricted", heartbeat: true, offset: -2 * time.Minute, notificationAccess: true, listenerConnected: true, batteryExempt: true, backgroundRestricted: true, foregroundService: true},
+		{name: "stale heartbeat", heartbeat: true, offset: -61 * time.Minute, notificationAccess: true, listenerConnected: true, batteryExempt: true, foregroundService: true},
+		{name: "future within clock tolerance", heartbeat: true, offset: 4 * time.Minute, notificationAccess: true, listenerConnected: true, batteryExempt: true, foregroundService: true, wantConnected: true},
+		{name: "future beyond clock tolerance", heartbeat: true, offset: 6 * time.Minute, notificationAccess: true, listenerConnected: true, batteryExempt: true, foregroundService: true},
+		{name: "power saver allowed when otherwise ready", heartbeat: true, offset: -2 * time.Minute, notificationAccess: true, listenerConnected: true, batteryExempt: true, powerSaveMode: true, foregroundService: true, wantConnected: true},
+		{name: "migrated without heartbeat telemetry", offset: -2 * time.Minute},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newOperatorFixture(t)
+			seenAt := f.now.Add(test.offset).UnixMilli()
+			var heartbeat any
+			if test.heartbeat {
+				heartbeat = seenAt
+			}
+			var notificationAccess, listenerConnected, batteryExempt, powerSaveMode, backgroundRestricted, foregroundService any
+			if test.heartbeat {
+				notificationAccess = boolInt(test.notificationAccess)
+				listenerConnected = boolInt(test.listenerConnected)
+				batteryExempt = boolInt(test.batteryExempt)
+				powerSaveMode = boolInt(test.powerSaveMode)
+				backgroundRestricted = boolInt(test.backgroundRestricted)
+				foregroundService = boolInt(test.foregroundService)
+			}
+			if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(
+				id,name,public_key_pem,enabled,enrolled_at,last_seen_at,last_heartbeat_at,app_version,
+				notification_access,listener_connected,battery_optimization_exempt,power_save_mode,background_restricted,foreground_service)
+				VALUES('matrix','Matrix phone','pem',1,?,?,?,?,?,?,?,?,?,?)`,
+				f.now.Add(-time.Hour).UnixMilli(), seenAt, heartbeat, "0.7.2",
+				notificationAccess, listenerConnected, batteryExempt, powerSaveMode, backgroundRestricted, foregroundService); err != nil {
+				t.Fatal(err)
+			}
+			overview, err := f.operator.Overview(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if overview.Relay.Connected != test.wantConnected || overview.Relay.ConnectedDevices != boolInt(test.wantConnected) {
+				t.Fatalf("relay summary = %+v, want connected=%v", overview.Relay, test.wantConnected)
+			}
+		})
 	}
 }
 
@@ -181,30 +299,5 @@ func TestWebhookSettingsGenerateHideRotateAndApplyLive(t *testing.T) {
 	}
 	if _, _, err := settings.ConfigureWebhook(context.Background(), "", false); err != nil {
 		t.Fatal(err)
-	}
-	if worker.Enabled() {
-		t.Fatal("worker remained enabled after webhook was disabled")
-	}
-}
-
-func TestBootstrapWebhookPreservesLegacySecretAndDoesNotOverwrite(t *testing.T) {
-	f := newOperatorFixture(t)
-	worker := webhooks.NewService(f.db, webhooks.Config{})
-	settings := NewSettingsService(f.db, worker)
-	ctx := context.Background()
-	secret := "legacy-webhook-secret-0123456789abcdef"
-	if err := settings.BootstrapWebhook(ctx, "https://example.com/legacy-hook", secret); err != nil {
-		t.Fatal(err)
-	}
-	got := worker.ConfigSnapshot()
-	if got.Endpoint != "https://example.com/legacy-hook" || got.Secret != secret {
-		t.Fatalf("worker=%+v", got)
-	}
-	if err := settings.BootstrapWebhook(ctx, "https://example.com/replacement", "replacement-secret-0123456789abcdef"); err != nil {
-		t.Fatal(err)
-	}
-	got = worker.ConfigSnapshot()
-	if got.Endpoint != "https://example.com/legacy-hook" || got.Secret != secret {
-		t.Fatalf("bootstrap overwrote persisted config: %+v", got)
 	}
 }

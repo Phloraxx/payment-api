@@ -48,6 +48,7 @@ type DeviceInfo struct {
 	ID                        string     `json:"id"`
 	Name                      string     `json:"name"`
 	Enabled                   bool       `json:"enabled"`
+	Operational               bool       `json:"operational"`
 	EnrolledAt                time.Time  `json:"enrolled_at"`
 	LastSeenAt                *time.Time `json:"last_seen_at,omitempty"`
 	LastHeartbeatAt           *time.Time `json:"last_heartbeat_at,omitempty"`
@@ -232,6 +233,11 @@ func (s *Service) Devices(ctx context.Context) ([]DeviceInfo, error) {
 	if s == nil || s.DB == nil || s.DB.SQL == nil {
 		return nil, errors.New("relay storage is required")
 	}
+	nowFn := s.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	now := nowFn().UTC()
 	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT id,COALESCE(name,''),enabled,enrolled_at,last_seen_at,last_heartbeat_at,
 		app_version,device_model,android_version,notification_access,listener_connected,battery_optimization_exempt,
 		power_save_mode,background_restricted,foreground_service,pending_count,failed_count,last_successful_delivery_at,last_client_error
@@ -265,6 +271,14 @@ func (s *Service) Devices(ctx context.Context) ([]DeviceInfo, error) {
 		info.BatteryOptimizationExempt = nullableBoolPointer(batteryExempt)
 		info.PowerSaveMode = nullableBoolPointer(powerSave)
 		info.BackgroundRestricted = nullableBoolPointer(backgroundRestricted)
+		age := now.Sub(time.UnixMilli(lastHeartbeat.Int64).UTC())
+		info.Operational = lastHeartbeat.Valid &&
+			age >= -5*time.Minute && age <= time.Hour &&
+			notificationAccess.Valid && notificationAccess.Int64 == 1 &&
+			listenerConnected.Valid && listenerConnected.Int64 == 1 &&
+			batteryExempt.Valid && batteryExempt.Int64 == 1 &&
+			backgroundRestricted.Valid && backgroundRestricted.Int64 == 0 &&
+			foregroundService.Valid && foregroundService.Int64 == 1
 		info.ForegroundService = nullableBoolPointer(foregroundService)
 		info.PendingCount = nullableIntPointer(pendingCount)
 		info.FailedCount = nullableIntPointer(failedCount)

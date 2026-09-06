@@ -334,3 +334,70 @@ func TestParseGooglePayPaidYouNotification(t *testing.T) {
 		t.Fatalf("outgoing GPay notification error = %v, want %v", err, ErrUnrecognized)
 	}
 }
+
+func TestParserRejectsAmbiguousMonetaryAmounts(t *testing.T) {
+	_, err := Parse(Snapshot{
+		PackageName: "example.wallet",
+		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
+		Text:        "Payment received ₹1.25. Available balance ₹100.37",
+	})
+	if !errors.Is(err, ErrAmbiguousAmount) {
+		t.Fatalf("ambiguous notification error = %v, want %v", err, ErrAmbiguousAmount)
+	}
+}
+
+func TestParserRejectsFailedIncomingLanguage(t *testing.T) {
+	for _, text := range []string{
+		"Payment failed but ₹100.37 received",
+		"UPI payment declined: received ₹100.37",
+		"Payment pending, amount ₹100.37 received",
+	} {
+		if _, err := Parse(Snapshot{PackageName: "example.wallet", PostedAt: time.Now().UTC(), Text: text}); !errors.Is(err, ErrUnrecognized) {
+			t.Errorf("Parse(%q) error = %v, want %v", text, err, ErrUnrecognized)
+		}
+	}
+}
+
+func TestGoogleMessagesKotakMentionWithoutBankCreditStaysGeneric(t *testing.T) {
+	got, err := Parse(Snapshot{
+		PackageName: GoogleMessagesPackage,
+		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
+		Title:       "KOTAK",
+		Text:        "You received INR 100.37. Learn more about Kotak services.",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got.Source != GenericMessageSource || got.CollectionProfileID != "" {
+		t.Fatalf("observation = %+v, want generic Google Messages evidence", got)
+	}
+}
+
+func TestPayerUPIUsesIncomingPayerClause(t *testing.T) {
+	got, err := Parse(Snapshot{
+		PackageName: "example.wallet",
+		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
+		Title:       "Merchant merchant@upi",
+		Text:        "Received ₹1.25 from Alice (alice@upi)",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got.PayerName != "Alice" || got.PayerUPIID != "alice@upi" {
+		t.Fatalf("payer = %q / %q", got.PayerName, got.PayerUPIID)
+	}
+}
+
+func TestPayerUPIPrefersFirstVPAInIncomingClause(t *testing.T) {
+	got, err := Parse(Snapshot{
+		PackageName: "example.wallet",
+		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
+		Text:        "Received ₹1.25 from Alice (alice@upi) to merchant@upi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PayerName != "Alice" || got.PayerUPIID != "alice@upi" {
+		t.Fatalf("payer = %q / %q", got.PayerName, got.PayerUPIID)
+	}
+}

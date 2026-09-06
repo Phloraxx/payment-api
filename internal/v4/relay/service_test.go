@@ -1,16 +1,19 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -168,6 +171,206 @@ func TestSignedPaytmEventMatchesPaymentAndIsIdempotent(t *testing.T) {
 	}
 	if countRows(t, db, "relay_events") != 1 || countRows(t, db, "payment_observations") != 1 || countRows(t, db, "webhook_deliveries") != 2 {
 		t.Fatal("duplicate relay event created duplicate state")
+	}
+}
+func TestDuplicateRelayEventIDRejectsChangedPayload(t *testing.T) {
+	ctx := context.Background()
+	db := openRelayDB(t)
+	createdAt := time.Date(2026, 9, 1, 3, 30, 0, 0, time.UTC)
+	insertProfile(t, db, "paytm", "paytm_notification", "merchant@paytm", true, createdAt)
+	paymentService, created := createPayment(t, db, createdAt, "duplicate-payload")
+	priv, deviceID := enrollTestDevice(t, db, createdAt.Add(-time.Minute))
+	relayService := NewService(db, paymentService)
+	receivedAt := createdAt.Add(2 * time.Minute)
+	relayService.Now = func() time.Time { return receivedAt }
+	eventID := strings.Repeat("d", 64)
+	first := marshalEvent(t, EventInput{
+		SchemaVersion: 1, EventID: eventID, PackageName: observations.PaytmBusinessPackage,
+		PostedAtMS: receivedAt.UnixMilli(), Title: "Payment Received on Paytm",
+		Text: "₹100.37 Received from Rahul", AmountHintPaise: 10037,
+	})
+	if _, err := relayService.IngestSigned(ctx, signedAuth(t, priv, deviceID, receivedAt, first), first); err != nil {
+		t.Fatal(err)
+	}
+	changed := marshalEvent(t, EventInput{
+		SchemaVersion: 1, EventID: eventID, PackageName: observations.PaytmBusinessPackage,
+		PostedAtMS: receivedAt.UnixMilli(), Title: "Payment Received on Paytm",
+		Text: "₹100.37 Received from Mallory", AmountHintPaise: 10037,
+	})
+	_, err := relayService.IngestSigned(ctx, signedAuth(t, priv, deviceID, receivedAt, changed), changed)
+	var relayErr *Error
+	if !errors.As(err, &relayErr) || relayErr.Code != "RELAY_EVENT_ID_CONFLICT" || relayErr.HTTPStatus != http.StatusConflict {
+		t.Fatalf("changed duplicate error=%v, want relay event conflict", err)
+	}
+	if countRows(t, db, "relay_events") != 1 || countRows(t, db, "payment_observations") != 1 {
+		t.Fatal("changed duplicate mutated stored event state")
+	}
+	if created.Payment.ID == "" {
+		t.Fatal("test payment was not created")
+	}
+}
+
+func TestAmbiguousRelayNotificationIsVisibleInActivity(t *testing.T) {
+	ctx := context.Background()
+	db := openRelayDB(t)
+	now := time.Date(2026, 9, 1, 4, 0, 0, 0, time.UTC)
+	priv, deviceID := enrollTestDevice(t, db, now.Add(-time.Minute))
+	service := NewService(db, payments.NewService(db))
+	service.Now = func() time.Time { return now }
+	body := marshalEvent(t, EventInput{
+		SchemaVersion: 1, EventID: strings.Repeat("b", 64),
+		PackageName: "com.example.wallet", PostedAtMS: now.UnixMilli(),
+		Title: "Payment received", Text: "₹100.37 received; balance ₹200.00",
+		AmountHintPaise: 10037,
+	})
+
+	result, err := service.IngestSigned(ctx, signedAuth(t, priv, deviceID, now, body), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "ambiguous" || result.Transitioned || result.PaymentID != "" {
+		t.Fatalf("ambiguous relay result=%+v", result)
+	}
+	var status, reason string
+	if err := db.SQL.QueryRow(`SELECT status,error FROM relay_events WHERE id=?`, result.RelayEventID).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "ambiguous" || !strings.Contains(reason, "multiple monetary amounts") {
+		t.Fatalf("relay event status=%s reason=%q", status, reason)
+	}
+	if countRows(t, db, "payment_observations") != 0 {
+		t.Fatal("ambiguous notification must not create a payment observation")
+	}
+}
+
+func TestAmbiguousFinalizerReportsRetentionWinner(t *testing.T) {
+	ctx := context.Background()
+	db := openRelayDB(t)
+	now := time.Date(2026, 9, 1, 4, 30, 0, 0, time.UTC)
+	if _, err := db.SQL.Exec(`INSERT INTO relay_devices(id,public_key_pem,enabled,enrolled_at) VALUES('race-device','pem',1,?)`, now.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO relay_events(id,device_id,source_event_id,package_name,posted_at,received_at,status)
+		VALUES('race-event','race-device','race-source','com.example.wallet',?,?,?)`,
+		now.UnixMilli(), now.UnixMilli(), "ignored"); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(db, payments.NewService(db))
+	status, err := service.finishAmbiguous(ctx, "race-event", errors.New("ambiguous parser result"))
+	if err != nil || status != "ignored" {
+		t.Fatalf("finalizer status=%q err=%v", status, err)
+	}
+	var stored string
+	if err := db.SQL.QueryRow(`SELECT status FROM relay_events WHERE id='race-event'`).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != "ignored" {
+		t.Fatalf("retention winner was overwritten: %q", stored)
+	}
+}
+
+func TestRedactRawEventsPreservesIdentityAndMarksStuckReceived(t *testing.T) {
+	ctx := context.Background()
+	db := openRelayDB(t)
+	now := time.Date(2026, 9, 10, 3, 0, 0, 0, time.UTC)
+	_, err := db.SQL.Exec(`INSERT INTO relay_devices(id,public_key_pem,enabled,enrolled_at) VALUES('retention-device','pem',1,?)`, now.UnixMilli())
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := now.Add(-15 * 24 * time.Hour).UnixMilli()
+	recent := now.Add(-24 * time.Hour).UnixMilli()
+	insert := `INSERT INTO relay_events(id,device_id,source_event_id,package_name,posted_at,received_at,title,text,big_text,payload_hash,status)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)`
+	if _, err := db.SQL.Exec(insert, "old-event", "retention-device", "old-source", "com.example.paytm", old, old,
+		"old title", "old body", "old details", bytes.Repeat([]byte{1}, sha256.Size), "matched"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(insert, "pending-event", "retention-device", "pending-source", "com.example.paytm", old, old,
+		"pending title", "pending body", "pending details", bytes.Repeat([]byte{2}, sha256.Size), "received"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(insert, "legacy-event", "retention-device", "legacy-source", "com.example.paytm", old, old,
+		"legacy title", "legacy body", "legacy details", nil, "matched"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(insert, "recent-event", "retention-device", "recent-source", "com.example.paytm", recent, recent,
+		"recent title", "recent body", "recent details", bytes.Repeat([]byte{3}, sha256.Size), "matched"); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(db, payments.NewService(db))
+	redacted, err := service.RedactRawEvents(ctx, now.Add(-14*24*time.Hour), 10)
+	if err != nil || redacted != 3 {
+		t.Fatalf("redacted=%d err=%v", redacted, err)
+	}
+	var oldTitle, oldText, pendingTitle, recentTitle sql.NullString
+	var oldStatus, pendingStatus, pendingError string
+	var payloadHash []byte
+	if err := db.SQL.QueryRow(`SELECT title,text,payload_hash,status FROM relay_events WHERE id='old-event'`).Scan(&oldTitle, &oldText, &payloadHash, &oldStatus); err != nil {
+		t.Fatal(err)
+	}
+	if oldTitle.Valid || oldText.Valid || len(payloadHash) != sha256.Size || oldStatus != "matched" {
+		t.Fatalf("redacted event title=%v text=%v payload_hash=%d status=%s", oldTitle, oldText, len(payloadHash), oldStatus)
+	}
+	var legacyHash []byte
+	if err := db.SQL.QueryRow(`SELECT title,text,payload_hash FROM relay_events WHERE id='legacy-event'`).Scan(&oldTitle, &oldText, &legacyHash); err != nil {
+		t.Fatal(err)
+	}
+	if oldTitle.Valid || oldText.Valid || !bytes.HasPrefix(legacyHash, []byte("legacy:")) {
+		t.Fatalf("legacy redaction title=%v text=%v payload_hash=%q", oldTitle, oldText, legacyHash)
+	}
+	legacyInput := EventInput{
+		PackageName: "com.example.paytm", PostedAtMS: old,
+		Title: "legacy title", Text: "legacy body", BigText: "legacy details",
+	}
+	var found, same bool
+	if err := db.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		var err error
+		_, found, same, err = existingRelayEvent(ctx, tx, "retention-device", "legacy-source",
+			legacyInput, time.UnixMilli(old), true, bytes.Repeat([]byte{9}, sha256.Size))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !found || !same {
+		t.Fatalf("redacted legacy event did not remain idempotent: found=%v same=%v", found, same)
+	}
+	legacyInput.PostedAtMS = old + 1000
+	if err := db.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		var err error
+		_, found, same, err = existingRelayEvent(ctx, tx, "retention-device", "legacy-source",
+			legacyInput, time.UnixMilli(old+1000), true, bytes.Repeat([]byte{9}, sha256.Size))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !found || same {
+		t.Fatalf("redacted legacy event accepted changed posted_at: found=%v same=%v", found, same)
+	}
+
+	legacyInput.PostedAtMS = 0
+	if err := db.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		var err error
+		_, found, same, err = existingRelayEvent(ctx, tx, "retention-device", "legacy-source",
+			legacyInput, now, false, bytes.Repeat([]byte{9}, sha256.Size))
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !found || !same {
+		t.Fatalf("redacted legacy event with unreliable posted_at lost idempotency: found=%v same=%v", found, same)
+	}
+
+	if err := db.SQL.QueryRow(`SELECT title,status,error FROM relay_events WHERE id='pending-event'`).Scan(&pendingTitle, &pendingStatus, &pendingError); err != nil {
+		t.Fatal(err)
+	}
+	if pendingTitle.Valid || pendingStatus != "ignored" || pendingError == "" {
+		t.Fatalf("stuck received event title=%v status=%s error=%q", pendingTitle, pendingStatus, pendingError)
+	}
+	if err := db.SQL.QueryRow(`SELECT title FROM relay_events WHERE id='recent-event'`).Scan(&recentTitle); err != nil {
+		t.Fatal(err)
+	}
+	if !recentTitle.Valid {
+		t.Fatal("recent event body was redacted")
 	}
 }
 
@@ -359,16 +562,17 @@ func TestRetryResumesPreviouslyReceivedRelayEvent(t *testing.T) {
 	service := NewService(db, paymentService)
 	service.Now = func() time.Time { return receivedAt }
 	sourceID := strings.Repeat("f", 64)
-	_, err := db.SQL.Exec(`INSERT INTO relay_events(id,device_id,source_event_id,package_name,posted_at,received_at,status)
-		VALUES('relay_existing',?,?,?,?,?,'received')`, deviceID, sourceID, observations.PaytmBusinessPackage, occurredAt.UnixMilli(), receivedAt.UnixMilli())
-	if err != nil {
-		t.Fatal(err)
-	}
 	body := marshalEvent(t, EventInput{
 		SchemaVersion: 1, EventID: sourceID,
 		PackageName: observations.PaytmBusinessPackage,
 		PostedAtMS:  occurredAt.UnixMilli(), Title: "Payment Received on Paytm", Text: "₹100.37 Received from Rahul",
+		AmountHintPaise: 10037,
 	})
+	_, err := db.SQL.Exec(`INSERT INTO relay_events(id,device_id,source_event_id,package_name,posted_at,received_at,amount_hint_paise,title,text,status)
+		VALUES('relay_existing',?,?,?,?,?,10037,?,?,'received')`, deviceID, sourceID, observations.PaytmBusinessPackage, occurredAt.UnixMilli(), receivedAt.UnixMilli(), "Payment Received on Paytm", "₹100.37 Received from Rahul")
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := service.IngestSigned(ctx, signedAuth(t, priv, deviceID, receivedAt, body), body)
 	if err != nil {
 		t.Fatal(err)
@@ -525,23 +729,22 @@ func TestGenericWalletNotificationIsAmbiguousAcrossProfileReservations(t *testin
 	}
 }
 
-func TestTwoEnabledPhonesCanRelaySameIncomingPaymentSafely(t *testing.T) {
+func TestOneEnabledPhoneCanRelaySameIncomingPaymentSafely(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 4, 8, 30, 0, 0, time.UTC)
 	insertProfile(t, db, "paytm", "paytm_notification", "merchant@paytm", true, now.Add(-time.Hour))
-	paymentService, created := createPayment(t, db, now, "two-phone-match")
-	firstPriv, firstID := enrollTestDevice(t, db, now.Add(-time.Hour))
-	secondPriv, secondID := enrollTestDevice(t, db, now.Add(-30*time.Minute))
+	paymentService, created := createPayment(t, db, now, "one-phone-match")
+	priv, deviceID := enrollTestDevice(t, db, now.Add(-time.Hour))
 	relayService := NewService(db, paymentService)
 	occurred := now.Add(time.Minute)
 	relayService.Now = func() time.Time { return occurred.Add(time.Second) }
 	first := marshalEvent(t, EventInput{SchemaVersion: 1, EventID: strings.Repeat("b", 64), PackageName: "com.example.wallet", PostedAtMS: occurred.UnixMilli(), Text: "₹100.37 received from Rahul"})
-	one, err := relayService.IngestSigned(context.Background(), signedAuth(t, firstPriv, firstID, occurred.Add(time.Second), first), first)
+	one, err := relayService.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, occurred.Add(time.Second), first), first)
 	if err != nil {
 		t.Fatal(err)
 	}
 	second := marshalEvent(t, EventInput{SchemaVersion: 1, EventID: strings.Repeat("c", 64), PackageName: "com.example.wallet", PostedAtMS: occurred.Add(500 * time.Millisecond).UnixMilli(), Text: "₹100.37 received from Rahul"})
-	two, err := relayService.IngestSigned(context.Background(), signedAuth(t, secondPriv, secondID, occurred.Add(2*time.Second), second), second)
+	two, err := relayService.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, occurred.Add(2*time.Second), second), second)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,6 +755,6 @@ func TestTwoEnabledPhonesCanRelaySameIncomingPaymentSafely(t *testing.T) {
 		t.Fatalf("second=%+v", two)
 	}
 	if countRows(t, db, "relay_events") != 2 || countRows(t, db, "payment_observations") != 2 {
-		t.Fatal("two-phone audit evidence was not retained")
+		t.Fatal("audit evidence was not retained")
 	}
 }

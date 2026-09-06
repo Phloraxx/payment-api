@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"strconv"
 	"strings"
@@ -219,9 +220,8 @@ func normalizeCreateInput(input CreateInput) (CreateInput, [32]byte, [32]byte, e
 	input.ExternalID = strings.TrimSpace(input.ExternalID)
 	input.IdempotencyScope = strings.TrimSpace(input.IdempotencyScope)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
-
-	if input.RequestedAmountPaise <= 0 || input.RequestedAmountPaise%100 != 0 {
-		return CreateInput{}, [32]byte{}, [32]byte{}, fmt.Errorf("%w: amount must be positive whole INR", ErrInvalidPaymentInput)
+	if input.RequestedAmountPaise <= 0 || input.RequestedAmountPaise%100 != 0 || input.RequestedAmountPaise > math.MaxInt64-199 {
+		return CreateInput{}, [32]byte{}, [32]byte{}, fmt.Errorf("%w: amount must be positive whole INR within the payable range", ErrInvalidPaymentInput)
 	}
 	if input.Name == "" || utf8.RuneCountInString(input.Name) > 120 {
 		return CreateInput{}, [32]byte{}, [32]byte{}, fmt.Errorf("%w: name must contain 1-120 characters", ErrInvalidPaymentInput)

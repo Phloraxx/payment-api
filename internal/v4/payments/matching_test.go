@@ -2,6 +2,7 @@ package payments
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -63,6 +64,56 @@ func TestApplyObservationMarksPendingPaidAtomically(t *testing.T) {
 	}
 	assertCount(t, db.SQL, "payment_history", 2)
 	assertCount(t, db.SQL, "webhook_deliveries", 2)
+}
+
+func TestGenericProfileIsRevalidatedInsideMatchingTransaction(t *testing.T) {
+	ctx := context.Background()
+	db := openAllocatorDB(t)
+	base := time.UnixMilli(1_788_200_000_000).UTC()
+	s := newTestService(t, db, base)
+	first, err := s.Create(ctx, validCreateInput("profile-race-first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO collection_profiles(id,label,upi_id,parser,enabled,active,created_at,updated_at)
+		VALUES('kotak','Kotak','merchant@kotak','kotak_sms',1,0,?,?)`, base.UnixMilli(), base.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`UPDATE collection_profiles SET active=0 WHERE id='paytm'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`UPDATE collection_profiles SET active=1 WHERE id='kotak'`); err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.Create(ctx, validCreateInput("profile-race-second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Payment.PayableAmountPaise != second.Payment.PayableAmountPaise {
+		t.Fatalf("test requires overlapping reservations: %d != %d", first.Payment.PayableAmountPaise, second.Payment.PayableAmountPaise)
+	}
+	occurred := base.Add(time.Minute)
+	received := occurred.Add(time.Second)
+	insertRelayEvent(t, db, "relay_profile_race", "source_profile_race", "com.example.wallet", occurred, received)
+	obs := observations.Observation{
+		Source: observations.GenericNotificationSource, CollectionProfileID: "paytm",
+		AmountPaise: first.Payment.PayableAmountPaise, PayerName: "Rahul",
+		OccurredAt: occurred, OccurredAtSource: "notification_text",
+	}
+	if _, err := s.ApplyObservation(ctx, "relay_profile_race", obs, received); !errors.Is(err, ErrObservationAmbiguous) {
+		t.Fatalf("profile race error = %v, want ErrObservationAmbiguous", err)
+	}
+	assertCount(t, db.SQL, "payment_observations", 0)
+	var firstStatus, secondStatus string
+	if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id=?`, first.Payment.ID).Scan(&firstStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id=?`, second.Payment.ID).Scan(&secondStatus); err != nil {
+		t.Fatal(err)
+	}
+	if firstStatus != "pending" || secondStatus != "pending" {
+		t.Fatalf("payments changed after ambiguous profile race: %s / %s", firstStatus, secondStatus)
+	}
 }
 func TestDifferentRelayEventForAlreadyPaidPaymentDoesNotTransitionTwice(t *testing.T) {
 	ctx := context.Background()
@@ -132,6 +183,7 @@ func TestCancelledPaymentOnlyMatchesMoneyThatOccurredBeforeCancellation(t *testi
 		t.Fatal(err)
 	}
 	cancelAt := createdAt.Add(2 * time.Minute)
+
 	s.Now = func() time.Time { return cancelAt }
 	if _, err := s.Cancel(ctx, created.Payment.ID); err != nil {
 		t.Fatal(err)
@@ -150,6 +202,46 @@ func TestCancelledPaymentOnlyMatchesMoneyThatOccurredBeforeCancellation(t *testi
 	got, _ := s.Get(ctx, created.Payment.ID)
 	if got.Payment.Status != "paid" {
 		t.Fatalf("payment status = %s", got.Payment.Status)
+	}
+}
+func TestCancelledReopenedPaymentRejectsEvidenceFromCancellationGap(t *testing.T) {
+	ctx := context.Background()
+	db := openAllocatorDB(t)
+	base := time.UnixMilli(1_788_200_000_000).UTC()
+	s := newTestService(t, db, base)
+	created, err := s.Create(ctx, validCreateInput("cancel-reopen-gap"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCancel := base.Add(2 * time.Minute)
+	s.Now = func() time.Time { return firstCancel }
+	if _, err := s.Cancel(ctx, created.Payment.ID); err != nil {
+		t.Fatal(err)
+	}
+	reopenedAt := base.Add(3 * time.Minute)
+	if _, err := db.SQL.Exec(`UPDATE payments SET status='pending' WHERE id=?`, created.Payment.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`INSERT INTO payment_history(id,payment_id,type,actor,summary,changes_json,created_at)
+		VALUES('hist_reopen_gap',?,'payment.updated','admin','Payment reopened','{"status":{"from":"cancelled","to":"pending"}}',?)`,
+		created.Payment.ID, reopenedAt.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	secondCancel := base.Add(4 * time.Minute)
+	s.Now = func() time.Time { return secondCancel }
+	if _, err := s.Cancel(ctx, created.Payment.ID); err != nil {
+		t.Fatal(err)
+	}
+	occurred := base.Add(2*time.Minute + 30*time.Second)
+	received := base.Add(5 * time.Minute)
+	insertRelayEvent(t, db, "relay_cancel_gap", "source_cancel_gap", observations.PaytmBusinessPackage, occurred, received)
+	s.Now = func() time.Time { return received }
+	result, err := s.ApplyObservation(ctx, "relay_cancel_gap", paytmObservation(created.Payment.PayableAmountPaise, occurred, "notification_text"), received)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Result != "unmatched" || result.PaymentID != "" || result.Transitioned {
+		t.Fatalf("cancellation-gap evidence = %+v", result)
 	}
 }
 

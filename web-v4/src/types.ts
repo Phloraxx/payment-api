@@ -117,6 +117,7 @@ export interface DeviceInfo {
   id: string;
   name: string;
   enabled: boolean;
+  operational: boolean;
   enrolled_at: string;
   last_seen_at?: string;
   last_heartbeat_at?: string;
