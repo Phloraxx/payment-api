@@ -538,7 +538,7 @@ func TestPreEnrollmentNotificationIsStoredButIgnored(t *testing.T) {
 	body := marshalEvent(t, EventInput{
 		SchemaVersion: 1, EventID: strings.Repeat("e", 64),
 		PackageName: observations.PaytmBusinessPackage,
-		PostedAtMS:  now.Add(-10 * time.Minute).UnixMilli(),
+		PostedAtMS:  now.Add(-90 * time.Second).UnixMilli(),
 		Title:       "Payment Received on Paytm", Text: "₹100.37 Received from Rahul",
 	})
 	result, err := service.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, now, body), body)

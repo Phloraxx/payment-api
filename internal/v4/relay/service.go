@@ -210,7 +210,7 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 		result.Status = "ignored"
 		return result, nil
 	}
-	if !device.EnrolledAt.IsZero() && obs.OccurredAt.Before(device.EnrolledAt.Add(-2*time.Minute)) {
+	if !device.EnrolledAt.IsZero() && obs.OccurredAt.Before(device.EnrolledAt) {
 		if err := s.finishIgnored(ctx, result.RelayEventID, errors.New("notification predates relay enrollment")); err != nil {
 			return IngestResult{}, err
 		}
@@ -375,7 +375,7 @@ func (s *Service) acceptEvent(ctx context.Context, device verifiedDevice, in Eve
 		}
 		status := "received"
 		errorText := any(nil)
-		if postedReliable && !device.EnrolledAt.IsZero() && postedAt.Before(device.EnrolledAt.Add(-2*time.Minute)) {
+		if postedReliable && !device.EnrolledAt.IsZero() && postedAt.Before(device.EnrolledAt) {
 			status = "ignored"
 			errorText = "notification predates relay enrollment"
 		}

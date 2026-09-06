@@ -511,20 +511,25 @@ Restore acceptance:
 
 ## Sensitive-data retention
 
-Keep payment/history records according to business/audit needs, but aggressively bound notification content.
+Keep payment/history records according to business/audit needs, but bound relay
+notification bodies. The runtime redactor runs once at startup and hourly,
+processing at most 500 rows per pass. Its default boundary is seven days,
+configurable with `PAYGATE_V4_RAW_EVENT_RETENTION` between `1h` and `30d`.
 
-Recommended policy to validate during implementation:
+Redaction clears `relay_events.title`, `text`, and `big_text` only. It retains
+the event identity, source package/event ID, timestamps, amount hint, payload
+hash, status/error, and any normalized observation/payment/history records.
+Rows still marked `received` at expiry become `ignored` with an expiry reason,
+so expired bodies cannot later trigger parsing or payment transitions.
 
-- relay raw title/text/bigText: days, not permanent;
-- normalized payer fields: retained with payment when operationally useful;
-- unmatched raw notification data: short retention;
-- delivered local Android queue: short retention;
-- failed local rows: longer but bounded diagnostics retention;
-- pairing sessions: purge quickly after use/expiry;
-- admin sessions: purge after expiry/revocation;
-- delivered webhook bodies: bounded retention after operational window.
+The Android relay intentionally has no automatic age, row-count, or retry
+deletion. Settings provides an explicit confirmation action that clears
+delivered/local-only/candidate rows while preserving pending, retry, and failed
+evidence. App-data deletion remains the user's separate Android control.
 
-If we need stronger deletion hygiene for notification text, evaluate `PRAGMA secure_delete=FAST` against write cost and WAL/backup behavior rather than assuming row deletion instantly removes every forensic copy.
+Backups and WAL files may retain prior SQLite pages. If stronger deletion
+hygiene is required, evaluate `PRAGMA secure_delete=FAST` against write cost
+and backup behavior rather than assuming row updates erase every forensic copy.
 
 Reference: https://www.sqlite.org/pragma.html#pragma_secure_delete
 

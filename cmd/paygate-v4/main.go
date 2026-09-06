@@ -146,6 +146,14 @@ func configFromEnv() (v4runtime.Config, error) {
 		}
 		retention = parsed
 	}
+	var rawEventRetention time.Duration
+	if value := strings.TrimSpace(os.Getenv("PAYGATE_V4_RAW_EVENT_RETENTION")); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return v4runtime.Config{}, fmt.Errorf("invalid PAYGATE_V4_RAW_EVENT_RETENTION: %w", err)
+		}
+		rawEventRetention = parsed
+	}
 	origins := splitCSV(os.Getenv("PAYGATE_V4_ALLOWED_ORIGINS"))
 	return v4runtime.Config{
 		DataDir:                  os.Getenv("PAYGATE_V4_DATA_DIR"),
@@ -159,6 +167,7 @@ func configFromEnv() (v4runtime.Config, error) {
 		BackupDir:                os.Getenv("PAYGATE_V4_BACKUP_DIR"),
 		BackupHourUTC:            hour,
 		BackupRetention:          retention,
+		RawEventRetention:        rawEventRetention,
 	}, nil
 }
 

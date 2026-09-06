@@ -20,8 +20,15 @@ type Config struct {
 	BackupDir                string
 	BackupHourUTC            int
 	BackupRetention          int
+	RawEventRetention        time.Duration
 	ExpiryInterval           time.Duration
 }
+
+const (
+	defaultRawEventRetention = 7 * 24 * time.Hour
+	minRawEventRetention     = 1 * time.Hour
+	maxRawEventRetention     = 30 * 24 * time.Hour
+)
 
 func (c Config) normalized() (Config, error) {
 	if strings.TrimSpace(c.DataDir) == "" {
@@ -56,6 +63,12 @@ func (c Config) normalized() (Config, error) {
 	}
 	if c.BackupRetention < 1 || c.BackupRetention > 365 {
 		return Config{}, errors.New("backup retention must be between 1 and 365")
+	}
+	if c.RawEventRetention == 0 {
+		c.RawEventRetention = defaultRawEventRetention
+	}
+	if c.RawEventRetention < minRawEventRetention || c.RawEventRetention > maxRawEventRetention {
+		return Config{}, errors.New("raw event retention must be between 1h and 30d")
 	}
 	if c.ExpiryInterval <= 0 {
 		c.ExpiryInterval = 30 * time.Second
