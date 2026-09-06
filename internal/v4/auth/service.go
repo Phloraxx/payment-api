@@ -129,24 +129,32 @@ func (s *Service) ChangePassword(ctx context.Context, currentPassword, newPasswo
 	if err := s.ready(); err != nil {
 		return err
 	}
+	var encodedCurrent string
+	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE singleton=1`).Scan(&encodedCurrent); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotInitialized
+	} else if err != nil {
+		return fmt.Errorf("read admin password: %w", err)
+	}
+	ok, err := verifyPassword(encodedCurrent, currentPassword)
+	if err != nil {
+		return fmt.Errorf("verify admin password: %w", err)
+	}
+	if !ok {
+		return ErrInvalidCredentials
+	}
 	encodedNew, err := s.hashPassword(newPassword)
 	if err != nil {
 		return err
 	}
 	now := s.now().UnixMilli()
 	return s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
-		var encodedCurrent string
-		if err := tx.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE singleton=1`).Scan(&encodedCurrent); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return ErrNotInitialized
-			}
-			return fmt.Errorf("read admin password: %w", err)
+		var current string
+		if err := tx.QueryRowContext(ctx, `SELECT password_hash FROM admin_credentials WHERE singleton=1`).Scan(&current); errors.Is(err, sql.ErrNoRows) {
+			return ErrNotInitialized
+		} else if err != nil {
+			return fmt.Errorf("re-read admin password: %w", err)
 		}
-		ok, err := verifyPassword(encodedCurrent, currentPassword)
-		if err != nil {
-			return fmt.Errorf("verify admin password: %w", err)
-		}
-		if !ok {
+		if current != encodedCurrent {
 			return ErrInvalidCredentials
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE admin_credentials SET password_hash=?,updated_at=? WHERE singleton=1`, encodedNew, now); err != nil {
