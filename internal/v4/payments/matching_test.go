@@ -104,6 +104,41 @@ func TestApplyObservationRejectsStaleRelayEnrollment(t *testing.T) {
 		t.Fatalf("stale relay event changed payment to %q", got.Payment.Status)
 	}
 }
+func TestApplyObservationRejectsStaleRelayEnrollmentOnReplay(t *testing.T) {
+	ctx := context.Background()
+	db := openAllocatorDB(t)
+	createdAt := time.UnixMilli(1_788_200_000_000).UTC()
+	s := newTestService(t, db, createdAt)
+	created, err := s.Create(ctx, validCreateInput("match-stale-replay"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	occurred := createdAt.Add(2 * time.Minute)
+	received := occurred.Add(time.Second)
+	insertRelayEvent(t, db, "relay_stale_replay", "source_stale_replay", observations.PaytmBusinessPackage, occurred, received)
+	var enrolledAt int64
+	if err := db.SQL.QueryRow(`SELECT enrolled_at FROM relay_devices WHERE id='device_1'`).Scan(&enrolledAt); err != nil {
+		t.Fatal(err)
+	}
+	obs := paytmObservation(created.Payment.PayableAmountPaise, occurred, "notification_posted_at")
+	if _, err := s.ApplyObservationForRelay(ctx, "relay_stale_replay", obs, received, "device_1", time.UnixMilli(enrolledAt).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`UPDATE relay_devices SET enrolled_at=? WHERE id='device_1'`, enrolledAt+1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApplyObservationForRelay(ctx, "relay_stale_replay", obs, received, "device_1", time.UnixMilli(enrolledAt).UTC()); !errors.Is(err, ErrRelayEventNotFound) {
+		t.Fatalf("stale replay error = %v", err)
+	}
+	assertCount(t, db.SQL, "payment_observations", 1)
+	got, err := s.Get(ctx, created.Payment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Payment.Status != "paid" {
+		t.Fatalf("stale replay changed payment to %q", got.Payment.Status)
+	}
+}
 
 func TestGenericProfileIsRevalidatedInsideMatchingTransaction(t *testing.T) {
 	ctx := context.Background()

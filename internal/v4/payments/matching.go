@@ -72,6 +72,37 @@ func (s *Service) applyObservation(ctx context.Context, relayEventID string, obs
 
 	var result MatchResult
 	err := s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
+		var relayStatus, relayDeviceID string
+		if deviceID != "" {
+			var queryErr error
+			queryErr = tx.QueryRowContext(ctx, `SELECT status,device_id FROM relay_events WHERE id=?`, relayEventID).
+				Scan(&relayStatus, &relayDeviceID)
+			if errors.Is(queryErr, sql.ErrNoRows) {
+				return ErrRelayEventNotFound
+			}
+			if queryErr != nil {
+				return fmt.Errorf("read relay event status: %w", queryErr)
+			}
+			if relayStatus != "received" {
+				return ErrRelayEventNotFound
+			}
+			if relayDeviceID != deviceID {
+				return ErrRelayEventNotFound
+			}
+			var enabled int
+			var currentEnrolledAt int64
+			queryErr = tx.QueryRowContext(ctx, `SELECT enabled,enrolled_at FROM relay_devices WHERE id=?`, deviceID).
+				Scan(&enabled, &currentEnrolledAt)
+			if errors.Is(queryErr, sql.ErrNoRows) {
+				return ErrRelayEventNotFound
+			}
+			if queryErr != nil {
+				return fmt.Errorf("read relay device authorization: %w", queryErr)
+			}
+			if enabled != 1 || currentEnrolledAt != enrolledAt.UnixMilli() {
+				return ErrRelayEventNotFound
+			}
+		}
 		replayed, found, err := existingObservationResult(ctx, tx, relayEventID)
 		if err != nil {
 			return err
@@ -81,35 +112,18 @@ func (s *Service) applyObservation(ctx context.Context, relayEventID string, obs
 			result.Replayed = true
 			return nil
 		}
-		var relayStatus, relayDeviceID string
-		err = tx.QueryRowContext(ctx, `SELECT status,device_id FROM relay_events WHERE id=?`, relayEventID).
-			Scan(&relayStatus, &relayDeviceID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrRelayEventNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("read relay event status: %w", err)
-		}
-		if relayStatus != "received" {
-			return ErrRelayEventNotFound
-		}
-		if deviceID != "" {
-			if relayDeviceID != deviceID {
-				return ErrRelayEventNotFound
-			}
-			var enabled int
-			var currentEnrolledAt int64
-			err = tx.QueryRowContext(ctx, `SELECT enabled,enrolled_at FROM relay_devices WHERE id=?`, deviceID).
-				Scan(&enabled, &currentEnrolledAt)
+		if deviceID == "" {
+			err = tx.QueryRowContext(ctx, `SELECT status,device_id FROM relay_events WHERE id=?`, relayEventID).
+				Scan(&relayStatus, &relayDeviceID)
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrRelayEventNotFound
 			}
 			if err != nil {
-				return fmt.Errorf("read relay device authorization: %w", err)
+				return fmt.Errorf("read relay event status: %w", err)
 			}
-			if enabled != 1 || currentEnrolledAt != enrolledAt.UnixMilli() {
-				return ErrRelayEventNotFound
-			}
+		}
+		if relayStatus != "received" {
+			return ErrRelayEventNotFound
 		}
 		packageName, err := relayPackage(ctx, tx, relayEventID)
 		if err != nil {
