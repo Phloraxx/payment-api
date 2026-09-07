@@ -40,8 +40,9 @@ type PairDeviceInput struct {
 }
 
 type PairDeviceResult struct {
-	DeviceID string
-	Enabled  bool
+	DeviceID     string
+	Enabled      bool
+	EnrolledAtMS int64
 }
 
 type DeviceInfo struct {
@@ -129,7 +130,7 @@ func (s *Service) PairDevice(ctx context.Context, input PairDeviceInput) (PairDe
 	}
 	now := nowFn().UTC()
 	tokenHash := sha256.Sum256([]byte(normalized.Token))
-	result := PairDeviceResult{DeviceID: deviceID, Enabled: true}
+	result := PairDeviceResult{DeviceID: deviceID, Enabled: true, EnrolledAtMS: now.UnixMilli()}
 	err = s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
 		var expiresAt int64
 		var consumedAt sql.NullInt64

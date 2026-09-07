@@ -81,7 +81,7 @@ func TestPairDeviceConsumesTokenAndEnablesFingerprintDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.DeviceID != deviceID || !result.Enabled {
+	if result.DeviceID != deviceID || !result.Enabled || result.EnrolledAtMS != now.UnixMilli() {
 		t.Fatalf("pair result = %+v", result)
 	}
 	devices, err := service.Devices(context.Background())

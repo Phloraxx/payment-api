@@ -25,11 +25,12 @@ const (
 )
 
 type RequestAuth struct {
-	DeviceID  string
-	Timestamp string
-	Signature string
-	Method    string
-	Path      string
+	DeviceID        string
+	Timestamp       string
+	Signature       string
+	EnrollmentEpoch string
+	Method          string
+	Path            string
 }
 type Error struct {
 	Code       string
@@ -48,6 +49,10 @@ func relayError(code, message string, status int) error {
 	return &Error{Code: code, Message: message, HTTPStatus: status}
 }
 
+func invalidRelaySignature() error {
+	return relayError("INVALID_RELAY_SIGNATURE", "invalid relay signature", 401)
+}
+
 type verifiedDevice struct {
 	ID         string
 	EnrolledAt time.Time
@@ -57,6 +62,12 @@ func CanonicalRequest(method, path, timestamp string, body []byte) string {
 	sum := sha256.Sum256(body)
 	return fmt.Sprintf("%s\n%s\n%s\n%s", strings.ToUpper(method), path,
 		strings.TrimSpace(timestamp), hex.EncodeToString(sum[:]))
+}
+
+func CanonicalRequestWithEpoch(method, path, timestamp string, enrollmentEpoch int64, body []byte) string {
+	sum := sha256.Sum256(body)
+	return fmt.Sprintf("%s\n%s\n%s\n%d\n%s", strings.ToUpper(method), path,
+		strings.TrimSpace(timestamp), enrollmentEpoch, hex.EncodeToString(sum[:]))
 }
 func verifyRequest(ctx context.Context, db *storage.DB, auth RequestAuth, body []byte, now time.Time) (verifiedDevice, error) {
 	deviceID := strings.ToLower(strings.TrimSpace(auth.DeviceID))
@@ -92,6 +103,15 @@ func verifyRequest(ctx context.Context, db *storage.DB, auth RequestAuth, body [
 	if enabled != 1 {
 		return verifiedDevice{}, relayError("UNKNOWN_RELAY_DEVICE", "relay device is not enrolled or is disabled", 401)
 	}
+	epochHeader := strings.TrimSpace(auth.EnrollmentEpoch)
+	epochBound := epochHeader != ""
+	enrollmentEpoch := int64(0)
+	if epochBound {
+		enrollmentEpoch, err = strconv.ParseInt(epochHeader, 10, 64)
+		if err != nil || enrollmentEpoch <= 0 || enrollmentEpoch != enrolledAt {
+			return verifiedDevice{}, invalidRelaySignature()
+		}
+	}
 	pub, der, err := parsePublicKey(publicKeyPEM)
 	if err != nil {
 		return verifiedDevice{}, relayError("INVALID_RELAY_DEVICE_KEY", "stored relay device key is invalid", 500)
@@ -102,12 +122,15 @@ func verifyRequest(ctx context.Context, db *storage.DB, auth RequestAuth, body [
 	}
 	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(auth.Signature))
 	if err != nil {
-		return verifiedDevice{}, relayError("INVALID_RELAY_SIGNATURE", "invalid relay signature", 401)
+		return verifiedDevice{}, invalidRelaySignature()
 	}
 	canonical := CanonicalRequest(auth.Method, auth.Path, auth.Timestamp, body)
+	if epochBound {
+		canonical = CanonicalRequestWithEpoch(auth.Method, auth.Path, auth.Timestamp, enrollmentEpoch, body)
+	}
 	digest := sha256.Sum256([]byte(canonical))
 	if !ecdsa.VerifyASN1(pub, digest[:], signature) {
-		return verifiedDevice{}, relayError("INVALID_RELAY_SIGNATURE", "invalid relay signature", 401)
+		return verifiedDevice{}, invalidRelaySignature()
 	}
 	return verifiedDevice{ID: deviceID, EnrolledAt: time.UnixMilli(enrolledAt).UTC()}, nil
 }

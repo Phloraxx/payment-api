@@ -66,7 +66,7 @@ func (f relayHTTPFixture) publicKeyPEM(t *testing.T) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
 }
 
-func pairRelayHTTP(t *testing.T, f relayHTTPFixture) {
+func pairRelayHTTP(t *testing.T, f relayHTTPFixture) int64 {
 	t.Helper()
 	session, err := f.service.CreatePairing(context.Background())
 	if err != nil {
@@ -83,6 +83,20 @@ func pairRelayHTTP(t *testing.T, f relayHTTPFixture) {
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), f.device) {
 		t.Fatalf("pair status=%d body=%s", rr.Code, rr.Body.String())
 	}
+	var response struct {
+		EnrolledAtMS int64 `json:"enrolled_at_ms"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	var dbEpoch int64
+	if err := f.db.SQL.QueryRow(`SELECT enrolled_at FROM relay_devices WHERE id=?`, f.device).Scan(&dbEpoch); err != nil {
+		t.Fatal(err)
+	}
+	if response.EnrolledAtMS != dbEpoch {
+		t.Fatalf("pair response epoch=%d db epoch=%d", response.EnrolledAtMS, dbEpoch)
+	}
+	return response.EnrolledAtMS
 }
 func signedRelayRequest(t *testing.T, f relayHTTPFixture, path string, body []byte) *http.Request {
 	t.Helper()

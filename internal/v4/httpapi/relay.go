@@ -15,6 +15,7 @@ const (
 	relayDeviceHeader    = "X-PayGate-Relay-Device"
 	relayTimeHeader      = "X-PayGate-Relay-Time"
 	relaySignatureHeader = "X-PayGate-Relay-Signature"
+	relayEpochHeader     = "X-PayGate-Relay-Epoch"
 )
 
 type RelayHandler struct {
@@ -72,7 +73,7 @@ func (h *RelayHandler) pair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"device_id": result.DeviceID, "enabled": result.Enabled,
+		"device_id": result.DeviceID, "enabled": result.Enabled, "enrolled_at_ms": result.EnrolledAtMS,
 	})
 }
 
@@ -126,7 +127,8 @@ func relayErrorForDeviceRevoke(err error) error {
 func relayAuth(r *http.Request, path string) relay.RequestAuth {
 	return relay.RequestAuth{
 		DeviceID: r.Header.Get(relayDeviceHeader), Timestamp: r.Header.Get(relayTimeHeader),
-		Signature: r.Header.Get(relaySignatureHeader), Method: r.Method, Path: path,
+		Signature: r.Header.Get(relaySignatureHeader), EnrollmentEpoch: r.Header.Get(relayEpochHeader),
+		Method: r.Method, Path: path,
 	}
 }
 

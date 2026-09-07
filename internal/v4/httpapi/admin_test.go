@@ -498,7 +498,7 @@ func TestDeviceOperationalRouteKeepsPhoneEvidenceOnly(t *testing.T) {
 	}
 }
 
-func pairAdminTestDevice(t *testing.T, f adminHTTPFixture) (*ecdsa.PrivateKey, string) {
+func pairAdminTestDevice(t *testing.T, f adminHTTPFixture) (*ecdsa.PrivateKey, string, int64) {
 	t.Helper()
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -519,13 +519,26 @@ func pairAdminTestDevice(t *testing.T, f adminHTTPFixture) (*ecdsa.PrivateKey, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	return privateKey, paired.DeviceID
+	return privateKey, paired.DeviceID, paired.EnrolledAtMS
 }
 
 func signedDeviceAdminRequest(t *testing.T, f adminHTTPFixture, privateKey *ecdsa.PrivateKey, deviceID, method, path string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
-	timestamp := strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
+	return signedDeviceAdminRequestAt(t, f, privateKey, deviceID, method, path, body, 0)
+}
+
+func signedDeviceAdminRequestWithEpoch(t *testing.T, f adminHTTPFixture, privateKey *ecdsa.PrivateKey, deviceID, method, path string, body []byte, enrollmentEpoch int64) *httptest.ResponseRecorder {
+	t.Helper()
+	return signedDeviceAdminRequestAt(t, f, privateKey, deviceID, method, path, body, enrollmentEpoch)
+}
+
+func signedDeviceAdminRequestAt(t *testing.T, f adminHTTPFixture, privateKey *ecdsa.PrivateKey, deviceID, method, path string, body []byte, enrollmentEpoch int64) *httptest.ResponseRecorder {
+	t.Helper()
+	timestamp := strconv.FormatInt(f.handler.Relay.Now().UTC().UnixMilli(), 10)
 	canonical := relay.CanonicalRequest(method, path, timestamp, body)
+	if enrollmentEpoch > 0 {
+		canonical = relay.CanonicalRequestWithEpoch(method, path, timestamp, enrollmentEpoch, body)
+	}
 	digest := sha256.Sum256([]byte(canonical))
 	signature, err := ecdsa.SignASN1(rand.Reader, privateKey, digest[:])
 	if err != nil {
@@ -538,14 +551,83 @@ func signedDeviceAdminRequest(t *testing.T, f adminHTTPFixture, privateKey *ecds
 	req.Header.Set("X-PayGate-Relay-Device", deviceID)
 	req.Header.Set("X-PayGate-Relay-Time", timestamp)
 	req.Header.Set("X-PayGate-Relay-Signature", base64.StdEncoding.EncodeToString(signature))
+	if enrollmentEpoch > 0 {
+		req.Header.Set(relayEpochHeader, strconv.FormatInt(enrollmentEpoch, 10))
+	}
 	rr := httptest.NewRecorder()
 	f.handler.ServeHTTP(rr, req)
 	return rr
 }
 
+func TestDeviceDestinationRejectsMissingAndStaleEnrollmentEpoch(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	current := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
+	f.handler.Relay.Now = func() time.Time { return current }
+	privateKey, deviceID, epoch1 := pairAdminTestDevice(t, f)
+
+	legacyBody := []byte(`{"upi_id":"legacy-replay@upi","payee_name":"PayGate"}`)
+	legacy := signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", legacyBody)
+	if legacy.Code != http.StatusUnauthorized {
+		t.Fatalf("missing epoch destination status=%d body=%s", legacy.Code, legacy.Body.String())
+	}
+
+	oldBody := []byte(`{"upi_id":"stale-replay@upi","payee_name":"PayGate"}`)
+	oldTimestamp := strconv.FormatInt(current.UnixMilli(), 10)
+	oldCanonical := relay.CanonicalRequestWithEpoch(http.MethodPatch, "/admin/profiles/active/destination", oldTimestamp, epoch1, oldBody)
+	oldDigest := sha256.Sum256([]byte(oldCanonical))
+	oldSignature, err := ecdsa.SignASN1(rand.Reader, privateKey, oldDigest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRequest := httptest.NewRequest(http.MethodPatch, "/admin/profiles/active/destination", bytes.NewReader(oldBody))
+	oldRequest.Header.Set("Content-Type", "application/json")
+	oldRequest.Header.Set("X-PayGate-Relay-Device", deviceID)
+	oldRequest.Header.Set("X-PayGate-Relay-Time", oldTimestamp)
+	oldRequest.Header.Set("X-PayGate-Relay-Signature", base64.StdEncoding.EncodeToString(oldSignature))
+	oldRequest.Header.Set(relayEpochHeader, strconv.FormatInt(epoch1, 10))
+
+	der, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+	current = current.Add(time.Second)
+	session, err := f.handler.Relay.CreatePairing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := f.handler.Relay.PairDevice(context.Background(), relay.PairDeviceInput{
+		Token: session.Token, Name: "evidence-only test phone", PublicKeyPEM: string(publicKeyPEM), AppVersion: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.DeviceID != deviceID || repaired.EnrolledAtMS == epoch1 {
+		t.Fatalf("re-pair identity=%q epoch=%d old_epoch=%d", repaired.DeviceID, repaired.EnrolledAtMS, epoch1)
+	}
+
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, oldRequest)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("stale epoch replay status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var upiID string
+	if err := f.db.SQL.QueryRow(`SELECT upi_id FROM collection_profiles WHERE active=1`).Scan(&upiID); err != nil {
+		t.Fatal(err)
+	}
+	if upiID != "paygate@paytm" {
+		t.Fatalf("stale replay changed destination to %q", upiID)
+	}
+
+	fresh := signedDeviceAdminRequestWithEpoch(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", []byte(`{"upi_id":"fresh@upi","payee_name":"PayGate"}`), repaired.EnrolledAtMS)
+	if fresh.Code != http.StatusOK || !strings.Contains(fresh.Body.String(), `"upi_id":"fresh@upi"`) {
+		t.Fatalf("fresh epoch destination status=%d body=%s", fresh.Code, fresh.Body.String())
+	}
+}
+
 func TestPairedDeviceCannotMutatePaymentOrWebhookAuthority(t *testing.T) {
 	f := newAdminHTTPFixture(t)
-	privateKey, deviceID := pairAdminTestDevice(t, f)
+	privateKey, deviceID, enrollmentEpoch := pairAdminTestDevice(t, f)
 	payment := createAdminTestPayment(t, f, "Evidence boundary", "evt_device_auth", "device-auth")
 
 	rr := signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/payments/"+payment.ID, []byte(`{"status":"paid"}`))
@@ -565,7 +647,7 @@ func TestPairedDeviceCannotMutatePaymentOrWebhookAuthority(t *testing.T) {
 		t.Fatalf("device webhook retry status=%d body=%s", rr.Code, rr.Body.String())
 	}
 
-	rr = signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", []byte(`{"upi_id":"paygate-new@upi","payee_name":"PayGate"}`))
+	rr = signedDeviceAdminRequestWithEpoch(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", []byte(`{"upi_id":"paygate-new@upi","payee_name":"PayGate"}`), enrollmentEpoch)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"upi_id":"paygate-new@upi"`) {
 		t.Fatalf("device destination update status=%d body=%s", rr.Code, rr.Body.String())
 	}

@@ -84,6 +84,23 @@ func signedAuth(t *testing.T, priv *ecdsa.PrivateKey, deviceID string, now time.
 	}
 }
 
+func signedAuthWithEpoch(t *testing.T, priv *ecdsa.PrivateKey, deviceID string, now time.Time, body []byte, enrollmentEpoch int64) RequestAuth {
+	t.Helper()
+	timestamp := strconv.FormatInt(now.UnixMilli(), 10)
+	canonical := CanonicalRequestWithEpoch(http.MethodPost, EventPath, timestamp, enrollmentEpoch, body)
+	digest := sha256.Sum256([]byte(canonical))
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return RequestAuth{
+		DeviceID: deviceID, Timestamp: timestamp,
+		Signature: base64.StdEncoding.EncodeToString(sig),
+		EnrollmentEpoch: strconv.FormatInt(enrollmentEpoch, 10),
+		Method: http.MethodPost, Path: EventPath,
+	}
+}
+
 func marshalEvent(t *testing.T, input EventInput) []byte {
 	t.Helper()
 	body, err := json.Marshal(input)
@@ -119,6 +136,36 @@ func countRows(t *testing.T, db *storage.DB, table string) int {
 	}
 	return count
 }
+func TestEpochBoundAuthenticationRejectsMalformedAndWrongEpoch(t *testing.T) {
+	ctx := context.Background()
+	db := openRelayDB(t)
+	now := time.Date(2026, 9, 1, 3, 30, 0, 0, time.UTC)
+	priv, deviceID := enrollTestDevice(t, db, now.Add(-time.Minute))
+	service := NewService(db, payments.NewService(db))
+	service.Now = func() time.Time { return now }
+	body := []byte(`{"schema_version":1}`)
+	epoch := now.Add(-time.Minute).UnixMilli()
+
+	if got, _, err := service.AuthenticateDeviceWithEpoch(ctx, signedAuthWithEpoch(t, priv, deviceID, now, body, epoch), body); err != nil || got != deviceID {
+		t.Fatalf("current epoch authentication device=%q err=%v", got, err)
+	}
+
+	malformed := signedAuthWithEpoch(t, priv, deviceID, now, body, epoch)
+	malformed.EnrollmentEpoch = "not-an-integer"
+	if _, err := service.AuthenticateDevice(ctx, malformed, body); err == nil {
+		t.Fatal("malformed epoch was accepted")
+	}
+
+	wrong := signedAuthWithEpoch(t, priv, deviceID, now, body, epoch+1)
+	if _, err := service.AuthenticateDevice(ctx, wrong, body); err == nil {
+		t.Fatal("wrong epoch was accepted")
+	}
+
+	if _, err := service.AuthenticateDevice(ctx, signedAuth(t, priv, deviceID, now, body), body); err != nil {
+		t.Fatalf("legacy authentication rejected: %v", err)
+	}
+}
+
 func TestSignedPaytmEventMatchesPaymentAndIsIdempotent(t *testing.T) {
 	ctx := context.Background()
 	db := openRelayDB(t)

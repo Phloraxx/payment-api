@@ -116,7 +116,8 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.mux.ServeHTTP(w, r)
 		return
 	}
-	deviceID, enrolledAt, ok := h.deviceAuthorization(w, r)
+	requireEpoch := r.Method == http.MethodPatch && r.URL.Path == "/admin/profiles/active/destination"
+	deviceID, enrolledAt, ok := h.deviceAuthorization(w, r, requireEpoch)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Admin or connected-device authentication is required")
 		return
@@ -132,15 +133,15 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 const adminDeviceBodyLimit = 256 << 10
-
-func (h *AdminHandler) deviceAuthorization(w http.ResponseWriter, r *http.Request) (string, time.Time, bool) {
+func (h *AdminHandler) deviceAuthorization(w http.ResponseWriter, r *http.Request, requireEpoch bool) (string, time.Time, bool) {
 	if h.Relay == nil {
 		return "", time.Time{}, false
 	}
 	deviceID := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Device"))
 	timestamp := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Time"))
 	signature := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Signature"))
-	if deviceID == "" || timestamp == "" || signature == "" {
+	enrollmentEpoch := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Epoch"))
+	if deviceID == "" || timestamp == "" || signature == "" || (requireEpoch && enrollmentEpoch == "") {
 		return "", time.Time{}, false
 	}
 	var body []byte
@@ -154,7 +155,8 @@ func (h *AdminHandler) deviceAuthorization(w http.ResponseWriter, r *http.Reques
 	}
 	target := r.URL.RequestURI()
 	id, enrolledAt, err := h.Relay.AuthenticateDeviceWithEpoch(r.Context(), relay.RequestAuth{
-		DeviceID: deviceID, Timestamp: timestamp, Signature: signature, Method: r.Method, Path: target,
+		DeviceID: deviceID, Timestamp: timestamp, Signature: signature, EnrollmentEpoch: enrollmentEpoch,
+		Method: r.Method, Path: target,
 	}, body)
 	return id, enrolledAt, err == nil
 }
