@@ -98,10 +98,10 @@ func pairRelayHTTP(t *testing.T, f relayHTTPFixture) int64 {
 	}
 	return response.EnrolledAtMS
 }
-func signedRelayRequest(t *testing.T, f relayHTTPFixture, path string, body []byte) *http.Request {
+func signedRelayRequest(t *testing.T, f relayHTTPFixture, path string, body []byte, enrollmentEpoch int64) *http.Request {
 	t.Helper()
 	timestamp := strconv.FormatInt(f.now.UnixMilli(), 10)
-	canonical := relay.CanonicalRequest(http.MethodPost, path, timestamp, body)
+	canonical := relay.CanonicalRequestWithEpoch(http.MethodPost, path, timestamp, enrollmentEpoch, body)
 	digest := sha256.Sum256([]byte(canonical))
 	signature, err := ecdsa.SignASN1(rand.Reader, f.private, digest[:])
 	if err != nil {
@@ -112,15 +112,16 @@ func signedRelayRequest(t *testing.T, f relayHTTPFixture, path string, body []by
 	req.Header.Set(relayDeviceHeader, f.device)
 	req.Header.Set(relayTimeHeader, timestamp)
 	req.Header.Set(relaySignatureHeader, base64.StdEncoding.EncodeToString(signature))
+	req.Header.Set(relayEpochHeader, strconv.FormatInt(enrollmentEpoch, 10))
 	return req
 }
 
 func TestRelayPairHeartbeatAndHealthPersistence(t *testing.T) {
 	f := newRelayHTTPFixture(t)
-	pairRelayHTTP(t, f)
+	epoch := pairRelayHTTP(t, f)
 	body := []byte(`{"schema_version":1,"app_version":"0.5.0","android_version":"16","device_model":"motorola edge 60 stylus","notification_access":true,"listener_connected":true,"battery_optimization_exempt":true,"power_save_mode":false,"background_restricted":false,"foreground_service":true,"pending_count":0,"failed_count":2}`)
 	rr := httptest.NewRecorder()
-	f.handler.ServeHTTP(rr, signedRelayRequest(t, f, relay.HeartbeatPath, body))
+	f.handler.ServeHTTP(rr, signedRelayRequest(t, f, relay.HeartbeatPath, body, epoch))
 	if rr.Code != http.StatusOK {
 		t.Fatalf("heartbeat status=%d body=%s", rr.Code, rr.Body.String())
 	}
@@ -131,7 +132,7 @@ func TestRelayPairHeartbeatAndHealthPersistence(t *testing.T) {
 }
 func TestRelayHeartbeatDatabaseBusyIsRetryable(t *testing.T) {
 	f := newRelayHTTPFixture(t)
-	pairRelayHTTP(t, f)
+	epoch := pairRelayHTTP(t, f)
 	ctx := context.Background()
 	f.db.SQL.SetMaxOpenConns(2)
 	for i := 0; i < 2; i++ {
@@ -160,7 +161,7 @@ func TestRelayHeartbeatDatabaseBusyIsRetryable(t *testing.T) {
 
 	body := []byte(`{"schema_version":1,"app_version":"0.5.0","android_version":"16","device_model":"motorola edge 60 stylus","notification_access":true,"listener_connected":true,"battery_optimization_exempt":true,"power_save_mode":false,"background_restricted":false,"foreground_service":true,"pending_count":0,"failed_count":2}`)
 	rr := httptest.NewRecorder()
-	f.handler.ServeHTTP(rr, signedRelayRequest(t, f, relay.HeartbeatPath, body))
+	f.handler.ServeHTTP(rr, signedRelayRequest(t, f, relay.HeartbeatPath, body, epoch))
 	close(release)
 	if err := <-txErr; err != nil {
 		t.Fatal(err)
@@ -175,15 +176,15 @@ func TestRelayHeartbeatDatabaseBusyIsRetryable(t *testing.T) {
 }
 func TestRelaySignedEventAndSignatureFailure(t *testing.T) {
 	f := newRelayHTTPFixture(t)
-	pairRelayHTTP(t, f)
+	epoch := pairRelayHTTP(t, f)
 	body := []byte(`{"schema_version":1,"event_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","package_name":"com.paytm.business","posted_at_ms":1788244200000,"title":"Payment Received on Paytm for Business","text":"₹100.00 Received from Test"}`)
 	rr := httptest.NewRecorder()
-	f.handler.ServeHTTP(rr, signedRelayRequest(t, f, relay.EventPath, body))
+	f.handler.ServeHTTP(rr, signedRelayRequest(t, f, relay.EventPath, body, epoch))
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"status":"ignored"`) {
 		t.Fatalf("event status=%d body=%s", rr.Code, rr.Body.String())
 	}
 
-	bad := signedRelayRequest(t, f, relay.EventPath, body)
+	bad := signedRelayRequest(t, f, relay.EventPath, body, epoch)
 	bad.Header.Set(relaySignatureHeader, base64.StdEncoding.EncodeToString([]byte("bad")))
 	rr = httptest.NewRecorder()
 	f.handler.ServeHTTP(rr, bad)

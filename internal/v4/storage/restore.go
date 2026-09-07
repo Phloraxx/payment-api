@@ -271,6 +271,10 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 			restoreExpectedColumn{"last_successful_delivery_at", "INTEGER", false},
 			restoreExpectedColumn{"last_client_error", "TEXT", false})
 	}
+	if versions[len(versions)-1] >= 6 {
+		requiredColumns["relay_devices"] = append(requiredColumns["relay_devices"],
+			restoreExpectedColumn{"epoch_required", "INTEGER", false})
+	}
 	requiredNotNull := map[string][]string{
 		"schema_migrations":    {"applied_at"},
 		"collection_profiles":  {"label", "upi_id", "parser", "enabled", "active", "created_at", "updated_at"},
@@ -287,6 +291,9 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		"admin_credentials":    {"password_hash", "updated_at"},
 		"admin_sessions":       {"created_at", "expires_at"},
 		"settings":             {"value", "updated_at"},
+	}
+	if versions[len(versions)-1] >= 6 {
+		requiredNotNull["relay_devices"] = append(requiredNotNull["relay_devices"], "epoch_required")
 	}
 	type restoreForeignKey struct {
 		table    string
@@ -388,6 +395,9 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		"api_keys":          {"ENABLED IN (0,1)"},
 		"admin_credentials": {"SINGLETON = 1"},
 		"admin_sessions":    {"EXPIRES_AT > CREATED_AT"},
+	}
+	if versions[len(versions)-1] >= 6 {
+		requiredCheckFragments["relay_devices"] = append(requiredCheckFragments["relay_devices"], "EPOCH_REQUIRED IN (0,1)")
 	}
 	if versions[len(versions)-1] >= 3 {
 		requiredCheckFragments["collection_profiles"] = append(requiredCheckFragments["collection_profiles"],

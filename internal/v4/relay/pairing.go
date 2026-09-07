@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -130,7 +131,8 @@ func (s *Service) PairDevice(ctx context.Context, input PairDeviceInput) (PairDe
 	}
 	now := nowFn().UTC()
 	tokenHash := sha256.Sum256([]byte(normalized.Token))
-	result := PairDeviceResult{DeviceID: deviceID, Enabled: true, EnrolledAtMS: now.UnixMilli()}
+	result := PairDeviceResult{DeviceID: deviceID, Enabled: true}
+	enrollmentEpoch := now.UnixMilli()
 	err = s.DB.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
 		var expiresAt int64
 		var consumedAt sql.NullInt64
@@ -147,12 +149,23 @@ func (s *Service) PairDevice(ctx context.Context, input PairDeviceInput) (PairDe
 		if now.UnixMilli() >= expiresAt {
 			return ErrPairingTokenExpired
 		}
+		var previousEpoch int64
+		err = tx.QueryRowContext(ctx, `SELECT enrolled_at FROM relay_devices WHERE id=?`, deviceID).Scan(&previousEpoch)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("read existing relay enrollment epoch: %w", err)
+		}
+		if err == nil && previousEpoch >= enrollmentEpoch {
+			if previousEpoch == math.MaxInt64 {
+				return errors.New("relay enrollment epoch exhausted")
+			}
+			enrollmentEpoch = previousEpoch + 1
+		}
 		_, err = tx.ExecContext(ctx, `INSERT INTO relay_devices(
-			id,name,public_key_pem,enabled,enrolled_at,app_version,device_model,android_version)
-			VALUES(?,?,?,1,?,?,?,?)
+			id,name,public_key_pem,enabled,enrolled_at,epoch_required,app_version,device_model,android_version)
+			VALUES(?,?,?,1,?,1,?,?,?)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name,public_key_pem=excluded.public_key_pem,
-				enabled=1,enrolled_at=excluded.enrolled_at,app_version=excluded.app_version,device_model=excluded.device_model,android_version=excluded.android_version`,
-			deviceID, normalized.Name, normalized.PublicKeyPEM, now.UnixMilli(), nullableText(normalized.AppVersion),
+				enabled=1,enrolled_at=excluded.enrolled_at,epoch_required=1,app_version=excluded.app_version,device_model=excluded.device_model,android_version=excluded.android_version`,
+			deviceID, normalized.Name, normalized.PublicKeyPEM, enrollmentEpoch, nullableText(normalized.AppVersion),
 			nullableText(normalized.DeviceModel), nullableText(normalized.AndroidVersion))
 		if err != nil {
 			return fmt.Errorf("enroll relay device: %w", err)
@@ -169,6 +182,7 @@ func (s *Service) PairDevice(ctx context.Context, input PairDeviceInput) (PairDe
 	if err != nil {
 		return PairDeviceResult{}, err
 	}
+	result.EnrolledAtMS = enrollmentEpoch
 	return result, nil
 }
 

@@ -52,6 +52,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		}
 		current = 5
 	}
+	if current < 6 {
+		if err := db.runMigrationTx(ctx, 6, applyV6); err != nil {
+			return err
+		}
+		current = 6
+	}
 	return nil
 }
 
@@ -232,6 +238,13 @@ func applyV5(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX uq_active_payable
 		ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL`); err != nil {
 		return fmt.Errorf("create global amount uniqueness: %w", err)
+	}
+	return nil
+}
+
+func applyV6(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE relay_devices ADD COLUMN epoch_required INTEGER NOT NULL DEFAULT 0 CHECK(epoch_required IN (0,1))`); err != nil {
+		return fmt.Errorf("add relay epoch requirement: %w", err)
 	}
 	return nil
 }

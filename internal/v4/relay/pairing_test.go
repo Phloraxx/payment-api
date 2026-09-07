@@ -120,22 +120,25 @@ func TestRePairRefreshesEnrollmentEpoch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	secondAt := firstAt.Add(time.Minute)
+	// Re-pair at the exact same wall-clock millisecond. The enrollment epoch
+	// must still advance so old epoch-bound signatures become invalid.
+	secondAt := firstAt
 	service.Now = func() time.Time { return secondAt }
 	second, err := service.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	input.Token = second.Token
-	if _, err := service.PairDevice(context.Background(), input); err != nil {
+	repaired, err := service.PairDevice(context.Background(), input)
+	if err != nil {
 		t.Fatal(err)
 	}
 	var secondEpoch int64
 	if err := db.SQL.QueryRow(`SELECT enrolled_at FROM relay_devices WHERE id=?`, deviceID).Scan(&secondEpoch); err != nil {
 		t.Fatal(err)
 	}
-	if secondEpoch != secondAt.UnixMilli() || secondEpoch <= firstEpoch {
-		t.Fatalf("enrollment epoch first=%d second=%d want second=%d", firstEpoch, secondEpoch, secondAt.UnixMilli())
+	if secondEpoch != firstEpoch+1 || repaired.EnrolledAtMS != secondEpoch {
+		t.Fatalf("enrollment epoch first=%d second=%d returned=%d", firstEpoch, secondEpoch, repaired.EnrolledAtMS)
 	}
 }
 func TestAdditionalDevicePairingKeepsExistingDeviceEnabled(t *testing.T) {

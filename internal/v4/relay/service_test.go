@@ -169,20 +169,14 @@ func TestEpochBoundAuthenticationRejectsMalformedAndWrongEpoch(t *testing.T) {
 func TestLegacySignatureStopsWorkingAfterSameKeyRepair(t *testing.T) {
 	ctx := context.Background()
 	db := openRelayDB(t)
-	var v5AppliedAt int64
-	if err := db.SQL.QueryRow(`SELECT applied_at FROM schema_migrations WHERE version=5`).Scan(&v5AppliedAt); err != nil {
-		t.Fatal(err)
-	}
-
-	legacyEnrolledAt := time.UnixMilli(v5AppliedAt - 1000).UTC()
-	requestTime := time.UnixMilli(v5AppliedAt + 2000).UTC()
-	priv, deviceID := enrollTestDevice(t, db, legacyEnrolledAt)
+	requestTime := time.Date(2026, 9, 8, 6, 0, 0, 0, time.UTC)
+	priv, deviceID := enrollTestDevice(t, db, requestTime.Add(-time.Hour))
 	service := NewService(db, payments.NewService(db))
 	service.Now = func() time.Time { return requestTime }
 	body := []byte(`{"schema_version":1}`)
 	legacyAuth := signedAuth(t, priv, deviceID, requestTime, body)
 	if got, err := service.AuthenticateDevice(ctx, legacyAuth, body); err != nil || got != deviceID {
-		t.Fatalf("pre-v5 legacy device authentication device=%q err=%v", got, err)
+		t.Fatalf("legacy device authentication device=%q err=%v", got, err)
 	}
 
 	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
@@ -194,22 +188,64 @@ func TestLegacySignatureStopsWorkingAfterSameKeyRepair(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	requestTime = requestTime.Add(time.Second)
-	service.Now = func() time.Time { return requestTime }
 	repaired, err := service.PairDevice(ctx, PairDeviceInput{
 		Token: pairing.Token, Name: "Test Phone", PublicKeyPEM: publicKeyPEM, AppVersion: "test-v2",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if repaired.DeviceID != deviceID || repaired.EnrolledAtMS < v5AppliedAt {
-		t.Fatalf("re-pair device=%q epoch=%d v5=%d", repaired.DeviceID, repaired.EnrolledAtMS, v5AppliedAt)
+	var epochRequired int
+	if err := db.SQL.QueryRow(`SELECT epoch_required FROM relay_devices WHERE id=?`, deviceID).Scan(&epochRequired); err != nil {
+		t.Fatal(err)
+	}
+	if repaired.DeviceID != deviceID || repaired.EnrolledAtMS <= requestTime.Add(-time.Hour).UnixMilli() || epochRequired != 1 {
+		t.Fatalf("re-pair device=%q epoch=%d epoch_required=%d", repaired.DeviceID, repaired.EnrolledAtMS, epochRequired)
 	}
 
 	if _, err := service.AuthenticateDevice(ctx, legacyAuth, body); err == nil {
 		t.Fatal("legacy signature captured before re-pair was accepted after re-pair")
 	}
 	fresh := signedAuthWithEpoch(t, priv, deviceID, requestTime, body, repaired.EnrolledAtMS)
+	if got, err := service.AuthenticateDevice(ctx, fresh, body); err != nil || got != deviceID {
+		t.Fatalf("fresh epoch authentication device=%q err=%v", got, err)
+	}
+}
+
+func TestEpochSignatureIsRejectedAfterSameMillisecondRepair(t *testing.T) {
+	ctx := context.Background()
+	db := openRelayDB(t)
+	now := time.Date(2026, 9, 8, 7, 0, 0, 0, time.UTC)
+	priv, deviceID := enrollTestDevice(t, db, now.Add(-time.Hour))
+	service := NewService(db, payments.NewService(db))
+	service.Now = func() time.Time { return now }
+	der, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKeyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der}))
+	pair := func() PairDeviceResult {
+		session, err := service.CreatePairing(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := service.PairDevice(ctx, PairDeviceInput{Token: session.Token, Name: "Test Phone", PublicKeyPEM: publicKeyPEM})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	first := pair()
+	body := []byte(`{"schema_version":1}`)
+	captured := signedAuthWithEpoch(t, priv, deviceID, now, body, first.EnrolledAtMS)
+	second := pair() // service.Now is unchanged: same wall-clock millisecond.
+	if second.EnrolledAtMS != first.EnrolledAtMS+1 {
+		t.Fatalf("same-millisecond re-pair epoch first=%d second=%d", first.EnrolledAtMS, second.EnrolledAtMS)
+	}
+	if _, err := service.AuthenticateDevice(ctx, captured, body); err == nil {
+		t.Fatal("captured epoch-bound signature survived same-millisecond re-pair")
+	}
+	fresh := signedAuthWithEpoch(t, priv, deviceID, now, body, second.EnrolledAtMS)
 	if got, err := service.AuthenticateDevice(ctx, fresh, body); err != nil || got != deviceID {
 		t.Fatalf("fresh epoch authentication device=%q err=%v", got, err)
 	}

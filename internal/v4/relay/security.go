@@ -92,11 +92,10 @@ func verifyRequest(ctx context.Context, db *storage.DB, auth RequestAuth, body [
 	var publicKeyPEM string
 	var enabled int
 	var enrolledAt int64
-	var epochAuthSince sql.NullInt64
-	err = db.SQL.QueryRowContext(ctx, `SELECT public_key_pem,enabled,enrolled_at,
-		(SELECT applied_at FROM schema_migrations WHERE version=5)
+	var epochRequired int
+	err = db.SQL.QueryRowContext(ctx, `SELECT public_key_pem,enabled,enrolled_at,epoch_required
 		FROM relay_devices WHERE id=?`, deviceID).
-		Scan(&publicKeyPEM, &enabled, &enrolledAt, &epochAuthSince)
+		Scan(&publicKeyPEM, &enabled, &enrolledAt, &epochRequired)
 	if errors.Is(err, sql.ErrNoRows) {
 		return verifiedDevice{}, relayError("UNKNOWN_RELAY_DEVICE", "relay device is not enrolled or is disabled", 401)
 	}
@@ -109,10 +108,10 @@ func verifyRequest(ctx context.Context, db *storage.DB, auth RequestAuth, body [
 	epochHeader := strings.TrimSpace(auth.EnrollmentEpoch)
 	epochBound := epochHeader != ""
 	// Devices enrolled before schema v5 may continue using the legacy canonical
-	// form so already-installed relays survive the server rollout. Any pairing or
-	// re-pairing performed after v5 is an explicit security boundary and requires
-	// the enrollment epoch on every signed request.
-	if !epochBound && epochAuthSince.Valid && enrolledAt >= epochAuthSince.Int64 {
+	// form so already-installed relays survive the server rollout. Pairing or
+	// re-pairing marks the device epoch-required, making that enrollment an explicit
+	// security boundary for every subsequent signed request.
+	if !epochBound && epochRequired == 1 {
 		return verifiedDevice{}, invalidRelaySignature()
 	}
 	enrollmentEpoch := int64(0)
