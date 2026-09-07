@@ -70,7 +70,7 @@ func (a Allocator) Select(ctx context.Context, tx *storage.ImmediateTx, profileI
 		offset := int64(bucket) * 100
 		start := requestedAmountPaise + offset + 1
 		end := start + 98
-		candidates, err := loadBucketCandidates(ctx, tx, profileID, start, end, cutoffMS)
+		candidates, err := loadBucketCandidates(ctx, tx, start, end, cutoffMS)
 		if err != nil {
 			return 0, err
 		}
@@ -89,15 +89,14 @@ func (a Allocator) Select(ctx context.Context, tx *storage.ImmediateTx, profileI
 	return 0, ErrPaymentCapacity
 }
 
-func loadBucketCandidates(ctx context.Context, tx *storage.ImmediateTx, profileID string, start, end, softCutoffMS int64) ([]int64, error) {
+func loadBucketCandidates(ctx context.Context, tx *storage.ImmediateTx, start, end, softCutoffMS int64) ([]int64, error) {
 	rows, err := tx.QueryContext(ctx, `
 SELECT payable_amount_paise,
        MAX(CASE WHEN released_at IS NULL THEN 1 ELSE 0 END) AS active,
        MAX(last_used_at) AS last_used_at
 FROM amount_reservations
-WHERE collection_profile_id = ?
-  AND payable_amount_paise BETWEEN ? AND ?
-GROUP BY payable_amount_paise`, profileID, start, end)
+WHERE payable_amount_paise BETWEEN ? AND ?
+GROUP BY payable_amount_paise`, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("query amount bucket: %w", err)
 	}

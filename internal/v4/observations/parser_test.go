@@ -92,66 +92,16 @@ func TestPaytmFallsBackToNotificationPostTime(t *testing.T) {
 		t.Fatalf("occurred = %s source=%s", got.OccurredAt, got.OccurredAtSource)
 	}
 }
-func TestParseKotakGoogleMessagesNotification(t *testing.T) {
+func TestParseBlocksRetiredMessageAndEmailPackages(t *testing.T) {
 	posted := time.UnixMilli(1_788_200_000_000).UTC()
-	got, err := Parse(Snapshot{
-		PackageName: GoogleMessagesPackage,
-		PostedAt:    posted,
-		Title:       "VM-KOTAKB",
-		Text:        "Kotak: Received Rs. 1,250.50 from Maya UPI Ref No. 123456789012",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Source != "kotak_sms" || got.CollectionProfileID != "kotak" || got.AmountPaise != 125050 {
-		t.Fatalf("observation = %+v", got)
-	}
-	if got.PayerName != "Maya" || !got.OccurredAt.Equal(posted) || got.OccurredAtSource != "notification_posted_at" {
-		t.Fatalf("parsed Kotak details = %+v", got)
-	}
-}
-
-func TestKotakExtractsUPIWithoutRequiringReference(t *testing.T) {
-	posted := time.UnixMilli(1_788_200_000_000).UTC()
-	got, err := Parse(Snapshot{
-		PackageName: GoogleMessagesPackage,
-		PostedAt:    posted,
-		Title:       "KOTAK",
-		Text:        "Payment for Received INR 75.37 from a@upi",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.AmountPaise != 7537 || got.PayerUPIID != "a@upi" {
-		t.Fatalf("observation = %+v", got)
-	}
-}
-func TestMessagesAcceptAnyIncomingBankCreditButStillRejectUnsafeMoneyText(t *testing.T) {
-	posted := time.UnixMilli(1_788_200_000_000).UTC()
-	accepted := []struct{ title, text string }{
-		{"VM-HDFCBK", "Received Rs.100.37 from Rahul"},
-		{"JD-SBIUPI-S", "A/c credited Rs.100.37 through UPI Ref 123456789012"},
-		{"JK-SBIUPI-S", "A/c credited Rs.100.37 through UPI Ref 123456789012"},
-	}
-	for _, tc := range accepted {
-		got, err := Parse(Snapshot{PackageName: GoogleMessagesPackage, PostedAt: posted, Title: tc.title, Text: tc.text})
-		if err != nil || got.Source != GenericMessageSource {
-			t.Errorf("Parse(%q,%q)=%+v err=%v", tc.title, tc.text, got, err)
-		}
-	}
-	rejected := []struct {
-		title, text string
-		want        error
-	}{
-		{"VM-KOTAKB", "Your OTP is 123456 for Rs.100.37", ErrUnrecognized},
-		{"VM-KOTAKB", "Rs.100.37 debited from your account", ErrUnrecognized},
-		{"VM-KOTAKB", "Cashback of INR 100.37 credited to your account", ErrUnrecognized},
-		{"VM-KOTAKB", "Received Rs.100.00 from Rahul", ErrNonPayGateAmount},
-	}
-	for _, tc := range rejected {
-		_, err := Parse(Snapshot{PackageName: GoogleMessagesPackage, PostedAt: posted, Title: tc.title, Text: tc.text})
-		if !errors.Is(err, tc.want) {
-			t.Errorf("Parse(%q,%q) error=%v want=%v", tc.title, tc.text, err, tc.want)
+	for _, packageName := range []string{GoogleMessagesPackage, GmailPackage} {
+		if _, err := Parse(Snapshot{
+			PackageName: packageName,
+			PostedAt:    posted,
+			Title:       "Payment received",
+			Text:        "Received Rs. 1,250.50 from Maya",
+		}); !errors.Is(err, ErrUnrecognized) {
+			t.Errorf("Parse(%q) error=%v, want %v", packageName, err, ErrUnrecognized)
 		}
 	}
 }
@@ -177,7 +127,6 @@ func TestParseGenericIncomingPaymentApplications(t *testing.T) {
 		{"in.amazon.mShop.android.shopping", "Payment received: ₹499.37 from Rahul", GenericNotificationSource},
 		{"com.phonepe.app", "You received INR 250.41 from Maya via UPI", GenericNotificationSource},
 		{"com.google.android.apps.nbu.paisa.user", "₹99.23 received from user@okaxis", GenericNotificationSource},
-		{GoogleMessagesPackage, "HDFC: A/c credited with Rs. 701.19 from Arun UPI Ref 123456789012", GenericMessageSource},
 	}
 	for _, tc := range cases {
 		got, err := Parse(Snapshot{PackageName: tc.pkg, PostedAt: posted, Text: tc.text})
@@ -358,35 +307,6 @@ func TestParserRejectsFailedIncomingLanguage(t *testing.T) {
 	}
 }
 
-func TestGoogleMessagesKotakMentionWithoutBankCreditStaysGeneric(t *testing.T) {
-	got, err := Parse(Snapshot{
-		PackageName: GoogleMessagesPackage,
-		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
-		Title:       "KOTAK",
-		Text:        "You received INR 100.37. Learn more about Kotak services.",
-	})
-	if err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
-	if got.Source != GenericMessageSource || got.CollectionProfileID != "" {
-		t.Fatalf("observation = %+v, want generic Google Messages evidence", got)
-	}
-}
-func TestGoogleMessagesWeakKotakCreditStaysKotakEvidence(t *testing.T) {
-	got, err := Parse(Snapshot{
-		PackageName: GoogleMessagesPackage,
-		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
-		Title:       "Kotak Mahindra Bank",
-		Text:        "Kotak: Received Rs. 100.37 from Maya",
-	})
-	if err != nil {
-		t.Fatalf("weak Kotak credit error = %v", err)
-	}
-	if got.Source != "kotak_sms" || got.CollectionProfileID != "kotak" || got.AmountPaise != 10037 {
-		t.Fatalf("weak Kotak observation = %+v", got)
-	}
-
-}
 func TestPayerUPIUsesIncomingPayerClause(t *testing.T) {
 	got, err := Parse(Snapshot{
 		PackageName: "example.wallet",

@@ -100,32 +100,36 @@ func TestPaymentIdentityDoesNotUseNameOrExternalID(t *testing.T) {
 	}
 }
 
-func TestActiveAmountReservationIsUniqueButHistoryIsRetained(t *testing.T) {
+func TestActiveAmountReservationIsGloballyUniqueButHistoryIsRetained(t *testing.T) {
 	db := openTestDB(t)
 	now := int64(1_788_200_000_000)
 	insertProfile(t, db.SQL, "paytm", true, now)
+	insertProfile(t, db.SQL, "kotak", false, now)
 	insertPayment(t, db.SQL, "pay_1", "Person A", "evt_123", 10037, now)
 	insertPayment(t, db.SQL, "pay_2", "Person B", "evt_123", 10037, now+1)
+	if _, err := db.SQL.Exec(`UPDATE payments SET collection_profile_id='kotak' WHERE id='pay_2'`); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := db.SQL.Exec(`INSERT INTO amount_reservations(id,collection_profile_id,payable_amount_paise,payment_id,reserved_at,reserved_until,last_used_at)
         VALUES('res_1','paytm',10037,'pay_1',?,?,?)`, now, now+900_000, now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.SQL.Exec(`INSERT INTO amount_reservations(id,collection_profile_id,payable_amount_paise,payment_id,reserved_at,reserved_until,last_used_at)
-        VALUES('res_2','paytm',10037,'pay_2',?,?,?)`, now+1, now+900_001, now+1); err == nil {
-		t.Fatal("expected duplicate active profile+amount reservation to fail")
+        VALUES('res_2','kotak',10037,'pay_2',?,?,?)`, now+1, now+900_001, now+1); err == nil {
+		t.Fatal("expected duplicate active payable amount to fail")
 	}
 
 	if _, err := db.SQL.Exec(`UPDATE amount_reservations SET released_at=? WHERE id='res_1'`, now+900_000); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.SQL.Exec(`INSERT INTO amount_reservations(id,collection_profile_id,payable_amount_paise,payment_id,reserved_at,reserved_until,last_used_at)
-        VALUES('res_2','paytm',10037,'pay_2',?,?,?)`, now+900_001, now+1_800_001, now+900_001); err != nil {
+        VALUES('res_2','kotak',10037,'pay_2',?,?,?)`, now+900_001, now+1_800_001, now+900_001); err != nil {
 		t.Fatalf("reuse after release should succeed: %v", err)
 	}
 
 	var count int
-	if err := db.SQL.QueryRow(`SELECT COUNT(*) FROM amount_reservations WHERE collection_profile_id='paytm' AND payable_amount_paise=10037`).Scan(&count); err != nil {
+	if err := db.SQL.QueryRow(`SELECT COUNT(*) FROM amount_reservations WHERE payable_amount_paise=10037`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 2 {
@@ -470,7 +474,7 @@ func TestObservationSchemaSupportsCorroborationAndFutureSources(t *testing.T) {
 	}
 }
 
-func TestMultiRelayCompatibilityKeepsSchemaV4RollbackReadable(t *testing.T) {
+func TestMultiRelayCompatibilityKeepsSchemaRollbackReadable(t *testing.T) {
 	db, err := Open(context.Background(), filepath.Join(t.TempDir(), "paygate.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -481,8 +485,8 @@ func TestMultiRelayCompatibilityKeepsSchemaV4RollbackReadable(t *testing.T) {
 	if err := db.SQL.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 {
-		t.Fatalf("schema version=%d want=4 for rollback compatibility", version)
+	if version != schemaVersion {
+		t.Fatalf("schema version=%d want=%d for rollback compatibility", version, schemaVersion)
 	}
 
 	var indexes int

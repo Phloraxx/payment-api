@@ -217,25 +217,6 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 		result.Status = "ignored"
 		return result, nil
 	}
-	if obs.CollectionProfileID == "" {
-		profileID, ambiguous, err := s.resolveGenericCollectionProfileID(ctx, obs)
-		if err != nil {
-			if err := s.finishIgnored(ctx, result.RelayEventID, err); err != nil {
-				return IngestResult{}, err
-			}
-			result.Status = "ignored"
-			return result, nil
-		}
-		if ambiguous {
-			status, err := s.finishAmbiguous(ctx, result.RelayEventID, errors.New("generic notification matches reservations in multiple collection profiles"))
-			if err != nil {
-				return IngestResult{}, err
-			}
-			result.Status = status
-			return result, nil
-		}
-		obs.CollectionProfileID = profileID
-	}
 	matched, err := s.Payments.ApplyObservationForRelay(ctx, result.RelayEventID, obs, now, device.ID, device.EnrolledAt)
 	if errors.Is(err, payments.ErrRelayEventNotFound) {
 		// A retention worker or device revocation may have finalized this
@@ -263,53 +244,6 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 	return result, nil
 }
 
-func (s *Service) resolveGenericCollectionProfileID(ctx context.Context, obs observations.Observation) (string, bool, error) {
-	occurred := obs.OccurredAt.UnixMilli()
-	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT DISTINCT r.collection_profile_id
-		FROM amount_reservations r JOIN payments p ON p.id=r.payment_id
-		WHERE r.payable_amount_paise=? AND p.created_at<=? AND r.reserved_until>=?
-		AND (p.status<>'cancelled' OR EXISTS(
-			SELECT 1 FROM payment_history h
-			WHERE h.payment_id=p.id AND h.type='payment.cancelled' AND h.created_at>=?
-		))
-		ORDER BY r.collection_profile_id`, obs.AmountPaise, occurred, occurred, occurred)
-	if err != nil {
-		return "", false, fmt.Errorf("resolve generic notification profile: %w", err)
-	}
-	defer rows.Close()
-	profiles := make([]string, 0, 2)
-	for rows.Next() {
-		var profileID string
-		if err := rows.Scan(&profileID); err != nil {
-			return "", false, fmt.Errorf("scan generic notification profile: %w", err)
-		}
-		profiles = append(profiles, profileID)
-	}
-	if err := rows.Err(); err != nil {
-		return "", false, fmt.Errorf("iterate generic notification profiles: %w", err)
-	}
-	if len(profiles) == 1 {
-		return profiles[0], false, nil
-	}
-	if len(profiles) > 1 {
-		return "", true, nil
-	}
-	profileID, err := s.activeCollectionProfileID(ctx)
-	return profileID, false, err
-}
-
-func (s *Service) activeCollectionProfileID(ctx context.Context) (string, error) {
-	var profileID string
-	err := s.DB.SQL.QueryRowContext(ctx, `SELECT id FROM collection_profiles WHERE active=1 AND enabled=1 LIMIT 1`).Scan(&profileID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", errors.New("no active collection profile is available for generic notification evidence")
-	}
-	if err != nil {
-		return "", fmt.Errorf("read active collection profile: %w", err)
-	}
-	return profileID, nil
-}
-
 func validateEventInput(in *EventInput) error {
 	if in.SchemaVersion != SchemaVersion {
 		return relayError("UNSUPPORTED_RELAY_SCHEMA", "schema_version must be 1", 400)
@@ -325,6 +259,9 @@ func validateEventInput(in *EventInput) error {
 	if in.PackageName == "" || len(in.PackageName) > 255 {
 		return relayError("INVALID_RELAY_APP", "notification package name is required and must be at most 255 characters", 400)
 	}
+	if blockedRelayPackage(in.PackageName) {
+		return relayError("UNSUPPORTED_RELAY_APP", "this notification source is no longer accepted", 400)
+	}
 	if len(in.Title)+len(in.Text)+len(in.BigText) == 0 || len(in.Title)+len(in.Text)+len(in.BigText) > maxNotificationTextBytes {
 		return relayError("RELAY_EVENT_TOO_LARGE", "notification text is empty or too large", 400)
 	}
@@ -332,6 +269,15 @@ func validateEventInput(in *EventInput) error {
 		return relayError("INVALID_RELAY_AMOUNT_HINT", "amount hint must be a non-.00 positive amount", 400)
 	}
 	return nil
+}
+
+func blockedRelayPackage(packageName string) bool {
+	switch strings.ToLower(strings.TrimSpace(packageName)) {
+	case observations.GoogleMessagesPackage, observations.GmailPackage:
+		return true
+	default:
+		return false
+	}
 }
 
 func sanitizePostedAt(ms int64, now time.Time) (time.Time, bool) {

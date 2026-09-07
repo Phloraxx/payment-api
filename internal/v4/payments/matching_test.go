@@ -140,7 +140,7 @@ func TestApplyObservationRejectsStaleRelayEnrollmentOnReplay(t *testing.T) {
 	}
 }
 
-func TestGenericProfileIsRevalidatedInsideMatchingTransaction(t *testing.T) {
+func TestGenericAmountMatchesReservationAcrossProfileSwitch(t *testing.T) {
 	ctx := context.Background()
 	db := openAllocatorDB(t)
 	base := time.UnixMilli(1_788_200_000_000).UTC()
@@ -163,21 +163,21 @@ func TestGenericProfileIsRevalidatedInsideMatchingTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.Payment.PayableAmountPaise != second.Payment.PayableAmountPaise {
-		t.Fatalf("test requires overlapping reservations: %d != %d", first.Payment.PayableAmountPaise, second.Payment.PayableAmountPaise)
+	if first.Payment.PayableAmountPaise == second.Payment.PayableAmountPaise {
+		t.Fatalf("live payable amount reused across profiles: %d", first.Payment.PayableAmountPaise)
 	}
 	occurred := base.Add(time.Minute)
 	received := occurred.Add(time.Second)
 	insertRelayEvent(t, db, "relay_profile_race", "source_profile_race", "com.example.wallet", occurred, received)
-	obs := observations.Observation{
-		Source: observations.GenericNotificationSource, CollectionProfileID: "paytm",
-		AmountPaise: first.Payment.PayableAmountPaise, PayerName: "Rahul",
-		OccurredAt: occurred, OccurredAtSource: "notification_text",
+	obs := observations.Observation{Source: observations.GenericNotificationSource, AmountPaise: first.Payment.PayableAmountPaise,
+		PayerName: "Rahul", OccurredAt: occurred, OccurredAtSource: "notification_posted_at"}
+	result, err := s.ApplyObservation(ctx, "relay_profile_race", obs, received)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := s.ApplyObservation(ctx, "relay_profile_race", obs, received); !errors.Is(err, ErrObservationAmbiguous) {
-		t.Fatalf("profile race error = %v, want ErrObservationAmbiguous", err)
+	if result.Result != "matched" || result.PaymentID != first.Payment.ID || !result.Transitioned {
+		t.Fatalf("amount match result = %+v", result)
 	}
-	assertCount(t, db.SQL, "payment_observations", 0)
 	var firstStatus, secondStatus string
 	if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id=?`, first.Payment.ID).Scan(&firstStatus); err != nil {
 		t.Fatal(err)
@@ -185,10 +185,11 @@ func TestGenericProfileIsRevalidatedInsideMatchingTransaction(t *testing.T) {
 	if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id=?`, second.Payment.ID).Scan(&secondStatus); err != nil {
 		t.Fatal(err)
 	}
-	if firstStatus != "pending" || secondStatus != "pending" {
-		t.Fatalf("payments changed after ambiguous profile race: %s / %s", firstStatus, secondStatus)
+	if firstStatus != "paid" || secondStatus != "pending" {
+		t.Fatalf("payment statuses after amount match: %s / %s", firstStatus, secondStatus)
 	}
 }
+
 func TestDifferentRelayEventForAlreadyPaidPaymentDoesNotTransitionTwice(t *testing.T) {
 	ctx := context.Background()
 	db := openAllocatorDB(t)
@@ -388,6 +389,7 @@ func TestLatePreCancellationMatchDoesNotOpenPostCancellationWindow(t *testing.T)
 		t.Fatalf("post-cancel result = %+v", post)
 	}
 }
+
 func insertHistoricalReservation(t *testing.T, db *storage.DB, paymentID, profileID string, created time.Time, releasedAt *time.Time, status string) {
 	t.Helper()
 	if profileID == "kotak" {
@@ -409,7 +411,7 @@ func insertHistoricalReservation(t *testing.T, db *storage.DB, paymentID, profil
 	}
 }
 
-func TestKotakLowConfidenceLatestReuseFailsAmbiguous(t *testing.T) {
+func TestKotakSMSObservationIsUnsupported(t *testing.T) {
 	ctx := context.Background()
 	db := openAllocatorDB(t)
 	base := time.UnixMilli(1_788_200_000_000).UTC()
@@ -421,19 +423,16 @@ func TestKotakLowConfidenceLatestReuseFailsAmbiguous(t *testing.T) {
 	insertRelayEvent(t, db, "relay_kotak_reuse", "source_kotak_reuse", observations.GoogleMessagesPackage, occurred, received)
 	s := newTestService(t, db, received)
 	obs := observations.Observation{Source: "kotak_sms", CollectionProfileID: "kotak", AmountPaise: 10037, OccurredAt: occurred, OccurredAtSource: "notification_posted_at"}
-	result, err := s.ApplyObservation(ctx, "relay_kotak_reuse", obs, received)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Result != "ambiguous" || result.PaymentID != "" || result.Transitioned {
-		t.Fatalf("reuse result = %+v", result)
+	if _, err := s.ApplyObservation(ctx, "relay_kotak_reuse", obs, received); !errors.Is(err, ErrInvalidObservation) {
+		t.Fatalf("Kotak SMS observation error = %v, want ErrInvalidObservation", err)
 	}
 	var status string
 	if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id='new'`).Scan(&status); err != nil || status != "pending" {
 		t.Fatalf("new payment status=%q err=%v", status, err)
 	}
 }
-func TestPaytmPostedTimeLatestReuseFailsAmbiguous(t *testing.T) {
+
+func TestPaytmPostedTimeLatestReuseMatchesUniqueLiveAmount(t *testing.T) {
 	ctx := context.Background()
 	db := openAllocatorDB(t)
 	base := time.UnixMilli(1_788_200_000_000).UTC()
@@ -448,11 +447,11 @@ func TestPaytmPostedTimeLatestReuseFailsAmbiguous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Result != "ambiguous" || result.PaymentID != "" || result.Transitioned {
+	if result.Result != "matched" || result.PaymentID != "new_paytm" || !result.Transitioned {
 		t.Fatalf("reuse result = %+v", result)
 	}
 	var status string
-	if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id='new_paytm'`).Scan(&status); err != nil || status != "pending" {
+	if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id='new_paytm'`).Scan(&status); err != nil || status != "paid" {
 		t.Fatalf("new payment status=%q err=%v", status, err)
 	}
 }

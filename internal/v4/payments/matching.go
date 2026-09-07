@@ -27,10 +27,11 @@ type MatchResult struct {
 }
 
 type matchCandidate struct {
-	PaymentID     string
-	Status        string
-	ReservedAt    int64
-	ReservedUntil int64
+	PaymentID           string
+	Status              string
+	CollectionProfileID string
+	ReservedAt          int64
+	ReservedUntil       int64
 }
 
 func (s *Service) ApplyObservation(ctx context.Context, relayEventID string, obs observations.Observation, receivedAt time.Time) (MatchResult, error) {
@@ -83,10 +84,7 @@ func (s *Service) applyObservation(ctx context.Context, relayEventID string, obs
 			if queryErr != nil {
 				return fmt.Errorf("read relay event status: %w", queryErr)
 			}
-			if relayStatus != "received" {
-				return ErrRelayEventNotFound
-			}
-			if relayDeviceID != deviceID {
+			if relayStatus != "received" || relayDeviceID != deviceID {
 				return ErrRelayEventNotFound
 			}
 			var enabled int
@@ -132,13 +130,6 @@ func (s *Service) applyObservation(ctx context.Context, relayEventID string, obs
 		if expected := expectedPackage(obs.Source); expected != "" && packageName != expected {
 			return fmt.Errorf("%w: source %s does not match relay package %s", ErrInvalidObservation, obs.Source, packageName)
 		}
-		if obs.Source == observations.GenericNotificationSource || obs.Source == observations.GenericMessageSource {
-			profileID, err := resolveGenericProfileAtApply(ctx, tx, obs)
-			if err != nil {
-				return err
-			}
-			obs.CollectionProfileID = profileID
-		}
 
 		candidates, err := matchingCandidates(ctx, tx, obs)
 		if err != nil {
@@ -150,35 +141,35 @@ func (s *Service) applyObservation(ctx context.Context, relayEventID string, obs
 			matchResult = "ambiguous"
 		} else if len(candidates) == 1 {
 			candidate := candidates[0]
-			if !sourceCanAutoConfirm(obs.Source) {
-				// Generic package text and Google Messages/SMS evidence are
-				// retained for operator review but cannot confirm payment.
-				matchResult = "ambiguous"
-			} else {
-				unsafe, err := reusedLowConfidenceLatest(ctx, tx, obs, candidate)
-				if err != nil {
-					return err
-				}
-				if unsafe {
-					matchResult = "ambiguous"
-				} else {
-					matchResult = "matched"
-					if candidate.Status == "paid" {
-						prior, err := hasConfirmedObservation(ctx, tx, candidate.PaymentID)
-						if err != nil {
-							return err
-						}
-						if prior {
-							matchResult = "corroborated"
-						}
-					}
-					matchedID = candidate.PaymentID
-					transitioned, err := applyMatchedPayment(ctx, tx, idFn, candidate, obs, now)
+			obs.CollectionProfileID = candidate.CollectionProfileID
+			if sourceCanAutoConfirm(obs.Source) {
+				matchResult = "matched"
+				if candidate.Status == "paid" {
+					prior, err := hasConfirmedObservation(ctx, tx, candidate.PaymentID)
 					if err != nil {
 						return err
 					}
-					result.Transitioned = transitioned
+					if prior {
+						matchResult = "corroborated"
+					}
 				}
+				matchedID = candidate.PaymentID
+				transitioned, err := applyMatchedPayment(ctx, tx, idFn, candidate, obs, now)
+				if err != nil {
+					return err
+				}
+				result.Transitioned = transitioned
+			} else {
+				matchResult = "ambiguous"
+			}
+		}
+		if strings.TrimSpace(obs.CollectionProfileID) == "" {
+			if err := tx.QueryRowContext(ctx, `SELECT id FROM collection_profiles WHERE active=1 AND enabled=1 LIMIT 1`).
+				Scan(&obs.CollectionProfileID); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("%w: no active collection profile is available for observation attribution", ErrInvalidObservation)
+				}
+				return fmt.Errorf("read observation collection profile: %w", err)
 			}
 		}
 		observationID, err := idFn("obs")
@@ -216,18 +207,7 @@ func validateObservation(obs observations.Observation) error {
 		return fmt.Errorf("%w: amount/time", ErrInvalidObservation)
 	}
 	switch obs.Source {
-	case "paytm_notification":
-		if obs.CollectionProfileID != "paytm" {
-			return fmt.Errorf("%w: Paytm source/profile mismatch", ErrInvalidObservation)
-		}
-	case "kotak_sms":
-		if obs.CollectionProfileID != "kotak" {
-			return fmt.Errorf("%w: Kotak source/profile mismatch", ErrInvalidObservation)
-		}
-	case observations.GenericNotificationSource, observations.GenericMessageSource:
-		if strings.TrimSpace(obs.CollectionProfileID) == "" {
-			return fmt.Errorf("%w: generic source requires resolved collection profile", ErrInvalidObservation)
-		}
+	case "paytm_notification", observations.GenericNotificationSource:
 	default:
 		return fmt.Errorf("%w: unsupported source %q", ErrInvalidObservation, obs.Source)
 	}
@@ -243,17 +223,13 @@ func expectedPackage(source string) string {
 	if source == "paytm_notification" {
 		return observations.PaytmBusinessPackage
 	}
-	if source == "kotak_sms" {
-		return observations.GoogleMessagesPackage
-	}
 	return ""
 }
 
-// sourceCanAutoConfirm identifies evidence with an origin-bound package
-// contract. Generic notifications and Google Messages/SMS remain evidence-only
-// until an independent provider signal or explicit operator confirmation exists.
+// sourceCanAutoConfirm permits only parsed Paytm or generic app evidence.
+// Candidate identity is the exact amount and valid reservation window.
 func sourceCanAutoConfirm(source string) bool {
-	return source == "paytm_notification"
+	return source == "paytm_notification" || source == observations.GenericNotificationSource
 }
 func existingObservationResult(ctx context.Context, tx *storage.ImmediateTx, relayEventID string) (MatchResult, bool, error) {
 	var matchResult string
@@ -280,64 +256,19 @@ func relayPackage(ctx context.Context, tx *storage.ImmediateTx, relayEventID str
 	return packageName, nil
 }
 
-func resolveGenericProfileAtApply(ctx context.Context, tx *storage.ImmediateTx, obs observations.Observation) (string, error) {
-	occurred := obs.OccurredAt.UnixMilli()
-	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT r.collection_profile_id
-		FROM amount_reservations r JOIN payments p ON p.id=r.payment_id
-		WHERE r.payable_amount_paise=? AND p.created_at<=? AND r.reserved_until>=?
-		AND (p.status<>'cancelled' OR EXISTS(
-			SELECT 1 FROM payment_history h
-			WHERE h.payment_id=p.id AND h.type='payment.cancelled' AND h.created_at>=?
-		))
-		ORDER BY r.collection_profile_id`, obs.AmountPaise, occurred, occurred, occurred)
-	if err != nil {
-		return "", fmt.Errorf("revalidate generic notification profile: %w", err)
-	}
-	defer rows.Close()
-	profileIDs := make([]string, 0, 2)
-	for rows.Next() {
-		var profileID string
-		if err := rows.Scan(&profileID); err != nil {
-			return "", fmt.Errorf("scan generic notification profile: %w", err)
-		}
-		profileIDs = append(profileIDs, profileID)
-	}
-	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("iterate generic notification profiles: %w", err)
-	}
-	if len(profileIDs) > 1 {
-		return "", ErrObservationAmbiguous
-	}
-	if len(profileIDs) == 1 {
-		if profileIDs[0] != obs.CollectionProfileID {
-			return "", ErrObservationAmbiguous
-		}
-		return profileIDs[0], nil
-	}
-	var activeProfileID string
-	err = tx.QueryRowContext(ctx, `SELECT id FROM collection_profiles WHERE active=1 AND enabled=1 LIMIT 1`).Scan(&activeProfileID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("%w: no active collection profile is available for generic notification evidence", ErrInvalidObservation)
-	}
-	if err != nil {
-		return "", fmt.Errorf("read active collection profile: %w", err)
-	}
-	return activeProfileID, nil
-}
-
 func matchingCandidates(ctx context.Context, tx *storage.ImmediateTx, obs observations.Observation) ([]matchCandidate, error) {
 	occurred := obs.OccurredAt.UnixMilli()
-	rows, err := tx.QueryContext(ctx, `SELECT p.id,p.status,r.reserved_at,r.reserved_until
+	rows, err := tx.QueryContext(ctx, `SELECT p.id,p.status,r.collection_profile_id,r.reserved_at,r.reserved_until
 		FROM amount_reservations r JOIN payments p ON p.id=r.payment_id
-		WHERE r.collection_profile_id=? AND r.payable_amount_paise=? AND p.created_at<=? AND r.reserved_until>=?
-		ORDER BY r.reserved_at`, obs.CollectionProfileID, obs.AmountPaise, occurred, occurred)
+		WHERE r.payable_amount_paise=? AND p.created_at<=? AND r.reserved_until>=?
+		ORDER BY r.reserved_at`, obs.AmountPaise, occurred, occurred)
 	if err != nil {
 		return nil, fmt.Errorf("find matching reservations: %w", err)
 	}
 	var raw []matchCandidate
 	for rows.Next() {
 		var c matchCandidate
-		if err := rows.Scan(&c.PaymentID, &c.Status, &c.ReservedAt, &c.ReservedUntil); err != nil {
+		if err := rows.Scan(&c.PaymentID, &c.Status, &c.CollectionProfileID, &c.ReservedAt, &c.ReservedUntil); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -419,19 +350,6 @@ func hasConfirmedObservation(ctx context.Context, tx *storage.ImmediateTx, payme
 		return false, fmt.Errorf("read prior payment observations: %w", err)
 	}
 	return found == 1, nil
-}
-
-func reusedLowConfidenceLatest(ctx context.Context, tx *storage.ImmediateTx, obs observations.Observation, candidate matchCandidate) (bool, error) {
-	lowConfidence := obs.OccurredAtSource == "server_received_at" || obs.OccurredAtSource == "notification_posted_at"
-	if !lowConfidence {
-		return false, nil
-	}
-	var count int
-	var latest sql.NullInt64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),MAX(reserved_at) FROM amount_reservations WHERE collection_profile_id=? AND payable_amount_paise=?`, obs.CollectionProfileID, obs.AmountPaise).Scan(&count, &latest); err != nil {
-		return false, fmt.Errorf("read reservation reuse history: %w", err)
-	}
-	return count > 1 && latest.Valid && candidate.ReservedAt == latest.Int64, nil
 }
 
 func applyMatchedPayment(ctx context.Context, tx *storage.ImmediateTx, idFn func(string) (string, error), candidate matchCandidate, obs observations.Observation, transitionAt time.Time) (bool, error) {

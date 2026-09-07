@@ -553,6 +553,13 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 			fragments: []string{"MATCHED_PAYMENT_ID", "OCCURRED_AT", "IS NOT NULL", "WHERE"},
 		}
 	}
+	if versions[len(versions)-1] >= 5 {
+		delete(requiredIndexes, "uq_active_profile_payable")
+		requiredIndexes["uq_active_payable"] = restoreIndex{
+			table: "amount_reservations", unique: true, columns: []string{"payable_amount_paise"},
+			fragments: []string{"PAYABLE_AMOUNT_PAISE", "RELEASED_AT", "IS NULL", "WHERE"},
+		}
+	}
 	readIndexColumns := func(indexName string) ([]string, error) {
 		quotedName := strings.ReplaceAll(indexName, "'", "''")
 		rows, err := raw.QueryContext(ctx, fmt.Sprintf("PRAGMA index_info('%s')", quotedName))
@@ -687,6 +694,10 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	}
 	if versions[len(versions)-1] >= 4 {
 		requiredIndexDefinitions["idx_observations_payment"] = "CREATE INDEX idx_observations_payment ON payment_observations(matched_payment_id, occurred_at) WHERE matched_payment_id IS NOT NULL"
+	}
+	if versions[len(versions)-1] >= 5 {
+		delete(requiredIndexDefinitions, "uq_active_profile_payable")
+		requiredIndexDefinitions["uq_active_payable"] = "CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL"
 	}
 	canonicalSQL := func(value string) string {
 		return strings.Join(strings.Fields(strings.ToUpper(value)), " ")

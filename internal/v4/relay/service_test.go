@@ -610,38 +610,25 @@ func TestRetryResumesPreviouslyReceivedRelayEvent(t *testing.T) {
 		t.Fatal("retry did not resume the existing relay event")
 	}
 }
-func TestSignedKotakGoogleMessagesEventMatchesKotakPayment(t *testing.T) {
+func TestSignedBlockedMessageAndEmailPackagesAreRejectedBeforeStorage(t *testing.T) {
 	ctx := context.Background()
 	db := openRelayDB(t)
-	createdAt := time.Date(2026, 9, 1, 5, 30, 0, 0, time.UTC)
-	insertProfile(t, db, "kotak", "kotak_sms", "merchant@kotak", true, createdAt)
-	paymentService, created := createPayment(t, db, createdAt, "kotak-1")
-	occurredAt := createdAt.Add(2 * time.Minute)
-	receivedAt := occurredAt.Add(time.Second)
-	paymentService.Now = func() time.Time { return receivedAt }
-	priv, deviceID := enrollTestDevice(t, db, createdAt.Add(-time.Minute))
-	service := NewService(db, paymentService)
-	service.Now = func() time.Time { return receivedAt }
-	body := marshalEvent(t, EventInput{
-		SchemaVersion: 1, EventID: strings.Repeat("1", 64),
-		PackageName: observations.GoogleMessagesPackage,
-		PostedAtMS:  occurredAt.UnixMilli(),
-		Title:       "Kotak Mahindra Bank",
-		Text:        "Kotak: Received Rs. 100.37 from maya@okaxis",
-	})
-	result, err := service.IngestSigned(ctx, signedAuth(t, priv, deviceID, receivedAt, body), body)
-	if err != nil {
-		t.Fatal(err)
+	now := time.Date(2026, 9, 1, 5, 30, 0, 0, time.UTC)
+	priv, deviceID := enrollTestDevice(t, db, now.Add(-time.Minute))
+	service := NewService(db, payments.NewService(db))
+	service.Now = func() time.Time { return now }
+	for index, packageName := range []string{observations.GoogleMessagesPackage, observations.GmailPackage} {
+		body := marshalEvent(t, EventInput{
+			SchemaVersion: 1, EventID: strings.Repeat(string(rune('1'+index)), 64),
+			PackageName: packageName, PostedAtMS: now.UnixMilli(),
+			Title: "Payment received", Text: "Received Rs. 100.37 from maya@okaxis",
+		})
+		if _, err := service.IngestSigned(ctx, signedAuth(t, priv, deviceID, now, body), body); err == nil || !strings.Contains(err.Error(), "no longer accepted") {
+			t.Fatalf("package %s error=%v", packageName, err)
+		}
 	}
-	if result.Status != "ambiguous" || result.PaymentID != "" || result.Transitioned {
-		t.Fatalf("Kotak result = %+v", result)
-	}
-	got, err := paymentService.Get(ctx, created.Payment.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Payment.Status != "pending" || got.Payment.PayerUPIID != "" {
-		t.Fatalf("Kotak payment = %+v", got.Payment)
+	if countRows(t, db, "relay_events") != 0 {
+		t.Fatal("blocked notification packages must not be stored")
 	}
 }
 
@@ -662,15 +649,15 @@ func TestGenericWalletNotificationMatchesActiveProfilePayment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "ambiguous" || result.PaymentID != "" || result.Transitioned {
+	if result.Status != "matched" || result.PaymentID != created.Payment.ID || !result.Transitioned {
 		t.Fatalf("generic wallet result=%+v", result)
 	}
 	got, err := paymentService.Get(context.Background(), created.Payment.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Payment.Status != "pending" {
-		t.Fatalf("payment status=%s", got.Payment.Status)
+	if got.Payment.Status != "paid" || got.Payment.PayerName != "Rahul" {
+		t.Fatalf("payment=%+v", got.Payment)
 	}
 }
 
@@ -698,60 +685,15 @@ func TestGenericWalletNotificationUsesReservationProfileAfterActiveSwitch(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Status != "ambiguous" || result.PaymentID != "" || result.Transitioned {
+	if result.Status != "matched" || result.PaymentID == "" || !result.Transitioned {
 		t.Fatalf("generic delayed result=%+v", result)
 	}
 	var profileID, matchResult string
 	if err := db.SQL.QueryRow(`SELECT collection_profile_id,match_result FROM payment_observations WHERE relay_event_id=?`, result.RelayEventID).Scan(&profileID, &matchResult); err != nil {
 		t.Fatal(err)
 	}
-	if profileID != "old-profile" || matchResult != "ambiguous" {
+	if profileID != "old-profile" || matchResult != "matched" {
 		t.Fatalf("observation profile=%q result=%q", profileID, matchResult)
-	}
-}
-
-func TestGenericWalletNotificationIsAmbiguousAcrossProfileReservations(t *testing.T) {
-	db := openRelayDB(t)
-	now := time.Date(2026, 9, 5, 9, 0, 0, 0, time.UTC)
-	insertProfile(t, db, "profile-a", "paytm_notification", "a@upi", true, now.Add(-time.Hour))
-	_, first := createPayment(t, db, now, "generic-ambiguous-a")
-	if _, err := db.SQL.Exec(`UPDATE collection_profiles SET active=0,updated_at=? WHERE id='profile-a'`, now.Add(10*time.Second).UnixMilli()); err != nil {
-		t.Fatal(err)
-	}
-	insertProfile(t, db, "profile-b", "paytm_notification", "b@upi", true, now.Add(10*time.Second))
-	secondService, second := createPayment(t, db, now.Add(10*time.Second), "generic-ambiguous-b")
-	if first.Payment.PayableAmountPaise != second.Payment.PayableAmountPaise {
-		t.Fatalf("test requires overlapping amount reservations: %d != %d", first.Payment.PayableAmountPaise, second.Payment.PayableAmountPaise)
-	}
-
-	priv, deviceID := enrollTestDevice(t, db, now.Add(-time.Hour))
-	occurred := now.Add(time.Minute)
-	received := occurred.Add(time.Second)
-	relayService := NewService(db, secondService)
-	relayService.Now = func() time.Time { return received }
-	body := marshalEvent(t, EventInput{
-		SchemaVersion: 1, EventID: strings.Repeat("e", 64),
-		PackageName: "com.example.wallet", PostedAtMS: occurred.UnixMilli(),
-		Text: "₹100.37 received from Rahul",
-	})
-	result, err := relayService.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, received, body), body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Status != "ambiguous" || result.PaymentID != "" || result.Transitioned {
-		t.Fatalf("ambiguous generic result=%+v", result)
-	}
-	if countRows(t, db, "payment_observations") != 0 {
-		t.Fatal("ambiguous cross-profile notification must not claim an observation profile")
-	}
-	for _, paymentID := range []string{first.Payment.ID, second.Payment.ID} {
-		var status string
-		if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id=?`, paymentID).Scan(&status); err != nil {
-			t.Fatal(err)
-		}
-		if status != "pending" {
-			t.Fatalf("payment %s status=%s want pending", paymentID, status)
-		}
 	}
 }
 

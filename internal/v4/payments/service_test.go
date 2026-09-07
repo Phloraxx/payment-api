@@ -290,8 +290,8 @@ func TestProfileSwitchAffectsOnlyNewPayments(t *testing.T) {
 	if second.Payment.CollectionProfileID != "kotak" || second.Payment.UPIIDSnapshot != "merchant@kotak" {
 		t.Fatalf("second payment did not use Kotak: %+v", second.Payment)
 	}
-	if second.Payment.PayableAmountPaise != 10037 {
-		t.Fatalf("profile-scoped amount should allow same exact amount, got %d", second.Payment.PayableAmountPaise)
+	if second.Payment.PayableAmountPaise == first.Payment.PayableAmountPaise {
+		t.Fatalf("live payable amount reused across profiles: %d", second.Payment.PayableAmountPaise)
 	}
 	if !strings.Contains(second.UPIURI, "pa=merchant%40kotak") || !strings.Contains(second.UPIURI, "pn=PayGate%20Kotak") {
 		t.Fatalf("Kotak UPI URI = %q", second.UPIURI)

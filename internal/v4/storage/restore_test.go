@@ -131,7 +131,7 @@ func TestRestoreDrillRejectsMissingReservationUniqueness(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.SQL.ExecContext(ctx, `DROP INDEX uq_active_profile_payable`); err != nil {
+	if _, err := db.SQL.ExecContext(ctx, `DROP INDEX uq_active_payable`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestRestoreDrillRejectsMissingReservationUniqueness(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RestoreDrill(ctx, backupPath, livePath, ""); err == nil || !strings.Contains(err.Error(), "uq_active_profile_payable") {
+	if _, err := RestoreDrill(ctx, backupPath, livePath, ""); err == nil || !strings.Contains(err.Error(), "uq_active_payable") {
 		t.Fatalf("missing uniqueness index error = %v", err)
 	}
 }
