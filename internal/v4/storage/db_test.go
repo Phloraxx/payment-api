@@ -338,6 +338,116 @@ func TestOrdinaryReadTransactionDoesNotAcquireWriterLock(t *testing.T) {
 		t.Fatalf("ordinary read transaction blocked writer: %v", err)
 	}
 }
+func TestOpenMigratesV4CrossProfileDuplicateReservationsWithoutRewritingAmounts(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "paygate-v4-duplicates.db")
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL) STRICT;`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, schemaV1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, schemaV2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(1,1),(2,2)`); err != nil {
+		t.Fatal(err)
+	}
+	v4 := &DB{SQL: raw, Path: path}
+	if err := v4.applyV3(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := v4.runMigrationTx(ctx, 4, applyV4); err != nil {
+		t.Fatal(err)
+	}
+
+	now := int64(1_788_200_000_000)
+	if _, err := raw.ExecContext(ctx, `INSERT INTO collection_profiles(id,label,upi_id,parser,enabled,active,created_at,updated_at) VALUES
+		('paytm','Paytm','paytm@upi','paytm_notification',1,1,?,?),
+		('kotak','Kotak','kotak@upi','kotak_sms',1,0,?,?)`, now, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	insert := `INSERT INTO payments(id,name,metadata_json,requested_amount_paise,payable_amount_paise,adjustment_paise,collection_profile_id,upi_id_snapshot,status,created_at,expires_at,grace_until,reuse_after)
+		VALUES(?,?,'{}',10000,10037,37,?,?,'pending',?,?,?,?)`
+	if _, err := raw.ExecContext(ctx, insert, "pay_paytm", "Paytm payer", "paytm", "paytm@upi", now, now+300_000, now+600_000, now+900_000); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, insert, "pay_kotak", "Kotak payer", "kotak", "kotak@upi", now+1, now+300_001, now+600_001, now+900_001); err != nil {
+		t.Fatal(err)
+	}
+	reservation := `INSERT INTO amount_reservations(id,collection_profile_id,payable_amount_paise,payment_id,reserved_at,reserved_until,last_used_at) VALUES(?,?,?,?,?,?,?)`
+	if _, err := raw.ExecContext(ctx, reservation, "res_paytm", "paytm", 10037, "pay_paytm", now, now+900_000, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, reservation, "res_kotak", "kotak", 10037, "pay_kotak", now+1, now+900_001, now+1); err != nil {
+		t.Fatalf("v4 should allow cross-profile duplicate amount: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("upgrade with live v4 duplicates failed: %v", err)
+	}
+	defer db.Close()
+	var version int
+	if err := db.SQL.QueryRowContext(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema version=%d want=%d", version, schemaVersion)
+	}
+	rows, err := db.SQL.QueryContext(ctx, `SELECT payment_id,payable_amount_paise,global_unique_enforced FROM amount_reservations ORDER BY payment_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	seen := 0
+	for rows.Next() {
+		var paymentID string
+		var amount int64
+		var enforced int
+		if err := rows.Scan(&paymentID, &amount, &enforced); err != nil {
+			t.Fatal(err)
+		}
+		if amount != 10037 || enforced != 0 {
+			t.Fatalf("grandfathered reservation %s amount=%d enforced=%d", paymentID, amount, enforced)
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if seen != 2 {
+		t.Fatalf("grandfathered reservations=%d want=2", seen)
+	}
+
+	if _, err := db.SQL.ExecContext(ctx, insert, "pay_blocked", "Blocked", "paytm", "paytm@upi", now+2, now+300_002, now+600_002, now+900_002); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.ExecContext(ctx, reservation, "res_blocked", "paytm", 10037, "pay_blocked", now+2, now+900_002, now+2); err == nil {
+		t.Fatal("new reservation reused a grandfathered live amount")
+	}
+	if _, err := db.SQL.ExecContext(ctx, `UPDATE payments SET payable_amount_paise=10048,adjustment_paise=48 WHERE id='pay_blocked'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.ExecContext(ctx, reservation, "res_new", "paytm", 10048, "pay_blocked", now+2, now+900_002, now+2); err != nil {
+		t.Fatalf("new globally unique reservation failed: %v", err)
+	}
+	var enforced int
+	if err := db.SQL.QueryRowContext(ctx, `SELECT global_unique_enforced FROM amount_reservations WHERE id='res_new'`).Scan(&enforced); err != nil {
+		t.Fatal(err)
+	}
+	if enforced != 1 {
+		t.Fatalf("new reservation enforcement=%d want=1", enforced)
+	}
+}
+
 func TestOpenMigratesV1DatabaseToRelayHealthSchema(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "paygate-v1.db")

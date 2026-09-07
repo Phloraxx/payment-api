@@ -275,6 +275,10 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		requiredColumns["relay_devices"] = append(requiredColumns["relay_devices"],
 			restoreExpectedColumn{"epoch_required", "INTEGER", false})
 	}
+	if versions[len(versions)-1] >= 7 {
+		requiredColumns["amount_reservations"] = append(requiredColumns["amount_reservations"],
+			restoreExpectedColumn{"global_unique_enforced", "INTEGER", false})
+	}
 	requiredNotNull := map[string][]string{
 		"schema_migrations":    {"applied_at"},
 		"collection_profiles":  {"label", "upi_id", "parser", "enabled", "active", "created_at", "updated_at"},
@@ -294,6 +298,9 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	}
 	if versions[len(versions)-1] >= 6 {
 		requiredNotNull["relay_devices"] = append(requiredNotNull["relay_devices"], "epoch_required")
+	}
+	if versions[len(versions)-1] >= 7 {
+		requiredNotNull["amount_reservations"] = append(requiredNotNull["amount_reservations"], "global_unique_enforced")
 	}
 	type restoreForeignKey struct {
 		table    string
@@ -398,6 +405,9 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	}
 	if versions[len(versions)-1] >= 6 {
 		requiredCheckFragments["relay_devices"] = append(requiredCheckFragments["relay_devices"], "EPOCH_REQUIRED IN (0,1)")
+	}
+	if versions[len(versions)-1] >= 7 {
+		requiredCheckFragments["amount_reservations"] = append(requiredCheckFragments["amount_reservations"], "GLOBAL_UNIQUE_ENFORCED IN (0,1)")
 	}
 	if versions[len(versions)-1] >= 3 {
 		requiredCheckFragments["collection_profiles"] = append(requiredCheckFragments["collection_profiles"],
@@ -565,9 +575,12 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	}
 	if versions[len(versions)-1] >= 5 {
 		delete(requiredIndexes, "uq_active_profile_payable")
+		fragments := []string{"PAYABLE_AMOUNT_PAISE", "RELEASED_AT", "IS NULL", "WHERE"}
+		if versions[len(versions)-1] >= 7 {
+			fragments = append(fragments, "GLOBAL_UNIQUE_ENFORCED", "=1")
+		}
 		requiredIndexes["uq_active_payable"] = restoreIndex{
-			table: "amount_reservations", unique: true, columns: []string{"payable_amount_paise"},
-			fragments: []string{"PAYABLE_AMOUNT_PAISE", "RELEASED_AT", "IS NULL", "WHERE"},
+			table: "amount_reservations", unique: true, columns: []string{"payable_amount_paise"}, fragments: fragments,
 		}
 	}
 	readIndexColumns := func(indexName string) ([]string, error) {
@@ -708,10 +721,25 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	if versions[len(versions)-1] >= 5 {
 		delete(requiredIndexDefinitions, "uq_active_profile_payable")
 		requiredIndexDefinitions["uq_active_payable"] = "CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL"
+		if versions[len(versions)-1] >= 7 {
+			requiredIndexDefinitions["uq_active_payable"] = "CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL AND global_unique_enforced=1"
+		}
 	}
 	canonicalSQL := func(value string) string {
 		return strings.Join(strings.Fields(strings.ToUpper(value)), " ")
 	}
+	requiredTriggers := map[string][]string{}
+	if versions[len(versions)-1] >= 7 {
+		requiredTriggers["trg_amount_reservations_global_unique_insert"] = []string{
+			"BEFORE INSERT ON AMOUNT_RESERVATIONS", "NEW.GLOBAL_UNIQUE_ENFORCED<>1", "NEW.RELEASED_AT IS NULL",
+			"PAYABLE_AMOUNT_PAISE=NEW.PAYABLE_AMOUNT_PAISE", "RAISE(ABORT",
+		}
+		requiredTriggers["trg_amount_reservations_global_unique_update"] = []string{
+			"BEFORE UPDATE OF PAYABLE_AMOUNT_PAISE,RELEASED_AT,GLOBAL_UNIQUE_ENFORCED ON AMOUNT_RESERVATIONS",
+			"OLD.GLOBAL_UNIQUE_ENFORCED=1", "NEW.GLOBAL_UNIQUE_ENFORCED<>1", "ID<>NEW.ID", "RAISE(ABORT",
+		}
+	}
+
 	for name, expected := range requiredIndexes {
 		var tableName, indexSQL string
 		if err := raw.QueryRowContext(ctx, `SELECT tbl_name,sql FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&tableName, &indexSQL); err != nil {
@@ -768,6 +796,21 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		}
 		if want := requiredIndexDefinitions[name]; want != "" && canonicalSQL(indexSQL) != canonicalSQL(want) {
 			return fmt.Errorf("restore index %s definition mismatch", name)
+		}
+	}
+	for name, fragments := range requiredTriggers {
+		var tableName, triggerSQL string
+		if err := raw.QueryRowContext(ctx, `SELECT tbl_name,sql FROM sqlite_master WHERE type='trigger' AND name=?`, name).Scan(&tableName, &triggerSQL); err != nil {
+			return fmt.Errorf("read restore trigger %s: %w", name, err)
+		}
+		if !strings.EqualFold(tableName, "amount_reservations") {
+			return fmt.Errorf("restore trigger %s belongs to table %s, want amount_reservations", name, tableName)
+		}
+		upperTriggerSQL := strings.ToUpper(triggerSQL)
+		for _, fragment := range fragments {
+			if !strings.Contains(upperTriggerSQL, fragment) {
+				return fmt.Errorf("restore trigger %s is missing definition fragment %s", name, fragment)
+			}
 		}
 	}
 	return nil

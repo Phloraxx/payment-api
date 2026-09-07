@@ -58,6 +58,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 		}
 		current = 6
 	}
+	if current < 7 {
+		if err := db.runMigrationTx(ctx, 7, applyV7); err != nil {
+			return err
+		}
+		current = 7
+	}
 	return nil
 }
 
@@ -232,19 +238,102 @@ func applyV4(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 func applyV5(ctx context.Context, tx *sql.Tx) error {
-	if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS uq_active_profile_payable`); err != nil {
-		return fmt.Errorf("drop profile-scoped amount uniqueness: %w", err)
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE amount_reservations ADD COLUMN global_unique_enforced INTEGER NOT NULL DEFAULT 1 CHECK(global_unique_enforced IN (0,1))`); err != nil {
+		return fmt.Errorf("add global amount enforcement marker: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX uq_active_payable
-		ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL`); err != nil {
-		return fmt.Errorf("create global amount uniqueness: %w", err)
+	// v4 allowed the same live amount in different collection profiles. Preserve
+	// only those already-issued overlapping QR amounts rather than rewriting payer-
+	// visible values during migration; matching remains fail-safe ambiguous until
+	// those grandfathered overlaps are released. Existing unique rows stay enforced.
+	if _, err := tx.ExecContext(ctx, `UPDATE amount_reservations SET global_unique_enforced=0
+		WHERE released_at IS NULL AND payable_amount_paise IN (
+			SELECT payable_amount_paise FROM amount_reservations
+			WHERE released_at IS NULL GROUP BY payable_amount_paise HAVING COUNT(*) > 1
+		)`); err != nil {
+		return fmt.Errorf("grandfather pre-v5 overlapping amount reservations: %w", err)
 	}
-	return nil
+	return installGlobalAmountUniqueness(ctx, tx)
 }
 
 func applyV6(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, `ALTER TABLE relay_devices ADD COLUMN epoch_required INTEGER NOT NULL DEFAULT 0 CHECK(epoch_required IN (0,1))`); err != nil {
 		return fmt.Errorf("add relay epoch requirement: %w", err)
+	}
+	return nil
+}
+
+func applyV7(ctx context.Context, tx *sql.Tx) error {
+	hasMarker, err := tableColumnExists(ctx, tx, "amount_reservations", "global_unique_enforced")
+	if err != nil {
+		return err
+	}
+	if !hasMarker {
+		// Pre-release v5/v6 databases already had a global unique index, so their
+		// existing rows are safe to mark enforced while upgrading to v7.
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE amount_reservations ADD COLUMN global_unique_enforced INTEGER NOT NULL DEFAULT 1 CHECK(global_unique_enforced IN (0,1))`); err != nil {
+			return fmt.Errorf("backfill global amount enforcement marker: %w", err)
+		}
+	}
+	return installGlobalAmountUniqueness(ctx, tx)
+}
+
+func tableColumnExists(ctx context.Context, tx *sql.Tx, tableName, columnName string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", tableName))
+	if err != nil {
+		return false, fmt.Errorf("inspect %s columns: %w", tableName, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &pk); err != nil {
+			return false, fmt.Errorf("scan %s columns: %w", tableName, err)
+		}
+		if name == columnName {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate %s columns: %w", tableName, err)
+	}
+	return false, nil
+}
+
+func installGlobalAmountUniqueness(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `
+DROP INDEX IF EXISTS uq_active_profile_payable;
+DROP INDEX IF EXISTS uq_active_payable;
+DROP TRIGGER IF EXISTS trg_amount_reservations_global_unique_insert;
+DROP TRIGGER IF EXISTS trg_amount_reservations_global_unique_update;
+CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise)
+    WHERE released_at IS NULL AND global_unique_enforced=1;
+CREATE TRIGGER trg_amount_reservations_global_unique_insert
+BEFORE INSERT ON amount_reservations
+WHEN NEW.global_unique_enforced<>1 OR (
+    NEW.released_at IS NULL AND EXISTS (
+        SELECT 1 FROM amount_reservations
+        WHERE released_at IS NULL AND payable_amount_paise=NEW.payable_amount_paise
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'active payable amount already reserved');
+END;
+CREATE TRIGGER trg_amount_reservations_global_unique_update
+BEFORE UPDATE OF payable_amount_paise,released_at,global_unique_enforced ON amount_reservations
+WHEN (OLD.global_unique_enforced=1 AND NEW.global_unique_enforced<>1) OR (
+    NEW.released_at IS NULL
+    AND (NEW.global_unique_enforced=1 OR OLD.released_at IS NOT NULL OR NEW.payable_amount_paise<>OLD.payable_amount_paise)
+    AND EXISTS (
+        SELECT 1 FROM amount_reservations
+        WHERE id<>NEW.id AND released_at IS NULL AND payable_amount_paise=NEW.payable_amount_paise
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'active payable amount already reserved');
+END;
+`); err != nil {
+		return fmt.Errorf("install global amount uniqueness: %w", err)
 	}
 	return nil
 }
