@@ -207,7 +207,11 @@ func validateObservation(obs observations.Observation) error {
 		return fmt.Errorf("%w: amount/time", ErrInvalidObservation)
 	}
 	switch obs.Source {
-	case "paytm_notification", observations.GenericNotificationSource:
+	case "paytm_notification":
+		if strings.TrimSpace(obs.CollectionProfileID) != "paytm" {
+			return fmt.Errorf("%w: Paytm source/profile mismatch", ErrInvalidObservation)
+		}
+	case observations.GenericNotificationSource:
 	default:
 		return fmt.Errorf("%w: unsupported source %q", ErrInvalidObservation, obs.Source)
 	}
@@ -258,11 +262,17 @@ func relayPackage(ctx context.Context, tx *storage.ImmediateTx, relayEventID str
 
 func matchingCandidates(ctx context.Context, tx *storage.ImmediateTx, obs observations.Observation) ([]matchCandidate, error) {
 	occurred := obs.OccurredAt.UnixMilli()
-	rows, err := tx.QueryContext(ctx, `SELECT p.id,p.status,r.collection_profile_id,r.reserved_at,r.reserved_until
+	query := `SELECT p.id,p.status,r.collection_profile_id,r.reserved_at,r.reserved_until
 		FROM amount_reservations r JOIN payments p ON p.id=r.payment_id
 		WHERE r.payable_amount_paise=? AND p.created_at<=? AND r.reserved_until>=?
-		AND (r.released_at IS NULL OR r.released_at>=?)
-		ORDER BY r.reserved_at`, obs.AmountPaise, occurred, occurred, occurred)
+		AND (r.released_at IS NULL OR r.released_at>=?)`
+	args := []any{obs.AmountPaise, occurred, occurred, occurred}
+	if obs.Source == "paytm_notification" {
+		query += ` AND r.collection_profile_id=?`
+		args = append(args, obs.CollectionProfileID)
+	}
+	query += ` ORDER BY r.reserved_at`
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("find matching reservations: %w", err)
 	}

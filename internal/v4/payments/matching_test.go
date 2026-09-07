@@ -511,6 +511,42 @@ func TestTrustedHistoricalTimeCanMatchOldReservationAfterReuse(t *testing.T) {
 	}
 }
 
+func TestPaytmObservationCannotConfirmDifferentCollectionProfile(t *testing.T) {
+	ctx := context.Background()
+	db := openAllocatorDB(t)
+	base := time.UnixMilli(1_788_200_000_000).UTC()
+	insertHistoricalReservation(t, db, "kotak_pending", "kotak", base, nil, "pending")
+	occurred := base.Add(time.Minute)
+	received := occurred.Add(time.Second)
+	insertRelayEvent(t, db, "relay_paytm_wrong_profile", "source_paytm_wrong_profile", observations.PaytmBusinessPackage, occurred, received)
+	s := newTestService(t, db, received)
+
+	result, err := s.ApplyObservation(ctx, "relay_paytm_wrong_profile", paytmObservation(10037, occurred, "notification_text"), received)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Result != "unmatched" || result.PaymentID != "" || result.Transitioned {
+		t.Fatalf("cross-profile Paytm result = %+v", result)
+	}
+	var status string
+	if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id='kotak_pending'`).Scan(&status); err != nil || status != "pending" {
+		t.Fatalf("non-Paytm payment status=%q err=%v", status, err)
+	}
+
+	genericOccurred := occurred.Add(time.Second)
+	genericReceived := genericOccurred.Add(time.Second)
+	insertRelayEvent(t, db, "relay_generic_profile", "source_generic_profile", "com.google.android.apps.nbu.paisa.user", genericOccurred, genericReceived)
+	generic := observations.Observation{Source: observations.GenericNotificationSource, AmountPaise: 10037, OccurredAt: genericOccurred, OccurredAtSource: "notification_posted_at"}
+	s.Now = func() time.Time { return genericReceived }
+	result, err = s.ApplyObservation(ctx, "relay_generic_profile", generic, genericReceived)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Result != "matched" || result.PaymentID != "kotak_pending" || !result.Transitioned {
+		t.Fatalf("generic cross-profile result = %+v", result)
+	}
+}
+
 func TestPaytmMatchIgnoresCurrentActiveProfile(t *testing.T) {
 	ctx := context.Background()
 	db := openAllocatorDB(t)
