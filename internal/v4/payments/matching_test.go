@@ -456,6 +456,30 @@ func TestPaytmPostedTimeLatestReuseMatchesUniqueLiveAmount(t *testing.T) {
 	}
 }
 
+func TestReleasedReservationDoesNotMatchObservationAfterRelease(t *testing.T) {
+	ctx := context.Background()
+	db := openAllocatorDB(t)
+	base := time.UnixMilli(1_788_200_000_000).UTC()
+	released := base.Add(5 * time.Minute)
+	insertHistoricalReservation(t, db, "released_old", "paytm", base, &released, "expired")
+	occurred := released.Add(time.Second)
+	received := occurred.Add(time.Second)
+	insertRelayEvent(t, db, "relay_after_release", "source_after_release", observations.PaytmBusinessPackage, occurred, received)
+	s := newTestService(t, db, received)
+
+	result, err := s.ApplyObservation(ctx, "relay_after_release", paytmObservation(10037, occurred, "notification_text"), received)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Result != "unmatched" || result.PaymentID != "" || result.Transitioned {
+		t.Fatalf("post-release result = %+v", result)
+	}
+	var status string
+	if err := db.SQL.QueryRow(`SELECT status FROM payments WHERE id='released_old'`).Scan(&status); err != nil || status != "expired" {
+		t.Fatalf("released payment status=%q err=%v", status, err)
+	}
+}
+
 func TestTrustedHistoricalTimeCanMatchOldReservationAfterReuse(t *testing.T) {
 	ctx := context.Background()
 	db := openAllocatorDB(t)

@@ -261,7 +261,8 @@ func matchingCandidates(ctx context.Context, tx *storage.ImmediateTx, obs observ
 	rows, err := tx.QueryContext(ctx, `SELECT p.id,p.status,r.collection_profile_id,r.reserved_at,r.reserved_until
 		FROM amount_reservations r JOIN payments p ON p.id=r.payment_id
 		WHERE r.payable_amount_paise=? AND p.created_at<=? AND r.reserved_until>=?
-		ORDER BY r.reserved_at`, obs.AmountPaise, occurred, occurred)
+		AND (r.released_at IS NULL OR r.released_at>=?)
+		ORDER BY r.reserved_at`, obs.AmountPaise, occurred, occurred, occurred)
 	if err != nil {
 		return nil, fmt.Errorf("find matching reservations: %w", err)
 	}
