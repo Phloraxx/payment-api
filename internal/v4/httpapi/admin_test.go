@@ -630,7 +630,7 @@ func TestPairedDeviceCannotMutatePaymentOrWebhookAuthority(t *testing.T) {
 	privateKey, deviceID, enrollmentEpoch := pairAdminTestDevice(t, f)
 	payment := createAdminTestPayment(t, f, "Evidence boundary", "evt_device_auth", "device-auth")
 
-	rr := signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/payments/"+payment.ID, []byte(`{"status":"paid"}`))
+	rr := signedDeviceAdminRequestWithEpoch(t, f, privateKey, deviceID, http.MethodPatch, "/admin/payments/"+payment.ID, []byte(`{"status":"paid"}`), enrollmentEpoch)
 	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), `"admin_required"`) {
 		t.Fatalf("device payment edit status=%d body=%s", rr.Code, rr.Body.String())
 	}
@@ -642,7 +642,7 @@ func TestPairedDeviceCannotMutatePaymentOrWebhookAuthority(t *testing.T) {
 		t.Fatalf("device changed payment status to %q", status)
 	}
 
-	rr = signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPost, "/admin/webhooks/wh_test/retry", nil)
+	rr = signedDeviceAdminRequestWithEpoch(t, f, privateKey, deviceID, http.MethodPost, "/admin/webhooks/wh_test/retry", nil, enrollmentEpoch)
 	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), `"admin_required"`) {
 		t.Fatalf("device webhook retry status=%d body=%s", rr.Code, rr.Body.String())
 	}
