@@ -133,6 +133,7 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 const adminDeviceBodyLimit = 256 << 10
+
 func (h *AdminHandler) deviceAuthorization(w http.ResponseWriter, r *http.Request, requireEpoch bool) (string, time.Time, bool) {
 	if h.Relay == nil {
 		return "", time.Time{}, false

@@ -95,9 +95,9 @@ func signedAuthWithEpoch(t *testing.T, priv *ecdsa.PrivateKey, deviceID string, 
 	}
 	return RequestAuth{
 		DeviceID: deviceID, Timestamp: timestamp,
-		Signature: base64.StdEncoding.EncodeToString(sig),
+		Signature:       base64.StdEncoding.EncodeToString(sig),
 		EnrollmentEpoch: strconv.FormatInt(enrollmentEpoch, 10),
-		Method: http.MethodPost, Path: EventPath,
+		Method:          http.MethodPost, Path: EventPath,
 	}
 }
 
