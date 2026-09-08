@@ -3,7 +3,9 @@ package storage
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -170,5 +172,113 @@ func TestRestoreDrillRejectsMissingGlobalAmountTrigger(t *testing.T) {
 	}
 	if _, err := RestoreDrill(ctx, backupPath, livePath, ""); err == nil || !strings.Contains(err.Error(), "trg_amount_reservations_global_unique_insert") {
 		t.Fatalf("missing global amount trigger error = %v", err)
+	}
+}
+
+func buildV4RestoreFixture(t *testing.T, path string) (*sql.DB, *DB) {
+	t.Helper()
+	ctx := context.Background()
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL) STRICT;`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, schemaV1); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, schemaV2); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(1,1),(2,2)`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	db := &DB{SQL: raw, Path: path}
+	if err := db.applyV3(ctx); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := db.runMigrationTx(ctx, 4, applyV4); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := db.ensureMultiRelayCompatibility(ctx); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := db.ensureRelayPayloadIntegrity(ctx); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	return raw, db
+}
+
+func finishRestoreFixture(t *testing.T, raw *sql.DB, path string) {
+	t.Helper()
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, restoreFileMode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRestoreDrillAcceptsMarkerAwareInterruptedMigrations(t *testing.T) {
+	for _, version := range []int{5, 6} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			backupPath := filepath.Join(dir, "backup.db")
+			raw, db := buildV4RestoreFixture(t, backupPath)
+			if err := db.runMigrationTx(ctx, 5, applyV5); err != nil {
+				raw.Close()
+				t.Fatal(err)
+			}
+			if version == 6 {
+				if err := db.runMigrationTx(ctx, 6, applyV6); err != nil {
+					raw.Close()
+					t.Fatal(err)
+				}
+			}
+			finishRestoreFixture(t, raw, backupPath)
+			report, err := RestoreDrill(ctx, backupPath, filepath.Join(dir, "live.db"), "")
+			if err != nil {
+				t.Fatalf("restore marker-aware v%d backup: %v", version, err)
+			}
+			if report.SchemaVersion != schemaVersion {
+				t.Fatalf("restored schema=%d want=%d", report.SchemaVersion, schemaVersion)
+			}
+		})
+	}
+}
+
+func TestRestoreDrillAcceptsLegacyV5GlobalIndex(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	backupPath := filepath.Join(dir, "backup.db")
+	raw, db := buildV4RestoreFixture(t, backupPath)
+	legacyV5 := func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS uq_active_profile_payable`); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL`)
+		return err
+	}
+	if err := db.runMigrationTx(ctx, 5, legacyV5); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	finishRestoreFixture(t, raw, backupPath)
+	report, err := RestoreDrill(ctx, backupPath, filepath.Join(dir, "live.db"), "")
+	if err != nil {
+		t.Fatalf("restore legacy v5 backup: %v", err)
+	}
+	if report.SchemaVersion != schemaVersion {
+		t.Fatalf("restored schema=%d want=%d", report.SchemaVersion, schemaVersion)
 	}
 }

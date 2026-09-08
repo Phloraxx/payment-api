@@ -227,8 +227,32 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 			return fmt.Errorf("restore schema migrations are not contiguous at version %d", version)
 		}
 	}
-	if versions[len(versions)-1] > schemaVersion {
-		return fmt.Errorf("restore schema version %d is newer than supported %d", versions[len(versions)-1], schemaVersion)
+	lastVersion := versions[len(versions)-1]
+	if lastVersion > schemaVersion {
+		return fmt.Errorf("restore schema version %d is newer than supported %d", lastVersion, schemaVersion)
+	}
+	hasColumn := func(tableName, columnName string) (bool, error) {
+		rows, err := raw.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", tableName))
+		if err != nil {
+			return false, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var cid, notNull, pk int
+			var name, kind string
+			var defaultValue any
+			if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &pk); err != nil {
+				return false, err
+			}
+			if name == columnName {
+				return true, nil
+			}
+		}
+		return false, rows.Err()
+	}
+	hasGlobalMarker, err := hasColumn("amount_reservations", "global_unique_enforced")
+	if err != nil {
+		return fmt.Errorf("inspect restore global amount marker: %w", err)
 	}
 	type restoreExpectedColumn struct {
 		name string
@@ -275,7 +299,7 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		requiredColumns["relay_devices"] = append(requiredColumns["relay_devices"],
 			restoreExpectedColumn{"epoch_required", "INTEGER", false})
 	}
-	if versions[len(versions)-1] >= 7 {
+	if hasGlobalMarker {
 		requiredColumns["amount_reservations"] = append(requiredColumns["amount_reservations"],
 			restoreExpectedColumn{"global_unique_enforced", "INTEGER", false})
 	}
@@ -299,7 +323,7 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	if versions[len(versions)-1] >= 6 {
 		requiredNotNull["relay_devices"] = append(requiredNotNull["relay_devices"], "epoch_required")
 	}
-	if versions[len(versions)-1] >= 7 {
+	if hasGlobalMarker {
 		requiredNotNull["amount_reservations"] = append(requiredNotNull["amount_reservations"], "global_unique_enforced")
 	}
 	type restoreForeignKey struct {
@@ -406,7 +430,7 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	if versions[len(versions)-1] >= 6 {
 		requiredCheckFragments["relay_devices"] = append(requiredCheckFragments["relay_devices"], "EPOCH_REQUIRED IN (0,1)")
 	}
-	if versions[len(versions)-1] >= 7 {
+	if hasGlobalMarker {
 		requiredCheckFragments["amount_reservations"] = append(requiredCheckFragments["amount_reservations"], "GLOBAL_UNIQUE_ENFORCED IN (0,1)")
 	}
 	if versions[len(versions)-1] >= 3 {
@@ -576,7 +600,7 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	if versions[len(versions)-1] >= 5 {
 		delete(requiredIndexes, "uq_active_profile_payable")
 		fragments := []string{"PAYABLE_AMOUNT_PAISE", "RELEASED_AT", "IS NULL", "WHERE"}
-		if versions[len(versions)-1] >= 7 {
+		if hasGlobalMarker {
 			fragments = append(fragments, "GLOBAL_UNIQUE_ENFORCED", "=1")
 		}
 		requiredIndexes["uq_active_payable"] = restoreIndex{
@@ -721,7 +745,7 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	if versions[len(versions)-1] >= 5 {
 		delete(requiredIndexDefinitions, "uq_active_profile_payable")
 		requiredIndexDefinitions["uq_active_payable"] = "CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL"
-		if versions[len(versions)-1] >= 7 {
+		if hasGlobalMarker {
 			requiredIndexDefinitions["uq_active_payable"] = "CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL AND global_unique_enforced=1"
 		}
 	}
@@ -729,7 +753,7 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		return strings.Join(strings.Fields(strings.ToUpper(value)), " ")
 	}
 	requiredTriggers := map[string][]string{}
-	if versions[len(versions)-1] >= 7 {
+	if hasGlobalMarker {
 		requiredTriggers["trg_amount_reservations_global_unique_insert"] = []string{
 			"BEFORE INSERT ON AMOUNT_RESERVATIONS", "NEW.GLOBAL_UNIQUE_ENFORCED<>1", "NEW.RELEASED_AT IS NULL",
 			"PAYABLE_AMOUNT_PAISE=NEW.PAYABLE_AMOUNT_PAISE", "RAISE(ABORT",
