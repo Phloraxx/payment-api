@@ -228,22 +228,116 @@ func finishRestoreFixture(t *testing.T, raw *sql.DB, path string) {
 	}
 }
 
-func TestRestoreDrillAcceptsMarkerAwareInterruptedMigrations(t *testing.T) {
-	for _, version := range []int{5, 6} {
+func installTransitionalRestoreState(ctx context.Context, db *DB, version int) error {
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE amount_reservations ADD COLUMN global_unique_enforced INTEGER NOT NULL DEFAULT 1 CHECK(global_unique_enforced IN (0,1))`); err != nil {
+		return err
+	}
+	if version >= 6 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE relay_devices ADD COLUMN epoch_required INTEGER NOT NULL DEFAULT 0 CHECK(epoch_required IN (0,1))`); err != nil {
+			return err
+		}
+	}
+	if err := installGlobalAmountUniqueness(ctx, tx); err != nil {
+		return err
+	}
+	for migration := 5; migration <= version; migration++ {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)`, migration, migration); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func installHistoricalMarkerAwareTransitionalState(ctx context.Context, db *DB, version int) error {
+	tx, err := db.SQL.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE amount_reservations ADD COLUMN global_unique_enforced INTEGER NOT NULL DEFAULT 1 CHECK(global_unique_enforced IN (0,1))`); err != nil {
+		return err
+	}
+	if version >= 6 {
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE relay_devices ADD COLUMN epoch_required INTEGER NOT NULL DEFAULT 0 CHECK(epoch_required IN (0,1))`); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+DROP INDEX IF EXISTS uq_active_profile_payable;
+CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise)
+    WHERE released_at IS NULL AND global_unique_enforced=1;
+CREATE TRIGGER trg_amount_reservations_global_unique_insert
+BEFORE INSERT ON amount_reservations
+WHEN NEW.global_unique_enforced<>1 OR (
+    NEW.released_at IS NULL AND EXISTS (
+        SELECT 1 FROM amount_reservations
+        WHERE released_at IS NULL AND payable_amount_paise=NEW.payable_amount_paise
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'active payable amount already reserved');
+END;
+CREATE TRIGGER trg_amount_reservations_global_unique_update
+BEFORE UPDATE OF payable_amount_paise,released_at,global_unique_enforced ON amount_reservations
+WHEN (OLD.global_unique_enforced=1 AND NEW.global_unique_enforced<>1) OR (
+    NEW.released_at IS NULL
+    AND (NEW.global_unique_enforced=1 OR OLD.released_at IS NOT NULL OR NEW.payable_amount_paise<>OLD.payable_amount_paise)
+    AND EXISTS (
+        SELECT 1 FROM amount_reservations
+        WHERE id<>NEW.id AND released_at IS NULL AND payable_amount_paise=NEW.payable_amount_paise
+    )
+)
+BEGIN
+    SELECT RAISE(ABORT, 'active payable amount already reserved');
+END;`); err != nil {
+		return err
+	}
+	for migration := 5; migration <= version; migration++ {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(?,?)`, migration, migration); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func TestRestoreDrillAcceptsHistoricalMarkerAwareTransitionalMigrations(t *testing.T) {
+	for _, version := range []int{5, 7} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			ctx := context.Background()
 			dir := t.TempDir()
 			backupPath := filepath.Join(dir, "backup.db")
 			raw, db := buildV4RestoreFixture(t, backupPath)
-			if err := db.runMigrationTx(ctx, 5, applyV5); err != nil {
+			if err := installHistoricalMarkerAwareTransitionalState(ctx, db, version); err != nil {
 				raw.Close()
 				t.Fatal(err)
 			}
-			if version == 6 {
-				if err := db.runMigrationTx(ctx, 6, applyV6); err != nil {
-					raw.Close()
-					t.Fatal(err)
-				}
+			finishRestoreFixture(t, raw, backupPath)
+			report, err := RestoreDrill(ctx, backupPath, filepath.Join(dir, "live.db"), "")
+			if err != nil {
+				t.Fatalf("restore historical marker-aware v%d backup: %v", version, err)
+			}
+			if report.SchemaVersion != schemaVersion {
+				t.Fatalf("restored schema=%d want=%d", report.SchemaVersion, schemaVersion)
+			}
+		})
+	}
+}
+
+func TestRestoreDrillAcceptsMarkerAwareInterruptedMigrations(t *testing.T) {
+	for _, version := range []int{5, 6, 7} {
+		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
+			ctx := context.Background()
+			dir := t.TempDir()
+			backupPath := filepath.Join(dir, "backup.db")
+			raw, db := buildV4RestoreFixture(t, backupPath)
+			if err := installTransitionalRestoreState(ctx, db, version); err != nil {
+				raw.Close()
+				t.Fatal(err)
 			}
 			finishRestoreFixture(t, raw, backupPath)
 			report, err := RestoreDrill(ctx, backupPath, filepath.Join(dir, "live.db"), "")
@@ -257,26 +351,35 @@ func TestRestoreDrillAcceptsMarkerAwareInterruptedMigrations(t *testing.T) {
 	}
 }
 
-func TestRestoreDrillAcceptsLegacyV5GlobalIndex(t *testing.T) {
+func TestRestoreDrillAcceptsLegacyV5GlobalIndexWithoutMarker(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	backupPath := filepath.Join(dir, "backup.db")
 	raw, db := buildV4RestoreFixture(t, backupPath)
-	legacyV5 := func(ctx context.Context, tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, `DROP INDEX IF EXISTS uq_active_profile_payable`); err != nil {
-			return err
-		}
-		_, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL`)
-		return err
-	}
-	if err := db.runMigrationTx(ctx, 5, legacyV5); err != nil {
+	tx, err := raw.BeginTx(ctx, nil)
+	if err != nil {
 		raw.Close()
 		t.Fatal(err)
 	}
+	if _, err := tx.ExecContext(ctx, `CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL`); err != nil {
+		tx.Rollback()
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations(version,applied_at) VALUES(5,5)`); err != nil {
+		tx.Rollback()
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	_ = db
 	finishRestoreFixture(t, raw, backupPath)
 	report, err := RestoreDrill(ctx, backupPath, filepath.Join(dir, "live.db"), "")
 	if err != nil {
-		t.Fatalf("restore legacy v5 backup: %v", err)
+		t.Fatalf("legacy v5 restore failed: %v", err)
 	}
 	if report.SchemaVersion != schemaVersion {
 		t.Fatalf("restored schema=%d want=%d", report.SchemaVersion, schemaVersion)

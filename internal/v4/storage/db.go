@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultBusyTimeoutMS = 5000
-	schemaVersion        = 7
+	schemaVersion        = 4
 )
 
 var ErrBusy = errors.New("sqlite database busy")

@@ -107,7 +107,7 @@ func verifyRequest(ctx context.Context, db *storage.DB, auth RequestAuth, body [
 	}
 	epochHeader := strings.TrimSpace(auth.EnrollmentEpoch)
 	epochBound := epochHeader != ""
-	// Devices enrolled before schema v5 may continue using the legacy canonical
+	// Devices enrolled before epoch enforcement may continue using the legacy canonical
 	// form so already-installed relays survive the server rollout. Pairing or
 	// re-pairing marks the device epoch-required, making that enrollment an explicit
 	// security boundary for every subsequent signed request.

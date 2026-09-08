@@ -228,8 +228,8 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		}
 	}
 	lastVersion := versions[len(versions)-1]
-	if lastVersion > schemaVersion {
-		return fmt.Errorf("restore schema version %d is newer than supported %d", lastVersion, schemaVersion)
+	if lastVersion > 7 {
+		return fmt.Errorf("restore schema version %d is newer than supported transitional schema 7", lastVersion)
 	}
 	hasColumn := func(tableName, columnName string) (bool, error) {
 		rows, err := raw.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", tableName))
@@ -254,16 +254,27 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("inspect restore global amount marker: %w", err)
 	}
+	hasEpochRequired, err := hasColumn("relay_devices", "epoch_required")
+	if err != nil {
+		return fmt.Errorf("inspect restore relay epoch requirement: %w", err)
+	}
+	if lastVersion >= 6 && !hasEpochRequired {
+		return errors.New("restore transitional schema is missing relay epoch requirement")
+	}
+	if lastVersion >= 7 && !hasGlobalMarker {
+		return errors.New("restore transitional schema is missing global amount marker")
+	}
 	type restoreExpectedColumn struct {
 		name string
 		kind string
 		pk   bool
 	}
 	type restoreColumn struct {
-		name    string
-		kind    string
-		pk      bool
-		notNull bool
+		name         string
+		kind         string
+		pk           bool
+		notNull      bool
+		defaultValue sql.NullString
 	}
 	requiredColumns := map[string][]restoreExpectedColumn{
 		"schema_migrations":    {{"version", "INTEGER", true}, {"applied_at", "INTEGER", false}},
@@ -295,7 +306,7 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 			restoreExpectedColumn{"last_successful_delivery_at", "INTEGER", false},
 			restoreExpectedColumn{"last_client_error", "TEXT", false})
 	}
-	if versions[len(versions)-1] >= 6 {
+	if hasEpochRequired {
 		requiredColumns["relay_devices"] = append(requiredColumns["relay_devices"],
 			restoreExpectedColumn{"epoch_required", "INTEGER", false})
 	}
@@ -320,7 +331,7 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		"admin_sessions":       {"created_at", "expires_at"},
 		"settings":             {"value", "updated_at"},
 	}
-	if versions[len(versions)-1] >= 6 {
+	if hasEpochRequired {
 		requiredNotNull["relay_devices"] = append(requiredNotNull["relay_devices"], "epoch_required")
 	}
 	if hasGlobalMarker {
@@ -427,7 +438,7 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		"admin_credentials": {"SINGLETON = 1"},
 		"admin_sessions":    {"EXPIRES_AT > CREATED_AT"},
 	}
-	if versions[len(versions)-1] >= 6 {
+	if hasEpochRequired {
 		requiredCheckFragments["relay_devices"] = append(requiredCheckFragments["relay_devices"], "EPOCH_REQUIRED IN (0,1)")
 	}
 	if hasGlobalMarker {
@@ -489,10 +500,10 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 					tableRows.Close()
 					return fmt.Errorf("restore table %s payload_hash must be BLOB", table)
 				}
-				found[name] = restoreColumn{name: name, kind: "BLOB", notNull: notNull != 0}
+				found[name] = restoreColumn{name: name, kind: "BLOB", notNull: notNull != 0, defaultValue: defaultValue}
 				continue
 			}
-			found[name] = restoreColumn{name: name, kind: strings.ToUpper(strings.TrimSpace(columnType)), pk: primaryKey > 0, notNull: notNull != 0}
+			found[name] = restoreColumn{name: name, kind: strings.ToUpper(strings.TrimSpace(columnType)), pk: primaryKey > 0, notNull: notNull != 0, defaultValue: defaultValue}
 		}
 		if err := tableRows.Err(); err != nil {
 			tableRows.Close()
@@ -536,6 +547,12 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 			}
 			if actual.pk != column.pk {
 				return fmt.Errorf("restore table %s column %s primary-key flag mismatch", table, column.name)
+			}
+			if column.name == "global_unique_enforced" && strings.Trim(strings.TrimSpace(actual.defaultValue.String), "'\"") != "1" {
+				return fmt.Errorf("restore table %s column %s must default to 1", table, column.name)
+			}
+			if column.name == "epoch_required" && strings.Trim(strings.TrimSpace(actual.defaultValue.String), "'\"") != "0" {
+				return fmt.Errorf("restore table %s column %s must default to 0", table, column.name)
 			}
 		}
 		if expected := requiredForeignKeys[table]; len(expected) > 0 {
@@ -582,7 +599,6 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		"idx_payments_external_id":          {"payments", false, []string{"external_id"}, []string{"EXTERNAL_ID"}},
 		"idx_payments_status_created":       {"payments", false, []string{"status", "created_at"}, []string{"STATUS", "CREATED_AT"}},
 		"idx_payments_profile_payable":      {"payments", false, []string{"collection_profile_id", "payable_amount_paise"}, []string{"COLLECTION_PROFILE_ID", "PAYABLE_AMOUNT_PAISE"}},
-		"uq_active_profile_payable":         {"amount_reservations", true, []string{"collection_profile_id", "payable_amount_paise"}, []string{"COLLECTION_PROFILE_ID", "PAYABLE_AMOUNT_PAISE", "RELEASED_AT", "IS NULL", "WHERE"}},
 		"idx_amount_reservations_history":   {"amount_reservations", false, []string{"collection_profile_id", "payable_amount_paise", "reserved_at"}, []string{"COLLECTION_PROFILE_ID", "PAYABLE_AMOUNT_PAISE", "RESERVED_AT"}},
 		"idx_amount_reservations_release":   {"amount_reservations", false, []string{"released_at", "reserved_until"}, []string{"RELEASED_AT", "RESERVED_UNTIL"}},
 		"idx_relay_events_received":         {"relay_events", false, []string{"received_at"}, []string{"RECEIVED_AT"}},
@@ -591,20 +607,27 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		"idx_webhook_delivery_queue":        {"webhook_deliveries", false, []string{"status", "next_attempt_at", "created_at"}, []string{"STATUS", "NEXT_ATTEMPT_AT", "CREATED_AT"}},
 		"idx_admin_sessions_expiry":         {"admin_sessions", false, []string{"expires_at"}, []string{"EXPIRES_AT"}},
 	}
-	if versions[len(versions)-1] >= 4 {
+	if lastVersion <= 4 {
+		requiredIndexes["uq_active_profile_payable"] = restoreIndex{
+			table: "amount_reservations", unique: true, columns: []string{"collection_profile_id", "payable_amount_paise"},
+			fragments: []string{"COLLECTION_PROFILE_ID", "PAYABLE_AMOUNT_PAISE", "RELEASED_AT", "IS NULL", "WHERE"},
+		}
+	}
+	if lastVersion >= 4 {
 		requiredIndexes["idx_observations_payment"] = restoreIndex{
 			table: "payment_observations", unique: false, columns: []string{"matched_payment_id", "occurred_at"},
 			fragments: []string{"MATCHED_PAYMENT_ID", "OCCURRED_AT", "IS NOT NULL", "WHERE"},
 		}
 	}
-	if versions[len(versions)-1] >= 5 {
-		delete(requiredIndexes, "uq_active_profile_payable")
-		fragments := []string{"PAYABLE_AMOUNT_PAISE", "RELEASED_AT", "IS NULL", "WHERE"}
-		if hasGlobalMarker {
-			fragments = append(fragments, "GLOBAL_UNIQUE_ENFORCED", "=1")
-		}
+	if hasGlobalMarker {
 		requiredIndexes["uq_active_payable"] = restoreIndex{
-			table: "amount_reservations", unique: true, columns: []string{"payable_amount_paise"}, fragments: fragments,
+			table: "amount_reservations", unique: true, columns: []string{"payable_amount_paise"},
+			fragments: []string{"PAYABLE_AMOUNT_PAISE", "RELEASED_AT", "IS NULL", "WHERE", "GLOBAL_UNIQUE_ENFORCED", "=1"},
+		}
+	} else if lastVersion >= 5 {
+		requiredIndexes["uq_active_payable"] = restoreIndex{
+			table: "amount_reservations", unique: true, columns: []string{"payable_amount_paise"},
+			fragments: []string{"PAYABLE_AMOUNT_PAISE", "RELEASED_AT", "IS NULL", "WHERE"},
 		}
 	}
 	readIndexColumns := func(indexName string) ([]string, error) {
@@ -730,7 +753,6 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		"idx_payments_external_id":          "CREATE INDEX idx_payments_external_id ON payments(external_id)",
 		"idx_payments_status_created":       "CREATE INDEX idx_payments_status_created ON payments(status, created_at DESC)",
 		"idx_payments_profile_payable":      "CREATE INDEX idx_payments_profile_payable ON payments(collection_profile_id, payable_amount_paise)",
-		"uq_active_profile_payable":         "CREATE UNIQUE INDEX uq_active_profile_payable ON amount_reservations(collection_profile_id, payable_amount_paise) WHERE released_at IS NULL",
 		"idx_amount_reservations_history":   "CREATE INDEX idx_amount_reservations_history ON amount_reservations(collection_profile_id, payable_amount_paise, reserved_at DESC)",
 		"idx_amount_reservations_release":   "CREATE INDEX idx_amount_reservations_release ON amount_reservations(released_at, reserved_until)",
 		"idx_relay_events_received":         "CREATE INDEX idx_relay_events_received ON relay_events(received_at DESC)",
@@ -739,15 +761,16 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 		"idx_webhook_delivery_queue":        "CREATE INDEX idx_webhook_delivery_queue ON webhook_deliveries(status, next_attempt_at, created_at)",
 		"idx_admin_sessions_expiry":         "CREATE INDEX idx_admin_sessions_expiry ON admin_sessions(expires_at)",
 	}
-	if versions[len(versions)-1] >= 4 {
+	if lastVersion <= 4 {
+		requiredIndexDefinitions["uq_active_profile_payable"] = "CREATE UNIQUE INDEX uq_active_profile_payable ON amount_reservations(collection_profile_id, payable_amount_paise) WHERE released_at IS NULL"
+	}
+	if lastVersion >= 4 {
 		requiredIndexDefinitions["idx_observations_payment"] = "CREATE INDEX idx_observations_payment ON payment_observations(matched_payment_id, occurred_at) WHERE matched_payment_id IS NOT NULL"
 	}
-	if versions[len(versions)-1] >= 5 {
-		delete(requiredIndexDefinitions, "uq_active_profile_payable")
+	if hasGlobalMarker {
+		requiredIndexDefinitions["uq_active_payable"] = "CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL AND global_unique_enforced=1"
+	} else if lastVersion >= 5 {
 		requiredIndexDefinitions["uq_active_payable"] = "CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL"
-		if hasGlobalMarker {
-			requiredIndexDefinitions["uq_active_payable"] = "CREATE UNIQUE INDEX uq_active_payable ON amount_reservations(payable_amount_paise) WHERE released_at IS NULL AND global_unique_enforced=1"
-		}
 	}
 	canonicalSQL := func(value string) string {
 		return strings.Join(strings.Fields(strings.ToUpper(value)), " ")
@@ -755,13 +778,19 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 	requiredTriggers := map[string][]string{}
 	if hasGlobalMarker {
 		requiredTriggers["trg_amount_reservations_global_unique_insert"] = []string{
-			"BEFORE INSERT ON AMOUNT_RESERVATIONS", "NEW.GLOBAL_UNIQUE_ENFORCED<>1", "NEW.RELEASED_AT IS NULL",
-			"PAYABLE_AMOUNT_PAISE=NEW.PAYABLE_AMOUNT_PAISE", "RAISE(ABORT",
+			"BEFORE INSERT ON AMOUNT_RESERVATIONS", "NEW.GLOBAL_UNIQUE_ENFORCED<>1",
+			"NEW.RELEASED_AT IS NULL", "PAYABLE_AMOUNT_PAISE=NEW.PAYABLE_AMOUNT_PAISE", "RAISE(ABORT",
 		}
-		requiredTriggers["trg_amount_reservations_global_unique_update"] = []string{
+		updateFragments := []string{
 			"BEFORE UPDATE OF PAYABLE_AMOUNT_PAISE,RELEASED_AT,GLOBAL_UNIQUE_ENFORCED ON AMOUNT_RESERVATIONS",
-			"OLD.GLOBAL_UNIQUE_ENFORCED=1", "NEW.GLOBAL_UNIQUE_ENFORCED<>1", "ID<>NEW.ID", "RAISE(ABORT",
+			"OLD.GLOBAL_UNIQUE_ENFORCED=1", "NEW.GLOBAL_UNIQUE_ENFORCED<>1",
+			"NEW.RELEASED_AT IS NULL", "ID<>NEW.ID", "RAISE(ABORT",
 		}
+		if lastVersion <= 4 {
+			updateFragments = append(updateFragments,
+				"NEW.GLOBAL_UNIQUE_ENFORCED NOT IN (0,1)", "NEW.GLOBAL_UNIQUE_ENFORCED=0")
+		}
+		requiredTriggers["trg_amount_reservations_global_unique_update"] = updateFragments
 	}
 
 	for name, expected := range requiredIndexes {

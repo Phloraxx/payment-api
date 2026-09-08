@@ -607,3 +607,44 @@ func TestMultiRelayCompatibilityKeepsSchemaRollbackReadable(t *testing.T) {
 		t.Fatalf("singleton relay index still present: %d", indexes)
 	}
 }
+
+func TestRollbackV4SQLShapeRemainsOperational(t *testing.T) {
+	db := openTestDB(t)
+	now := int64(1_788_200_000_000)
+
+	var version int
+	if err := db.SQL.QueryRow(`SELECT COALESCE(MAX(version),0) FROM schema_migrations`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 4 {
+		t.Fatalf("rollback schema version=%d want=4", version)
+	}
+
+	insertProfile(t, db.SQL, "paytm", true, now)
+	insertProfile(t, db.SQL, "kotak", false, now)
+	insertPayment(t, db.SQL, "pay_v4_a", "A", "evt", 10037, now)
+	insertPayment(t, db.SQL, "pay_v4_b", "B", "evt", 10037, now+1)
+	if _, err := db.SQL.Exec(`UPDATE payments SET collection_profile_id='kotak',upi_id_snapshot='kotak@upi' WHERE id='pay_v4_b'`); err != nil {
+		t.Fatal(err)
+	}
+
+	oldInsert := `INSERT INTO amount_reservations(id,collection_profile_id,payable_amount_paise,payment_id,reserved_at,reserved_until,last_used_at) VALUES(?,?,?,?,?,?,?)`
+	if _, err := db.SQL.Exec(oldInsert, "res_v4_a", "paytm", 10037, "pay_v4_a", now, now+900_000, now); err != nil {
+		t.Fatalf("old-v4 reservation insert failed: %v", err)
+	}
+	if _, err := db.SQL.Exec(oldInsert, "res_v4_b", "kotak", 10037, "pay_v4_b", now+1, now+900_001, now+1); err == nil {
+		t.Fatal("old-v4 SQL bypassed global active amount guard")
+	}
+
+	if _, err := db.SQL.Exec(`INSERT INTO relay_devices(id,name,public_key_pem,enabled,enrolled_at,app_version,device_model,android_version) VALUES('v4-device','Phone','pem',1,?,'v4','model','android')`, now); err != nil {
+		t.Fatalf("old-v4 relay insert failed: %v", err)
+	}
+	var enabled int
+	var enrolled int64
+	if err := db.SQL.QueryRow(`SELECT enabled,enrolled_at FROM relay_devices WHERE id='v4-device'`).Scan(&enabled, &enrolled); err != nil {
+		t.Fatalf("old-v4 relay read failed: %v", err)
+	}
+	if enabled != 1 || enrolled != now {
+		t.Fatalf("old-v4 relay read enabled=%d enrolled=%d", enabled, enrolled)
+	}
+}
