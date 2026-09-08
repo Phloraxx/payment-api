@@ -168,7 +168,7 @@ func TestGenericAmountMatchesReservationAcrossProfileSwitch(t *testing.T) {
 	}
 	occurred := base.Add(time.Minute)
 	received := occurred.Add(time.Second)
-	insertRelayEvent(t, db, "relay_profile_race", "source_profile_race", "com.example.wallet", occurred, received)
+	insertRelayEvent(t, db, "relay_profile_race", "source_profile_race", observations.GooglePayPackage, occurred, received)
 	obs := observations.Observation{Source: observations.GenericNotificationSource, AmountPaise: first.Payment.PayableAmountPaise,
 		PayerName: "Rahul", OccurredAt: occurred, OccurredAtSource: "notification_posted_at"}
 	result, err := s.ApplyObservation(ctx, "relay_profile_race", obs, received)

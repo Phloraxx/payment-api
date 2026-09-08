@@ -351,7 +351,7 @@ func TestAmbiguousRelayNotificationIsVisibleInActivity(t *testing.T) {
 	service.Now = func() time.Time { return now }
 	body := marshalEvent(t, EventInput{
 		SchemaVersion: 1, EventID: strings.Repeat("b", 64),
-		PackageName: "com.example.wallet", PostedAtMS: now.UnixMilli(),
+		PackageName: observations.GooglePayPackage, PostedAtMS: now.UnixMilli(),
 		Title: "Payment received", Text: "₹100.37 received; balance ₹200.00",
 		AmountHintPaise: 10037,
 	})
@@ -764,6 +764,35 @@ func TestSignedBlockedMessageAndEmailPackagesAreRejectedBeforeStorage(t *testing
 	}
 }
 
+func TestUntrustedGenericNotificationCannotAutoConfirm(t *testing.T) {
+	db := openRelayDB(t)
+	now := time.Date(2026, 9, 4, 7, 45, 0, 0, time.UTC)
+	insertProfile(t, db, "paytm", "paytm_notification", "merchant@paytm", true, now.Add(-time.Hour))
+	paymentService, created := createPayment(t, db, now, "untrusted-generic")
+	priv, deviceID := enrollTestDevice(t, db, now.Add(-time.Hour))
+	relayService := NewService(db, paymentService)
+	relayService.Now = func() time.Time { return now.Add(time.Minute) }
+	body := marshalEvent(t, EventInput{
+		SchemaVersion: 1, EventID: strings.Repeat("e", 64),
+		PackageName: "com.example.wallet", PostedAtMS: now.Add(time.Minute).UnixMilli(),
+		Text: "Payment received ₹100.37 from Rahul",
+	})
+	result, err := relayService.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, now.Add(time.Minute), body), body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != "ignored" || result.PaymentID != "" || countRows(t, db, "payment_observations") != 0 {
+		t.Fatalf("untrusted generic result=%+v observations=%d", result, countRows(t, db, "payment_observations"))
+	}
+	got, err := paymentService.Get(context.Background(), created.Payment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Payment.Status != "pending" {
+		t.Fatalf("untrusted generic notification changed payment to %q", got.Payment.Status)
+	}
+}
+
 func TestGenericWalletNotificationMatchesActiveProfilePayment(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 4, 8, 15, 0, 0, time.UTC)
@@ -774,7 +803,7 @@ func TestGenericWalletNotificationMatchesActiveProfilePayment(t *testing.T) {
 	relayService.Now = func() time.Time { return now.Add(time.Minute) }
 	body := marshalEvent(t, EventInput{
 		SchemaVersion: 1, EventID: strings.Repeat("a", 64),
-		PackageName: "com.example.wallet", PostedAtMS: now.Add(time.Minute).UnixMilli(),
+		PackageName: observations.GooglePayPackage, PostedAtMS: now.Add(time.Minute).UnixMilli(),
 		Text: "Payment received ₹100.37 from Rahul",
 	})
 	result, err := relayService.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, now.Add(time.Minute), body), body)
@@ -810,7 +839,7 @@ func TestGenericWalletNotificationUsesReservationProfileAfterActiveSwitch(t *tes
 	relayService.Now = func() time.Time { return received }
 	body := marshalEvent(t, EventInput{
 		SchemaVersion: 1, EventID: strings.Repeat("d", 64),
-		PackageName: "com.example.wallet", PostedAtMS: occurred.UnixMilli(),
+		PackageName: observations.GooglePayPackage, PostedAtMS: occurred.UnixMilli(),
 		Text: "Payment received ₹100.37 from Rahul",
 	})
 	result, err := relayService.IngestSigned(context.Background(), signedAuth(t, priv, deviceID, received, body), body)

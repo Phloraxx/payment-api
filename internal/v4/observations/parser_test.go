@@ -106,18 +106,17 @@ func TestParseBlocksRetiredMessageAndEmailPackages(t *testing.T) {
 	}
 }
 
-func TestUnknownPackageSplitTitleAndAmountCanProvideIncomingPaymentEvidence(t *testing.T) {
+func TestParseRejectsUntrustedGenericPackages(t *testing.T) {
 	posted := time.Now().UTC()
-	got, err := Parse(Snapshot{PackageName: "com.example.wallet", PostedAt: posted, Title: "received", Text: "₹98765.43"})
-	if err != nil || got.Source != GenericNotificationSource || got.AmountPaise != 9876543 {
-		t.Fatalf("split-field generic observation=%+v err=%v", got, err)
-	}
-}
-
-func TestUnknownPackageCanProvideIncomingPaymentEvidence(t *testing.T) {
-	got, err := Parse(Snapshot{PackageName: "com.example.wallet", PostedAt: time.Now().UTC(), Text: "₹100.37 received from Rahul"})
-	if err != nil || got.Source != GenericNotificationSource || got.AmountPaise != 10037 {
-		t.Fatalf("generic package observation=%+v err=%v", got, err)
+	for _, packageName := range []string{"com.example.wallet", "com.android.shell"} {
+		if _, err := Parse(Snapshot{
+			PackageName: packageName,
+			PostedAt:    posted,
+			Title:       "received",
+			Text:        "₹100.37 received from Rahul",
+		}); !errors.Is(err, ErrUnrecognized) {
+			t.Errorf("Parse(%q) error=%v, want %v", packageName, err, ErrUnrecognized)
+		}
 	}
 }
 
@@ -215,7 +214,7 @@ func TestGenericPayerCleanupCompatibility(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Parse(Snapshot{PackageName: "example.wallet", PostedAt: posted, Text: tc.text})
+			got, err := Parse(Snapshot{PackageName: BHIMPackage, PostedAt: posted, Text: tc.text})
 			if err != nil {
 				t.Fatalf("Parse() error = %v", err)
 			}
@@ -286,7 +285,7 @@ func TestParseGooglePayPaidYouNotification(t *testing.T) {
 
 func TestParserRejectsAmbiguousMonetaryAmounts(t *testing.T) {
 	_, err := Parse(Snapshot{
-		PackageName: "example.wallet",
+		PackageName: BHIMPackage,
 		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
 		Text:        "Payment received ₹1.25. Available balance ₹100.37",
 	})
@@ -301,7 +300,7 @@ func TestParserRejectsFailedIncomingLanguage(t *testing.T) {
 		"UPI payment declined: received ₹100.37",
 		"Payment pending, amount ₹100.37 received",
 	} {
-		if _, err := Parse(Snapshot{PackageName: "example.wallet", PostedAt: time.Now().UTC(), Text: text}); !errors.Is(err, ErrUnrecognized) {
+		if _, err := Parse(Snapshot{PackageName: BHIMPackage, PostedAt: time.Now().UTC(), Text: text}); err == nil {
 			t.Errorf("Parse(%q) error = %v, want %v", text, err, ErrUnrecognized)
 		}
 	}
@@ -309,7 +308,7 @@ func TestParserRejectsFailedIncomingLanguage(t *testing.T) {
 
 func TestPayerUPIUsesIncomingPayerClause(t *testing.T) {
 	got, err := Parse(Snapshot{
-		PackageName: "example.wallet",
+		PackageName: BHIMPackage,
 		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
 		Title:       "Merchant merchant@upi",
 		Text:        "Received ₹1.25 from Alice (alice@upi)",
@@ -324,7 +323,7 @@ func TestPayerUPIUsesIncomingPayerClause(t *testing.T) {
 
 func TestPayerUPIPrefersFirstVPAInIncomingClause(t *testing.T) {
 	got, err := Parse(Snapshot{
-		PackageName: "example.wallet",
+		PackageName: BHIMPackage,
 		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
 		Text:        "Received ₹1.25 from Alice (alice@upi) to merchant@upi",
 	})

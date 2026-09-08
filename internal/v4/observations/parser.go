@@ -13,10 +13,28 @@ const (
 	PaytmBusinessPackage          = "com.paytm.business"
 	GoogleMessagesPackage         = "com.google.android.apps.messaging"
 	GmailPackage                  = "com.google.android.gm"
+	BHIMPackage                   = "in.org.npci.upiapp"
+	GooglePayBusinessPackage      = "com.google.android.apps.nbu.paisa.merchant"
+	GooglePayPackage              = "com.google.android.apps.nbu.paisa.user"
+	PaytmPackage                  = "net.one97.paytm"
+	PhonePePackage                = "com.phonepe.app"
+	AmazonPackage                 = "in.amazon.mShop.android.shopping"
+	SuperMoneyPackage             = "money.super.payments"
+	Kotak811Package               = "com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge"
 	GenericNotificationSource     = "android_notification"
 	GenericMessageSource          = "android_message"
 	paytmPostTimeRefinementWindow = time.Minute
 )
+
+func isTrustedGenericPackage(packageName string) bool {
+	switch packageName {
+	case BHIMPackage, GooglePayBusinessPackage, GooglePayPackage, PaytmPackage,
+		PhonePePackage, AmazonPackage, SuperMoneyPackage, Kotak811Package:
+		return true
+	default:
+		return false
+	}
+}
 
 var (
 	ErrUnrecognized     = errors.New("notification is not a recognized incoming PayGate payment")
@@ -77,6 +95,9 @@ func Parse(snapshot Snapshot) (Observation, error) {
 		return parsePaytm(text, snapshot.PostedAt)
 	}
 	if pkg == GoogleMessagesPackage || pkg == GmailPackage {
+		return Observation{}, ErrUnrecognized
+	}
+	if !isTrustedGenericPackage(pkg) {
 		return Observation{}, ErrUnrecognized
 	}
 	return parseGeneric(text, snapshot.PostedAt, GenericNotificationSource)
