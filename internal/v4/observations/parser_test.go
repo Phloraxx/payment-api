@@ -120,11 +120,20 @@ func TestParseRejectsUntrustedGenericPackages(t *testing.T) {
 	}
 }
 
+func TestParseRejectsOverPrecisionAmount(t *testing.T) {
+	posted := time.UnixMilli(1_788_200_000_000).UTC()
+	_, err := Parse(Snapshot{PackageName: BHIMPackage, PostedAt: posted, Text: "₹12.345 received from Rahul"})
+	if err == nil {
+		t.Fatal("over-precision amount was accepted")
+	}
+}
+
 func TestParseGenericIncomingPaymentApplications(t *testing.T) {
 	posted := time.UnixMilli(1_788_200_000_000).UTC()
 	cases := []struct{ pkg, text, source string }{
 		{"in.amazon.mShop.android.shopping", "Payment received: ₹499.37 from Rahul", GenericNotificationSource},
 		{"com.phonepe.app", "You received INR 250.41 from Maya via UPI", GenericNotificationSource},
+		{"com.phonepe.app", "You received INR 12.3 from Maya via UPI", GenericNotificationSource},
 		{"com.google.android.apps.nbu.paisa.user", "₹99.23 received from user@okaxis", GenericNotificationSource},
 	}
 	for _, tc := range cases {
