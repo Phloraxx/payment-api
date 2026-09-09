@@ -120,11 +120,16 @@ func TestParseRejectsUntrustedGenericPackages(t *testing.T) {
 	}
 }
 
-func TestParseRejectsOverPrecisionAmount(t *testing.T) {
+func TestParseRejectsMalformedAmountTokens(t *testing.T) {
 	posted := time.UnixMilli(1_788_200_000_000).UTC()
-	_, err := Parse(Snapshot{PackageName: BHIMPackage, PostedAt: posted, Text: "₹12.345 received from Rahul"})
-	if err == nil {
-		t.Fatal("over-precision amount was accepted")
+	for _, text := range []string{
+		"₹12.345 received from Rahul",
+		"₹12.34.56 received from Rahul",
+		"₹12.34foo received from Rahul",
+	} {
+		if _, err := Parse(Snapshot{PackageName: BHIMPackage, PostedAt: posted, Text: text}); err == nil {
+			t.Errorf("malformed amount %q was accepted", text)
+		}
 	}
 }
 
