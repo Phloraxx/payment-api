@@ -60,7 +60,7 @@ type Observation struct {
 }
 
 var (
-	currencyAmount        = `(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)`
+	currencyAmount        = `(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]+)?)`
 	currencyAmountPattern = regexp.MustCompile(`(?i)` + currencyAmount)
 	incomingPatterns      = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\b(?:payment\s+)?received\b.{0,120}?` + currencyAmount),
