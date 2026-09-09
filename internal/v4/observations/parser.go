@@ -22,7 +22,6 @@ const (
 	SuperMoneyPackage             = "money.super.payments"
 	Kotak811Package               = "com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge"
 	GenericNotificationSource     = "android_notification"
-	GenericMessageSource          = "android_message"
 	paytmPostTimeRefinementWindow = time.Minute
 )
 
@@ -100,10 +99,10 @@ func Parse(snapshot Snapshot) (Observation, error) {
 	if !isTrustedGenericPackage(pkg) {
 		return Observation{}, ErrUnrecognized
 	}
-	return parseGeneric(text, snapshot.PostedAt, GenericNotificationSource)
+	return parseGeneric(text, snapshot.PostedAt)
 }
 
-func parseGeneric(text string, postedAt time.Time, source string) (Observation, error) {
+func parseGeneric(text string, postedAt time.Time) (Observation, error) {
 	if rejectedTransactionText(text) {
 		return Observation{}, ErrUnrecognized
 	}
@@ -120,7 +119,7 @@ func parseGeneric(text string, postedAt time.Time, source string) (Observation, 
 	}
 	payerName, payerUPI := extractPayer(text)
 	return Observation{
-		Source: source, AmountPaise: amount, PayerName: payerName, PayerUPIID: payerUPI,
+		Source: GenericNotificationSource, AmountPaise: amount, PayerName: payerName, PayerUPIID: payerUPI,
 		OccurredAt: postedAt.UTC(), OccurredAtSource: "notification_posted_at",
 	}, nil
 }

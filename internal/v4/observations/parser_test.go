@@ -107,7 +107,7 @@ func TestParseBlocksRetiredMessageAndEmailPackages(t *testing.T) {
 }
 
 func TestParseRejectsUntrustedGenericPackages(t *testing.T) {
-	posted := time.Now().UTC()
+	posted := time.UnixMilli(1_788_200_000_000).UTC()
 	for _, packageName := range []string{"com.example.wallet", "com.android.shell"} {
 		if _, err := Parse(Snapshot{
 			PackageName: packageName,
@@ -295,12 +295,13 @@ func TestParserRejectsAmbiguousMonetaryAmounts(t *testing.T) {
 }
 
 func TestParserRejectsFailedIncomingLanguage(t *testing.T) {
+	posted := time.UnixMilli(1_788_200_000_000).UTC()
 	for _, text := range []string{
 		"Payment failed but ₹100.37 received",
 		"UPI payment declined: received ₹100.37",
 		"Payment pending, amount ₹100.37 received",
 	} {
-		if _, err := Parse(Snapshot{PackageName: BHIMPackage, PostedAt: time.Now().UTC(), Text: text}); err == nil {
+		if _, err := Parse(Snapshot{PackageName: BHIMPackage, PostedAt: posted, Text: text}); !errors.Is(err, ErrUnrecognized) {
 			t.Errorf("Parse(%q) error = %v, want %v", text, err, ErrUnrecognized)
 		}
 	}
