@@ -38,7 +38,7 @@ export function SectionHead({ eyebrow, title, copy, action }: { eyebrow?: string
 export function Stat({ label, value, sub }: { label: string; value: ReactNode; sub?: ReactNode }) {
   return <div className="stat"><span>{label}</span><strong>{value}</strong>{sub && <small>{sub}</small>}</div>;
 }
-export function Modal({ title, children, onClose, wide = false }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {
+export function Modal({ title, children, onClose, wide = false, drawer = false }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean; drawer?: boolean }) {
   const dialogRef = useRef<HTMLElement>(null);
   const focusable = () => dialogRef.current ? Array.from(dialogRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')) : [];
   useEffect(() => {
@@ -56,8 +56,8 @@ export function Modal({ title, children, onClose, wide = false }: { title: strin
     if (event.shiftKey && (active === first || !dialogRef.current?.contains(active))) { event.preventDefault(); last.focus(); }
     else if (!event.shiftKey && active === last) { event.preventDefault(); first.focus(); }
   };
-  return <div className="modal-backdrop" role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-    <section ref={dialogRef} onKeyDown={onKeyDown} className={cx("modal", wide && "modal-wide")} role="dialog" aria-modal="true" aria-label={title}>
+  return <div className={cx("modal-backdrop", drawer && "drawer-backdrop")} role="presentation" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <section ref={dialogRef} onKeyDown={onKeyDown} className={cx("modal", wide && "modal-wide", drawer && "modal-drawer")} role="dialog" aria-modal="true" aria-label={title}>
       <header><h3>{title}</h3><button type="button" className="icon-button" onClick={onClose} aria-label="Close">×</button></header>
       <div className="modal-body">{children}</div>
     </section>

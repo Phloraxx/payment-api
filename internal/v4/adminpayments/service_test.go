@@ -106,6 +106,50 @@ func TestDetailIncludesHistoryAndWebhookTimeline(t *testing.T) {
 	}
 }
 
+func TestListAndDetailIncludeLatestMatchedEvidence(t *testing.T) {
+	f := newFixture(t)
+	payment := f.create(t, 100, "Sourav", "evt_1", "evidence")
+	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(id,name,public_key_pem,enabled,enrolled_at) VALUES('device-evidence','Motorola Edge 60 Stylus','pem',1,?)`, f.now.Add(-time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	for i, tc := range []struct {
+		id     string
+		pkg    string
+		status string
+		offset time.Duration
+	}{
+		{id: "old", pkg: "in.org.npci.upiapp", status: "matched", offset: -time.Minute},
+		{id: "new", pkg: "com.google.android.apps.nbu.paisa.user", status: "corroborated", offset: 0},
+	} {
+		at := f.now.Add(tc.offset).UnixMilli()
+		relayID := "relay-evidence-" + tc.id
+		if _, err := f.db.SQL.Exec(`INSERT INTO relay_events(id,device_id,source_event_id,package_name,posted_at,received_at,status) VALUES(?,?,?,?,?,?,?)`,
+			relayID, "device-evidence", "source-"+tc.id, tc.pkg, at, at, "matched"); err != nil {
+			t.Fatalf("relay %d: %v", i, err)
+		}
+		if _, err := f.db.SQL.Exec(`INSERT INTO payment_observations(id,relay_event_id,source,collection_profile_id,amount_paise,occurred_at,occurred_at_source,received_at,matched_payment_id,match_result) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			"obs-evidence-"+tc.id, relayID, "android_notification", "paytm", payment.PayableAmountPaise, at, "notification_posted_at", at, payment.ID, tc.status); err != nil {
+			t.Fatalf("observation %d: %v", i, err)
+		}
+	}
+
+	list, err := f.admin.List(context.Background(), ListInput{Query: payment.ID})
+	if err != nil || len(list.Items) != 1 {
+		t.Fatalf("list=%+v err=%v", list, err)
+	}
+	got := list.Items[0]
+	if got.EvidencePackage != "com.google.android.apps.nbu.paisa.user" || got.EvidenceDeviceName != "Motorola Edge 60 Stylus" || got.EvidenceReceivedAt == nil || !got.EvidenceReceivedAt.Equal(*f.now) {
+		t.Fatalf("list evidence = %+v", got)
+	}
+	detail, err := f.admin.Get(context.Background(), payment.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detail.Payment.EvidencePackage != got.EvidencePackage || detail.Payment.EvidenceDeviceName != got.EvidenceDeviceName || detail.Payment.EvidenceReceivedAt == nil {
+		t.Fatalf("detail evidence = %+v", detail.Payment)
+	}
+}
+
 func TestEditMerchantVisibleFieldsCreatesUpdatedWebhook(t *testing.T) {
 	f := newFixture(t)
 	payment := f.create(t, 100, "Sourav", "evt_1", "edit-fields")

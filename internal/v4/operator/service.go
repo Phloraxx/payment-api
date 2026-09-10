@@ -24,16 +24,25 @@ type DailyVolume struct {
 }
 
 type Overview struct {
-	CollectedTodayPaise int64           `json:"collected_today_paise"`
-	PaymentsToday       int             `json:"payments_today"`
-	PaidToday           int             `json:"paid_today"`
-	Pending             int             `json:"pending"`
-	ExpiredToday        int             `json:"expired_today"`
-	StatusCounts        map[string]int  `json:"status_counts"`
-	Volume              []DailyVolume   `json:"volume"`
-	ActiveProfile       *ProfileSummary `json:"active_profile"`
-	Relay               RelaySummary    `json:"relay"`
-	Webhooks            WebhookSummary  `json:"webhooks"`
+	CollectedTodayPaise int64               `json:"collected_today_paise"`
+	PaymentsToday       int                 `json:"payments_today"`
+	PaidToday           int                 `json:"paid_today"`
+	Pending             int                 `json:"pending"`
+	ExpiredToday        int                 `json:"expired_today"`
+	UnmatchedToday      int                 `json:"unmatched_today"`
+	ExpiringSoon        int                 `json:"expiring_soon"`
+	StatusCounts        map[string]int      `json:"status_counts"`
+	Volume              []DailyVolume       `json:"volume"`
+	ActiveProfile       *ProfileSummary     `json:"active_profile"`
+	Relay               RelaySummary        `json:"relay"`
+	Webhooks            WebhookSummary      `json:"webhooks"`
+	LastObservation     *ObservationSummary `json:"last_observation,omitempty"`
+}
+type ObservationSummary struct {
+	ReceivedAt  time.Time `json:"received_at"`
+	PackageName string    `json:"package_name"`
+	DeviceName  string    `json:"device_name,omitempty"`
+	MatchResult string    `json:"match_result"`
 }
 type ProfileSummary struct {
 	ID    string `json:"id"`
@@ -97,6 +106,12 @@ func (s *Service) Overview(ctx context.Context) (Overview, error) {
 	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM payments WHERE status='expired' AND grace_until>=? AND grace_until<?`, start.UnixMilli(), end.UnixMilli()).Scan(&out.ExpiredToday); err != nil {
 		return Overview{}, fmt.Errorf("read expired-today overview: %w", err)
 	}
+	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM payment_observations WHERE match_result IN ('unmatched','ambiguous') AND received_at>=? AND received_at<?`, start.UnixMilli(), end.UnixMilli()).Scan(&out.UnmatchedToday); err != nil {
+		return Overview{}, fmt.Errorf("read unmatched-today overview: %w", err)
+	}
+	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM payments WHERE status='pending' AND expires_at>? AND expires_at<=?`, now.UnixMilli(), now.Add(10*time.Minute).UnixMilli()).Scan(&out.ExpiringSoon); err != nil {
+		return Overview{}, fmt.Errorf("read expiring-soon overview: %w", err)
+	}
 	rows, err := s.DB.SQL.QueryContext(ctx, `SELECT status,COUNT(*) FROM payments GROUP BY status`)
 	if err != nil {
 		return Overview{}, fmt.Errorf("read status counts: %w", err)
@@ -133,6 +148,11 @@ func (s *Service) Overview(ctx context.Context) (Overview, error) {
 	if err := s.loadWebhookSummary(ctx, &out.Webhooks); err != nil {
 		return Overview{}, err
 	}
+	lastObservation, err := s.lastObservation(ctx)
+	if err != nil {
+		return Overview{}, err
+	}
+	out.LastObservation = lastObservation
 	return out, nil
 }
 func (s *Service) volumeTrend(ctx context.Context, now time.Time, days int) ([]DailyVolume, error) {
@@ -262,6 +282,25 @@ func relayHeartbeatReady(notificationAccess, listenerConnected, batteryExempt, b
 		batteryExempt.Valid && batteryExempt.Int64 == 1 &&
 		backgroundRestricted.Valid && backgroundRestricted.Int64 == 0 &&
 		foregroundService.Valid && foregroundService.Int64 == 1
+}
+
+func (s *Service) lastObservation(ctx context.Context) (*ObservationSummary, error) {
+	var receivedAt int64
+	var out ObservationSummary
+	err := s.DB.SQL.QueryRowContext(ctx, `SELECT po.received_at,re.package_name,COALESCE(rd.name,''),po.match_result
+		FROM payment_observations po
+		JOIN relay_events re ON re.id=po.relay_event_id
+		LEFT JOIN relay_devices rd ON rd.id=re.device_id
+		ORDER BY po.received_at DESC,po.rowid DESC LIMIT 1`).
+		Scan(&receivedAt, &out.PackageName, &out.DeviceName, &out.MatchResult)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read last payment observation: %w", err)
+	}
+	out.ReceivedAt = time.UnixMilli(receivedAt).UTC()
+	return &out, nil
 }
 
 func (s *Service) loadWebhookSummary(ctx context.Context, out *WebhookSummary) error {

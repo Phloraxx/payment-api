@@ -96,6 +96,34 @@ func TestOverviewUsesIndiaLocalDayAndShowsOperationalSummary(t *testing.T) {
 		t.Fatalf("volume=%+v", overview.Volume)
 	}
 }
+func TestOverviewIncludesAttentionAndLastObservation(t *testing.T) {
+	f := newOperatorFixture(t)
+	payment := f.create(t, 100, "attention")
+	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(id,name,public_key_pem,enabled,enrolled_at) VALUES('device-attention','Motorola Edge 60 Stylus','pem',1,?)`, f.now.Add(-time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SQL.Exec(`INSERT INTO relay_events(id,device_id,source_event_id,package_name,posted_at,received_at,status)
+		VALUES('relay-attention','device-attention','source-attention','com.google.android.apps.nbu.paisa.user',?,?, 'unmatched')`, f.now.Add(-time.Second).UnixMilli(), f.now.Add(-time.Second).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SQL.Exec(`INSERT INTO payment_observations(id,relay_event_id,source,collection_profile_id,amount_paise,occurred_at,occurred_at_source,received_at,match_result)
+		VALUES('obs-attention','relay-attention','android_notification','paytm',?,?, 'notification_posted_at',?,'unmatched')`, payment.PayableAmountPaise, f.now.Add(-time.Second).UnixMilli(), f.now.Add(-time.Second).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	overview, err := f.operator.Overview(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview.UnmatchedToday != 1 || overview.ExpiringSoon != 1 {
+		t.Fatalf("attention counts = unmatched %d expiring %d", overview.UnmatchedToday, overview.ExpiringSoon)
+	}
+	if overview.LastObservation == nil || overview.LastObservation.PackageName != "com.google.android.apps.nbu.paisa.user" ||
+		overview.LastObservation.DeviceName != "Motorola Edge 60 Stylus" || overview.LastObservation.MatchResult != "unmatched" {
+		t.Fatalf("last observation = %+v", overview.LastObservation)
+	}
+}
+
 func TestOverviewRelaySummaryUsesAnyHealthyEnabledDevice(t *testing.T) {
 	f := newOperatorFixture(t)
 	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(

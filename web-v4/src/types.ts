@@ -11,6 +11,8 @@ export interface Overview {
   paid_today: number;
   pending: number;
   expired_today: number;
+  unmatched_today: number;
+  expiring_soon: number;
   status_counts: Record<string, number>;
   volume: DailyVolume[];
   active_profile?: { id: string; label: string } | null;
@@ -19,11 +21,19 @@ export interface Overview {
     name?: string;
     last_seen_at?: string;
     app_version?: string;
+    enabled_devices: number;
+    connected_devices: number;
   };
   webhooks: {
     pending: number;
     exhausted: number;
     last_delivered_at?: string;
+  };
+  last_observation?: {
+    received_at: string;
+    package_name: string;
+    device_name?: string;
+    match_result: string;
   };
 }
 
@@ -48,6 +58,9 @@ export interface Payment {
   payer_name?: string;
   payer_upi_id?: string;
   internal_note?: string;
+  evidence_package?: string;
+  evidence_device_name?: string;
+  evidence_received_at?: string;
 }
 export interface PaymentList {
   items: Payment[];

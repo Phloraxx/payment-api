@@ -10,7 +10,7 @@ import { Spinner, cx } from "./ui";
 
 type Tab = "overview" | "payments" | "activity" | "settings";
 const tabs: Array<{ id: Tab; label: string }> = [
-  { id: "overview", label: "Overview" },
+  { id: "overview", label: "Dashboard" },
   { id: "payments", label: "Payments" },
   { id: "activity", label: "Activity" },
   { id: "settings", label: "Settings" },
@@ -52,13 +52,13 @@ export function App() {
         <div className="mobile-brand"><Brand /></div>
         <div className="topbar-actions">
           <span className="live-pill topbar-live"><i/> Live</span>
-          <span className="secure-chip">Secure admin session</span>
+          <span className="admin-chip"><span>PG</span><strong>Admin</strong></span>
           <button className="text-button" onClick={() => void logout().finally(() => setSession("out"))}>Sign out</button>
         </div>
       </header>
       <div className="page-wrap">
         {tab === "overview" && <OverviewPage onOpenPayment={openPayment} />}
-        {tab === "payments" && <PaymentsPage initialPaymentId={openPaymentId} onInitialConsumed={() => setOpenPaymentId(undefined)} />}
+        {tab === "payments" && <PaymentsPage initialPaymentId={openPaymentId} onInitialConsumed={() => setOpenPaymentId(undefined)} onOpenSettings={() => setTab("settings")} onOpenActivity={() => setTab("activity")} />}
         {tab === "activity" && <ActivityPage onOpenPayment={openPayment} />}
         {tab === "settings" && <SettingsPage onSignedOut={() => setSession("out")} />}
       </div>
