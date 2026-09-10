@@ -106,7 +106,7 @@ func (s *Service) Overview(ctx context.Context) (Overview, error) {
 	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM payments WHERE status='expired' AND grace_until>=? AND grace_until<?`, start.UnixMilli(), end.UnixMilli()).Scan(&out.ExpiredToday); err != nil {
 		return Overview{}, fmt.Errorf("read expired-today overview: %w", err)
 	}
-	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM payment_observations WHERE match_result IN ('unmatched','ambiguous') AND received_at>=? AND received_at<?`, start.UnixMilli(), end.UnixMilli()).Scan(&out.UnmatchedToday); err != nil {
+	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM relay_events WHERE status IN ('unmatched','ambiguous') AND received_at>=? AND received_at<?`, start.UnixMilli(), end.UnixMilli()).Scan(&out.UnmatchedToday); err != nil {
 		return Overview{}, fmt.Errorf("read unmatched-today overview: %w", err)
 	}
 	if err := s.DB.SQL.QueryRowContext(ctx, `SELECT COUNT(*) FROM payments WHERE status='pending' AND expires_at>? AND expires_at<=?`, now.UnixMilli(), now.Add(10*time.Minute).UnixMilli()).Scan(&out.ExpiringSoon); err != nil {
@@ -287,11 +287,11 @@ func relayHeartbeatReady(notificationAccess, listenerConnected, batteryExempt, b
 func (s *Service) lastObservation(ctx context.Context) (*ObservationSummary, error) {
 	var receivedAt int64
 	var out ObservationSummary
-	err := s.DB.SQL.QueryRowContext(ctx, `SELECT po.received_at,re.package_name,COALESCE(rd.name,''),po.match_result
-		FROM payment_observations po
-		JOIN relay_events re ON re.id=po.relay_event_id
+	err := s.DB.SQL.QueryRowContext(ctx, `SELECT re.received_at,re.package_name,COALESCE(rd.name,''),po.match_result
+		FROM relay_events re
+		JOIN payment_observations po ON po.relay_event_id=re.id
 		LEFT JOIN relay_devices rd ON rd.id=re.device_id
-		ORDER BY po.received_at DESC,po.rowid DESC LIMIT 1`).
+		ORDER BY re.received_at DESC LIMIT 1`).
 		Scan(&receivedAt, &out.PackageName, &out.DeviceName, &out.MatchResult)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

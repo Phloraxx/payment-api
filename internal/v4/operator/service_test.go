@@ -124,6 +124,25 @@ func TestOverviewIncludesAttentionAndLastObservation(t *testing.T) {
 	}
 }
 
+func TestOverviewCountsParserLevelAmbiguousRelayEvidence(t *testing.T) {
+	f := newOperatorFixture(t)
+	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(id,name,public_key_pem,enabled,enrolled_at) VALUES('device-parser-ambiguous','Relay Phone','pem',1,?)`, f.now.Add(-time.Hour).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.SQL.Exec(`INSERT INTO relay_events(id,device_id,source_event_id,package_name,posted_at,received_at,status,error)
+		VALUES('relay-parser-ambiguous','device-parser-ambiguous','source-parser-ambiguous','com.google.android.apps.nbu.paisa.user',?,?, 'ambiguous','notification contains multiple monetary amounts')`, f.now.Add(-time.Second).UnixMilli(), f.now.Add(-time.Second).UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+
+	overview, err := f.operator.Overview(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if overview.UnmatchedToday != 1 {
+		t.Fatalf("evidence to review = %d, want 1", overview.UnmatchedToday)
+	}
+}
+
 func TestOverviewRelaySummaryUsesAnyHealthyEnabledDevice(t *testing.T) {
 	f := newOperatorFixture(t)
 	if _, err := f.db.SQL.Exec(`INSERT INTO relay_devices(

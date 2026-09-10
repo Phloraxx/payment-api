@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, editPayment, getDevices, getOverview, getPayment, getProfiles, listPayments, retryWebhook } from "./api";
 import type { DeviceInfo, Overview, Payment, PaymentDetail, PaymentStatus, Profile } from "./types";
 import { Badge, Empty, ErrorNotice, Modal, SectionHead, Spinner, dateTime, money, relativeTime } from "./ui";
@@ -36,38 +36,58 @@ export function PaymentsPage({
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const [operationsError, setOperationsError] = useState("");
   const [selected, setSelected] = useState<string>();
+  const paymentRequest = useRef(0);
+  const operationsRequest = useRef(0);
 
-  const load = useCallback(async (silent = false) => {
+  const loadPayments = useCallback(async (silent = false) => {
+    const request = ++paymentRequest.current;
     if (silent) setRefreshing(true); else setLoading(true);
     setError("");
     try {
-      const [result, profileItems, nextOverview, nextDevices] = await Promise.all([
-        listPayments({ q: query, status, profile, limit: PAGE_SIZE, offset }),
-        getProfiles(),
-        getOverview(),
-        getDevices(),
-      ]);
+      const result = await listPayments({ q: query, status, profile, limit: PAGE_SIZE, offset });
+      if (request !== paymentRequest.current) return;
       setItems(result.items);
       setTotal(result.total);
-      setProfiles(profileItems);
-      setOverview(nextOverview);
-      setDevices(nextDevices);
     } catch (e) {
-      setError(e instanceof ApiError ? e.message : "Could not load payment operations.");
+      if (request !== paymentRequest.current) return;
+      setError(e instanceof ApiError ? e.message : "Could not load payments.");
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (request === paymentRequest.current) {
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   }, [query, status, profile, offset]);
 
-  useEffect(() => { void load(); }, [load]);
+  const loadOperations = useCallback(async () => {
+    const request = ++operationsRequest.current;
+    setOperationsError("");
+    const [profileResult, overviewResult, deviceResult] = await Promise.allSettled([getProfiles(), getOverview(), getDevices()]);
+    if (request !== operationsRequest.current) return;
+    let failures = 0;
+    if (profileResult.status === "fulfilled") setProfiles(profileResult.value); else failures++;
+    if (overviewResult.status === "fulfilled") setOverview(overviewResult.value); else failures++;
+    if (deviceResult.status === "fulfilled") setDevices(deviceResult.value); else failures++;
+    if (failures) setOperationsError("Some operational status data could not be refreshed.");
+  }, []);
+
+  const refreshAll = useCallback(async () => {
+    await Promise.all([loadPayments(true), loadOperations()]);
+  }, [loadPayments, loadOperations]);
+
+  useEffect(() => { void loadPayments(); }, [loadPayments]);
+  useEffect(() => { void loadOperations(); }, [loadOperations]);
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (document.visibilityState === "visible") void load(true);
+      if (document.visibilityState === "visible") {
+        void loadPayments(true);
+        void loadOperations();
+      }
     }, 30_000);
     return () => window.clearInterval(timer);
-  }, [load]);
+  }, [loadPayments, loadOperations]);
   useEffect(() => {
     if (initialPaymentId) {
       setSelected(initialPaymentId);
@@ -84,10 +104,11 @@ export function PaymentsPage({
     <SectionHead
       title="Payments"
       copy="Monitor and manage payment activity across your events."
-      action={<button className="button button-secondary button-small" disabled={refreshing} onClick={() => void load(true)}>{refreshing ? "Refreshing…" : "Refresh"}</button>}
+      action={<button className="button button-secondary button-small" disabled={refreshing} onClick={() => void refreshAll()}>{refreshing ? "Refreshing…" : "Refresh"}</button>}
     />
 
     {error && <ErrorNotice message={error} />}
+    {operationsError && <div className="notice notice-error">{operationsError}</div>}
 
     <section className="payments-summary" aria-label="Payment summary">
       <SummaryMetric value={money(overview?.collected_today_paise)} label="Collected today" />
@@ -129,7 +150,7 @@ export function PaymentsPage({
               <td><PaymentBadge status={payment.status} /></td>
               <td><EvidenceLabel payment={payment} /></td>
               <td><time title={dateTime(payment.paid_at || payment.created_at)}>{timeOnly(payment.paid_at || payment.created_at)}</time></td>
-              <td><span className="row-arrow" aria-hidden="true">›</span></td>
+              <td><button type="button" className="row-arrow" aria-label={`Open payment ${payment.id}`} onClick={(event) => { event.stopPropagation(); setSelected(payment.id); }}>›</button></td>
             </tr>)}</tbody>
           </table>
         </div>}
@@ -160,7 +181,7 @@ export function PaymentsPage({
       </aside>
     </div>
 
-    {selected && <PaymentDrawer id={selected} profiles={profiles} onClose={() => setSelected(undefined)} onChanged={() => void load(true)} />}
+    {selected && <PaymentDrawer id={selected} profiles={profiles} onClose={() => setSelected(undefined)} onChanged={() => void refreshAll()} />}
   </div>;
 }
 

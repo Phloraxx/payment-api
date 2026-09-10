@@ -260,7 +260,7 @@ textarea { resize: vertical; line-height: 1.5; }
 .payable-amount { font-size: 11.5px !important; font-weight: 760 !important; white-space: nowrap; }
 .evidence-label { display: inline-flex; align-items: center; gap: 6px; color: var(--text-soft); font-size: 10.5px; white-space: nowrap; }
 .evidence-label i { width: 7px; height: 7px; border-radius: 50%; background: #767de0; }
-.row-arrow { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; color: #9ba3b2; font-size: 18px; transition: transform .12s, background .12s; }
+.row-arrow { display: grid; place-items: center; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: #9ba3b2; font-size: 18px; cursor: pointer; transition: transform .12s, background .12s; }
 .overview-payment-table tr:hover .row-arrow { transform: translateX(2px); background: var(--surface-muted); color: var(--accent); }
 .overview-pagination { min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; }
 .overview-pagination > div { display: flex; align-items: center; gap: 10px; }
