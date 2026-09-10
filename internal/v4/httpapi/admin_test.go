@@ -8,9 +8,11 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -195,6 +197,189 @@ func TestAdminLoginRejectsWhenVerificationCapacityIsSaturated(t *testing.T) {
 	}
 	_ = loginAdmin(t, f.handler, false)
 }
+func TestAdminLoginDatabaseBusyIsRetryable(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	ctx := context.Background()
+	f.db.SQL.SetMaxOpenConns(2)
+	first, err := f.db.SQL.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.db.SQL.Conn(ctx)
+	if err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	for _, conn := range []*sql.Conn{first, second} {
+		if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=1`); err != nil {
+			first.Close()
+			second.Close()
+			t.Fatal(err)
+		}
+	}
+	first.Close()
+	second.Close()
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	txErr := make(chan error, 1)
+	go func() {
+		txErr <- f.db.WithImmediateTx(ctx, func(*storage.ImmediateTx) error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case err := <-txErr:
+		t.Fatalf("lock transaction failed before starting: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("lock transaction did not start")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/admin/session", strings.NewReader(`{"password":"correct horse battery staple"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, req)
+	close(release)
+	if err := <-txErr; err != nil {
+		t.Fatal(err)
+	}
+	if rr.Code != http.StatusServiceUnavailable || rr.Header().Get("Retry-After") != "1" {
+		t.Fatalf("busy status=%d retry=%q body=%s", rr.Code, rr.Header().Get("Retry-After"), rr.Body.String())
+	}
+	body := rr.Body.String()
+	if !strings.Contains(body, `"code":"login_retryable"`) || strings.Contains(strings.ToLower(body), "sqlite") {
+		t.Fatalf("unexpected busy response: %s", body)
+	}
+}
+func TestAdminLogoutDatabaseBusyPreservesSession(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	ctx := context.Background()
+	f.db.SQL.SetMaxOpenConns(2)
+	first, err := f.db.SQL.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := f.db.SQL.Conn(ctx)
+	if err != nil {
+		first.Close()
+		t.Fatal(err)
+	}
+	for _, conn := range []*sql.Conn{first, second} {
+		if _, err := conn.ExecContext(ctx, `PRAGMA busy_timeout=1`); err != nil {
+			first.Close()
+			second.Close()
+			t.Fatal(err)
+		}
+	}
+	first.Close()
+	second.Close()
+
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	txErr := make(chan error, 1)
+	go func() {
+		txErr <- f.db.WithImmediateTx(ctx, func(*storage.ImmediateTx) error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case err := <-txErr:
+		t.Fatalf("lock transaction failed before starting: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("lock transaction did not start")
+	}
+
+	failed := adminRequest(t, f, http.MethodDelete, "/admin/session", nil, false)
+	close(release)
+	if err := <-txErr; err != nil {
+		t.Fatal(err)
+	}
+	if failed.Code != http.StatusServiceUnavailable || failed.Header().Get("Retry-After") != "1" {
+		t.Fatalf("busy status=%d retry=%q body=%s", failed.Code, failed.Header().Get("Retry-After"), failed.Body.String())
+	}
+	if strings.Contains(failed.Body.String(), `"code":"retryable_busy"`) == false ||
+		strings.Contains(strings.ToLower(failed.Body.String()), "sqlite") {
+		t.Fatalf("unexpected busy response: %s", failed.Body.String())
+	}
+	if failed.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("failed logout cleared cookie: %s", failed.Header().Get("Set-Cookie"))
+	}
+
+	stillValid := adminRequest(t, f, http.MethodGet, "/admin/overview", nil, false)
+	if stillValid.Code != http.StatusOK {
+		t.Fatalf("session after retryable logout status=%d body=%s", stillValid.Code, stillValid.Body.String())
+	}
+
+	succeeded := adminRequest(t, f, http.MethodDelete, "/admin/session", nil, false)
+	if succeeded.Code != http.StatusNoContent {
+		t.Fatalf("successful logout status=%d body=%s", succeeded.Code, succeeded.Body.String())
+	}
+	cleared := false
+	for _, cookie := range succeeded.Result().Cookies() {
+		if cookie.Name == adminCookieName && cookie.MaxAge < 0 {
+			cleared = true
+			break
+		}
+	}
+	if !cleared {
+		t.Fatalf("successful logout did not clear cookie: %s", succeeded.Header().Get("Set-Cookie"))
+	}
+	afterLogout := adminRequest(t, f, http.MethodGet, "/admin/overview", nil, false)
+	if afterLogout.Code != http.StatusUnauthorized {
+		t.Fatalf("revoked session status=%d body=%s", afterLogout.Code, afterLogout.Body.String())
+	}
+}
+func TestStorageBusyHTTPMappingsAreRetryable(t *testing.T) {
+	t.Parallel()
+	err := fmt.Errorf("transaction failed: %w", storage.ErrBusy)
+	cases := map[string]func(http.ResponseWriter, error){
+		"merchant payment": writePaymentError,
+		"relay pairing":    writeRelayPairError,
+		"relay request":    writeRelayError,
+		"profile":          writeProfileError,
+		"admin payment":    writeAdminPaymentError,
+	}
+	for name, write := range cases {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			write(recorder, err)
+			if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") != "1" {
+				t.Fatalf("status=%d retry=%q body=%s", recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
+			}
+			body := recorder.Body.String()
+			if !strings.Contains(body, `"code":"retryable_busy"`) || strings.Contains(strings.ToLower(body), "sqlite") {
+				t.Fatalf("unexpected busy response: %s", body)
+			}
+		})
+	}
+}
+func TestAdminLoginThrottlesRepeatedFailuresByRemoteAddress(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	for attempt := 0; attempt < adminLoginFailureLimit; attempt++ {
+		req := httptest.NewRequest(http.MethodPost, "/admin/session", strings.NewReader(`{"password":"wrong password"}`))
+		req.RemoteAddr = "198.51.100.17:4567"
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+		f.handler.ServeHTTP(rr, req)
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatalf("failed attempt %d status=%d body=%s", attempt+1, rr.Code, rr.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodPost, "/admin/session", strings.NewReader(`{"password":"wrong password"}`))
+	req.RemoteAddr = "198.51.100.17:4567"
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusTooManyRequests || rr.Header().Get("Retry-After") == "" || !strings.Contains(rr.Body.String(), `"code":"login_rate_limited"`) {
+		t.Fatalf("throttled login status=%d retry=%q body=%s", rr.Code, rr.Header().Get("Retry-After"), rr.Body.String())
+	}
+}
 
 func TestAdminPaymentsFilterDetailAndEdit(t *testing.T) {
 	f := newAdminHTTPFixture(t)
@@ -313,7 +498,7 @@ func TestDeviceOperationalRouteKeepsPhoneEvidenceOnly(t *testing.T) {
 	}
 }
 
-func pairAdminTestDevice(t *testing.T, f adminHTTPFixture) (*ecdsa.PrivateKey, string) {
+func pairAdminTestDevice(t *testing.T, f adminHTTPFixture) (*ecdsa.PrivateKey, string, int64) {
 	t.Helper()
 	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -324,7 +509,7 @@ func pairAdminTestDevice(t *testing.T, f adminHTTPFixture) (*ecdsa.PrivateKey, s
 		t.Fatal(err)
 	}
 	publicKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
-	session, err := f.handler.Relay.CreatePairing(context.Background(), false)
+	session, err := f.handler.Relay.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,13 +519,26 @@ func pairAdminTestDevice(t *testing.T, f adminHTTPFixture) (*ecdsa.PrivateKey, s
 	if err != nil {
 		t.Fatal(err)
 	}
-	return privateKey, paired.DeviceID
+	return privateKey, paired.DeviceID, paired.EnrolledAtMS
 }
 
 func signedDeviceAdminRequest(t *testing.T, f adminHTTPFixture, privateKey *ecdsa.PrivateKey, deviceID, method, path string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
-	timestamp := strconv.FormatInt(time.Now().UTC().UnixMilli(), 10)
+	return signedDeviceAdminRequestAt(t, f, privateKey, deviceID, method, path, body, 0)
+}
+
+func signedDeviceAdminRequestWithEpoch(t *testing.T, f adminHTTPFixture, privateKey *ecdsa.PrivateKey, deviceID, method, path string, body []byte, enrollmentEpoch int64) *httptest.ResponseRecorder {
+	t.Helper()
+	return signedDeviceAdminRequestAt(t, f, privateKey, deviceID, method, path, body, enrollmentEpoch)
+}
+
+func signedDeviceAdminRequestAt(t *testing.T, f adminHTTPFixture, privateKey *ecdsa.PrivateKey, deviceID, method, path string, body []byte, enrollmentEpoch int64) *httptest.ResponseRecorder {
+	t.Helper()
+	timestamp := strconv.FormatInt(f.handler.Relay.Now().UTC().UnixMilli(), 10)
 	canonical := relay.CanonicalRequest(method, path, timestamp, body)
+	if enrollmentEpoch > 0 {
+		canonical = relay.CanonicalRequestWithEpoch(method, path, timestamp, enrollmentEpoch, body)
+	}
 	digest := sha256.Sum256([]byte(canonical))
 	signature, err := ecdsa.SignASN1(rand.Reader, privateKey, digest[:])
 	if err != nil {
@@ -353,17 +551,86 @@ func signedDeviceAdminRequest(t *testing.T, f adminHTTPFixture, privateKey *ecds
 	req.Header.Set("X-PayGate-Relay-Device", deviceID)
 	req.Header.Set("X-PayGate-Relay-Time", timestamp)
 	req.Header.Set("X-PayGate-Relay-Signature", base64.StdEncoding.EncodeToString(signature))
+	if enrollmentEpoch > 0 {
+		req.Header.Set(relayEpochHeader, strconv.FormatInt(enrollmentEpoch, 10))
+	}
 	rr := httptest.NewRecorder()
 	f.handler.ServeHTTP(rr, req)
 	return rr
 }
 
+func TestDeviceDestinationRejectsMissingAndStaleEnrollmentEpoch(t *testing.T) {
+	f := newAdminHTTPFixture(t)
+	current := time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC)
+	f.handler.Relay.Now = func() time.Time { return current }
+	privateKey, deviceID, epoch1 := pairAdminTestDevice(t, f)
+
+	legacyBody := []byte(`{"upi_id":"legacy-replay@upi","payee_name":"PayGate"}`)
+	legacy := signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", legacyBody)
+	if legacy.Code != http.StatusUnauthorized {
+		t.Fatalf("missing epoch destination status=%d body=%s", legacy.Code, legacy.Body.String())
+	}
+
+	oldBody := []byte(`{"upi_id":"stale-replay@upi","payee_name":"PayGate"}`)
+	oldTimestamp := strconv.FormatInt(current.UnixMilli(), 10)
+	oldCanonical := relay.CanonicalRequestWithEpoch(http.MethodPatch, "/admin/profiles/active/destination", oldTimestamp, epoch1, oldBody)
+	oldDigest := sha256.Sum256([]byte(oldCanonical))
+	oldSignature, err := ecdsa.SignASN1(rand.Reader, privateKey, oldDigest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRequest := httptest.NewRequest(http.MethodPatch, "/admin/profiles/active/destination", bytes.NewReader(oldBody))
+	oldRequest.Header.Set("Content-Type", "application/json")
+	oldRequest.Header.Set("X-PayGate-Relay-Device", deviceID)
+	oldRequest.Header.Set("X-PayGate-Relay-Time", oldTimestamp)
+	oldRequest.Header.Set("X-PayGate-Relay-Signature", base64.StdEncoding.EncodeToString(oldSignature))
+	oldRequest.Header.Set(relayEpochHeader, strconv.FormatInt(epoch1, 10))
+
+	der, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+	current = current.Add(time.Second)
+	session, err := f.handler.Relay.CreatePairing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repaired, err := f.handler.Relay.PairDevice(context.Background(), relay.PairDeviceInput{
+		Token: session.Token, Name: "evidence-only test phone", PublicKeyPEM: string(publicKeyPEM), AppVersion: "test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.DeviceID != deviceID || repaired.EnrolledAtMS == epoch1 {
+		t.Fatalf("re-pair identity=%q epoch=%d old_epoch=%d", repaired.DeviceID, repaired.EnrolledAtMS, epoch1)
+	}
+
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, oldRequest)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("stale epoch replay status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var upiID string
+	if err := f.db.SQL.QueryRow(`SELECT upi_id FROM collection_profiles WHERE active=1`).Scan(&upiID); err != nil {
+		t.Fatal(err)
+	}
+	if upiID != "paygate@paytm" {
+		t.Fatalf("stale replay changed destination to %q", upiID)
+	}
+
+	fresh := signedDeviceAdminRequestWithEpoch(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", []byte(`{"upi_id":"fresh@upi","payee_name":"PayGate"}`), repaired.EnrolledAtMS)
+	if fresh.Code != http.StatusOK || !strings.Contains(fresh.Body.String(), `"upi_id":"fresh@upi"`) {
+		t.Fatalf("fresh epoch destination status=%d body=%s", fresh.Code, fresh.Body.String())
+	}
+}
+
 func TestPairedDeviceCannotMutatePaymentOrWebhookAuthority(t *testing.T) {
 	f := newAdminHTTPFixture(t)
-	privateKey, deviceID := pairAdminTestDevice(t, f)
+	privateKey, deviceID, enrollmentEpoch := pairAdminTestDevice(t, f)
 	payment := createAdminTestPayment(t, f, "Evidence boundary", "evt_device_auth", "device-auth")
 
-	rr := signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/payments/"+payment.ID, []byte(`{"status":"paid"}`))
+	rr := signedDeviceAdminRequestWithEpoch(t, f, privateKey, deviceID, http.MethodPatch, "/admin/payments/"+payment.ID, []byte(`{"status":"paid"}`), enrollmentEpoch)
 	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), `"admin_required"`) {
 		t.Fatalf("device payment edit status=%d body=%s", rr.Code, rr.Body.String())
 	}
@@ -375,13 +642,22 @@ func TestPairedDeviceCannotMutatePaymentOrWebhookAuthority(t *testing.T) {
 		t.Fatalf("device changed payment status to %q", status)
 	}
 
-	rr = signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPost, "/admin/webhooks/wh_test/retry", nil)
+	rr = signedDeviceAdminRequestWithEpoch(t, f, privateKey, deviceID, http.MethodPost, "/admin/webhooks/wh_test/retry", nil, enrollmentEpoch)
 	if rr.Code != http.StatusForbidden || !strings.Contains(rr.Body.String(), `"admin_required"`) {
 		t.Fatalf("device webhook retry status=%d body=%s", rr.Code, rr.Body.String())
 	}
 
-	rr = signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", []byte(`{"upi_id":"paygate-new@upi","payee_name":"PayGate"}`))
+	rr = signedDeviceAdminRequestWithEpoch(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", []byte(`{"upi_id":"paygate-new@upi","payee_name":"PayGate"}`), enrollmentEpoch)
 	if rr.Code != http.StatusOK || !strings.Contains(rr.Body.String(), `"upi_id":"paygate-new@upi"`) {
 		t.Fatalf("device destination update status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rr = adminRequest(t, f, http.MethodDelete, "/admin/device/"+deviceID, nil, false)
+	if rr.Code != http.StatusNoContent {
+		t.Fatalf("device revoke status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = signedDeviceAdminRequest(t, f, privateKey, deviceID, http.MethodPatch, "/admin/profiles/active/destination", []byte(`{"upi_id":"revoked@upi"}`))
+	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), `"unauthorized"`) {
+		t.Fatalf("revoked device destination status=%d body=%s", rr.Code, rr.Body.String())
 	}
 }

@@ -33,6 +33,9 @@ type adminPaymentResponse struct {
 	PayerName            string          `json:"payer_name,omitempty"`
 	PayerUPIID           string          `json:"payer_upi_id,omitempty"`
 	InternalNote         string          `json:"internal_note,omitempty"`
+	EvidencePackage      string          `json:"evidence_package,omitempty"`
+	EvidenceDeviceName   string          `json:"evidence_device_name,omitempty"`
+	EvidenceReceivedAt   *time.Time      `json:"evidence_received_at,omitempty"`
 }
 
 func adminPayment(p adminpayments.Payment) adminPaymentResponse {
@@ -44,6 +47,7 @@ func adminPayment(p adminpayments.Payment) adminPaymentResponse {
 		TransactionNote: payments.TransactionNote(p.ID), Status: p.Status,
 		CreatedAt: p.CreatedAt, ExpiresAt: p.ExpiresAt, GraceUntil: p.GraceUntil, ReuseAfter: p.ReuseAfter,
 		PaidAt: p.PaidAt, PayerName: p.PayerName, PayerUPIID: p.PayerUPIID, InternalNote: p.InternalNote,
+		EvidencePackage: p.EvidencePackage, EvidenceDeviceName: p.EvidenceDeviceName, EvidenceReceivedAt: p.EvidenceReceivedAt,
 	}
 }
 
@@ -142,6 +146,9 @@ func (h *AdminHandler) editAdminPayment(w http.ResponseWriter, r *http.Request) 
 }
 
 func writeAdminPaymentError(w http.ResponseWriter, err error) {
+	if writeStorageBusyError(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, adminpayments.ErrPaymentNotFound):
 		writeError(w, http.StatusNotFound, "payment_not_found", "Payment not found")

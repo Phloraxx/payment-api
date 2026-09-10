@@ -151,6 +151,49 @@ func TestUpdateDestinationPreservesExistingPaymentSnapshot(t *testing.T) {
 	}
 }
 
+func TestRelayDestinationUpdateRejectsRevokedDeviceAtomically(t *testing.T) {
+	ctx := context.Background()
+	db := openTestDB(t)
+	svc := NewService(db)
+	if _, err := svc.Upsert(ctx, testProfile("paytm", true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Activate(ctx, "paytm"); err != nil {
+		t.Fatal(err)
+	}
+	enrolledAt := time.UnixMilli(1_788_200_000_000).UTC()
+	if _, err := db.SQL.Exec(`INSERT INTO relay_devices(id,public_key_pem,enabled,enrolled_at) VALUES('relay-1','pem',1,?)`, enrolledAt.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.UpdateDestinationForRelay(ctx, "relay-1", enrolledAt, "paytm", DestinationInput{UPIID: "newdestination@upi"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SQL.Exec(`UPDATE relay_devices SET enabled=0 WHERE id='relay-1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.UpdateDestinationForRelay(ctx, "relay-1", enrolledAt, "paytm", DestinationInput{UPIID: "revoked@upi"}); !errors.Is(err, ErrRelayDeviceNotAuthorized) {
+		t.Fatalf("revoked device error = %v", err)
+	}
+	profile, err := svc.Get(ctx, "paytm")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profile.UPIID != "newdestination@upi" {
+		t.Fatalf("revoked device changed destination to %q", profile.UPIID)
+	}
+
+	newEnrolledAt := enrolledAt.Add(time.Minute)
+	if _, err := db.SQL.Exec(`UPDATE relay_devices SET enabled=1,enrolled_at=? WHERE id='relay-1'`, newEnrolledAt.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.UpdateDestinationForRelay(ctx, "relay-1", enrolledAt, "paytm", DestinationInput{UPIID: "stale-epoch@upi"}); !errors.Is(err, ErrRelayDeviceNotAuthorized) {
+		t.Fatalf("stale enrollment error = %v", err)
+	}
+	if _, err := svc.UpdateDestinationForRelay(ctx, "relay-1", newEnrolledAt, "paytm", DestinationInput{UPIID: "repaired@upi"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProfileValidationAndNotFound(t *testing.T) {
 	ctx := context.Background()
 	db := openTestDB(t)

@@ -170,9 +170,9 @@ If trusted occurrence time proves money arrived before/around cancellation accor
 
 Exact retry of the same signed source event -> return the prior result idempotently.
 
-A different source event can describe the same underlying credit. Example: Kotak SMS + GPay, or later Kotak SMS + Amazon Pay. Do not dedupe these on Android and do not hash text in an attempt to prove they are identical.
+Different source events can describe the same underlying credit. Example: Kotak SMS + GPay, or later Kotak SMS + Amazon Pay. Do not dedupe these on Android and do not hash text in an attempt to prove they are identical.
 
-The first safe observation is `matched`. A later independent observation that resolves to the same historical payment reservation is `corroborated`. It attaches to the same payment and may fill missing payer information, but it creates **no second payment transition and no second merchant webhook**.
+Only an independently authenticated/origin-bound source event may become `matched` or `corroborated`. Generic and Google Messages/Kotak text remains signed evidence for operator confirmation, even when it resolves to the same historical reservation.
 
 If the payable amount has been reused and the later source has only low-confidence timing, fail closed as `ambiguous`; never call it corroboration merely because the amount is equal.
 
@@ -218,13 +218,13 @@ Server Paytm parser rejects it as non-incoming credit. No payment mutation.
 
 ### Google Messages balance message with decimals
 
-Cheap filter may pass. Kotak parser must positively recognize incoming Kotak credit; otherwise ignore/unmatched.
+Cheap filter may pass. Kotak parser must positively recognize incoming Kotak credit; otherwise ignore/unmatched. Recognized Google Messages/Kotak evidence remains ambiguous/manual because the SMS sender/provider is not authenticated.
 
 ### Multiple amounts in one notification
 
 Example may contain transaction amount and balance.
 
-Phone does not choose authority. Server source parser must know which token is the credited amount. If parser cannot determine reliably, no auto-match.
+Phone does not choose authority. Server source parser must know which token is the credited amount. If parser cannot determine reliably, or the source has no authenticated origin, no auto-match.
 
 ### Currency comma separators
 
@@ -285,7 +285,7 @@ Token consumption and device enrollment are atomic so failure cannot consume tok
 
 ### Replace phone
 
-New phone must enroll before old phone is disabled. Final state has exactly one active relay device.
+New phone must enroll without disabling old phones. Final state may contain multiple concurrently enabled relay devices, each independently revocable.
 
 ### Old phone comes online later
 
@@ -325,7 +325,7 @@ Persist server/domain times as UTC Unix milliseconds. Parse displayed bank times
 
 ### Exactly one safe candidate
 
-Auto-match.
+Auto-match only when the source is independently origin-bound. Generic package text and Google Messages/Kotak SMS with a unique candidate remain ambiguous/manual evidence because visible notification/SMS content is forgeable.
 
 ### Zero candidates
 
@@ -503,9 +503,10 @@ After meaningful v4 payments exist, rollback cannot simply restore old v3 databa
 
 ## 14. Security edge cases
 
-### Admin password brute force
-
-Rate-limit/throttle password-only login and log security events without password content.
+Rate-limit/throttle password-only login and log security events without
+password content. PayGate enforces two concurrent Argon2 verifications,
+five failures per remote address within fifteen minutes, and a one-minute
+temporary block.
 
 ### Merchant API key leaked
 
@@ -538,8 +539,8 @@ Always render as escaped text. Never inject raw notification content into dashbo
 11. One PayGate process owns live SQLite.
 12. No second maintenance/backup PayGate process opens live DB.
 13. UTR/RRN is not required.
-14. GPay/Amazon Pay/Slice do not auto-match in v4.0.
-15. Multiple independent notification sources can corroborate one payment but can never create multiple `payment.paid` transitions/webhooks.
+14. GPay/Amazon Pay/Slice and other untrusted generic sources are evidence-only in v4.0; they never auto-match without independent origin/provider proof.
+15. Multiple independently trusted evidence sources can corroborate one payment but can never create multiple `payment.paid` transitions/webhooks; untrusted notification/SMS evidence remains ambiguous/manual.
 16. PocketBase/libgm are absent from final v4 runtime.
 17. Every risky operator correction is visible in immutable history.
 18. If PayGate cannot prove which payment owns money, it records Activity and does not guess.

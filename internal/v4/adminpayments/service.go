@@ -50,6 +50,9 @@ type Payment struct {
 	PayerName            string
 	PayerUPIID           string
 	InternalNote         string
+	EvidencePackage      string
+	EvidenceDeviceName   string
+	EvidenceReceivedAt   *time.Time
 }
 
 type ListInput struct {
@@ -151,7 +154,60 @@ func (s *Service) List(ctx context.Context, input ListInput) (ListResult, error)
 	if err := rows.Err(); err != nil {
 		return ListResult{}, fmt.Errorf("iterate payments: %w", err)
 	}
+	if err := s.attachLatestEvidence(ctx, items); err != nil {
+		return ListResult{}, err
+	}
 	return ListResult{Items: items, Total: total, Limit: limit, Offset: offset}, nil
+}
+
+func (s *Service) attachLatestEvidence(ctx context.Context, items []Payment) error {
+	if len(items) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(items))
+	args := make([]any, len(items))
+	byID := make(map[string]int, len(items))
+	for i := range items {
+		placeholders[i] = "?"
+		args[i] = items[i].ID
+		byID[items[i].ID] = i
+	}
+	query := `SELECT po.matched_payment_id,re.package_name,COALESCE(rd.name,''),po.received_at
+		FROM payment_observations po
+		JOIN relay_events re ON re.id=po.relay_event_id
+		LEFT JOIN relay_devices rd ON rd.id=re.device_id
+		WHERE po.matched_payment_id IN (` + strings.Join(placeholders, ",") + `)
+			AND po.match_result IN ('matched','corroborated')
+		ORDER BY po.received_at DESC,po.rowid DESC`
+	rows, err := s.DB.SQL.QueryContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("load payment evidence: %w", err)
+	}
+	defer rows.Close()
+	seen := make(map[string]bool, len(items))
+	for rows.Next() {
+		var paymentID, packageName, deviceName string
+		var receivedAt int64
+		if err := rows.Scan(&paymentID, &packageName, &deviceName, &receivedAt); err != nil {
+			return fmt.Errorf("scan payment evidence: %w", err)
+		}
+		if seen[paymentID] {
+			continue
+		}
+		i, ok := byID[paymentID]
+		if !ok {
+			continue
+		}
+		at := time.UnixMilli(receivedAt).UTC()
+		items[i].EvidencePackage = packageName
+		items[i].EvidenceDeviceName = deviceName
+		items[i].EvidenceReceivedAt = &at
+		seen[paymentID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate payment evidence: %w", err)
+	}
+	return nil
 }
 
 func buildWhere(input ListInput) (string, []any, error) {
@@ -251,6 +307,11 @@ func (s *Service) Get(ctx context.Context, id string) (Detail, error) {
 	if err != nil {
 		return Detail{}, fmt.Errorf("get payment: %w", err)
 	}
+	paymentsWithEvidence := []Payment{payment}
+	if err := s.attachLatestEvidence(ctx, paymentsWithEvidence); err != nil {
+		return Detail{}, err
+	}
+	payment = paymentsWithEvidence[0]
 	history, err := loadHistory(ctx, s.DB.SQL, id)
 	if err != nil {
 		return Detail{}, err

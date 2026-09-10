@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -58,7 +59,10 @@ func newWebhookFixture(t *testing.T) webhookFixture {
 }
 
 func newTestService(f webhookFixture, endpoint string) *Service {
-	s := NewService(f.db, Config{Endpoint: endpoint, Secret: testSecret, AllowInsecureHTTP: true})
+	s := NewService(f.db, Config{
+		Endpoint: endpoint, Secret: testSecret, AllowInsecureHTTP: true,
+		allowPrivateNetwork: true,
+	})
 	s.Now = func() time.Time { return *f.now }
 	return s
 }
@@ -243,13 +247,38 @@ func TestConfigurationValidation(t *testing.T) {
 	cases := []Config{
 		{Endpoint: "http://example.com/hook", Secret: testSecret},
 		{Endpoint: "https://user:pass@example.com/hook", Secret: testSecret},
+		{Endpoint: "http://127.0.0.1/hook", Secret: testSecret, AllowInsecureHTTP: true},
 		{Endpoint: "https://example.com/hook?token=x", Secret: testSecret},
 		{Endpoint: "https://example.com/hook", Secret: "short"},
+		{Endpoint: "https://127.0.0.1/hook", Secret: testSecret},
+		{Endpoint: "https://[::1]/hook", Secret: testSecret},
 	}
 	for _, cfg := range cases {
 		s := NewService(f.db, cfg)
 		if _, err := s.SendPending(context.Background()); !errors.Is(err, ErrInvalidConfig) {
 			t.Fatalf("config %+v err=%v", cfg, err)
+		}
+	}
+}
+
+func TestRestrictedDialerRejectsLocalDestination(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	conn, err := restrictedDialer(false)(context.Background(), "tcp", listener.Addr().String())
+	if err == nil {
+		conn.Close()
+		t.Fatal("restricted dialer connected to loopback")
+	}
+}
+
+func TestRestrictedIPRejectsSpecialRanges(t *testing.T) {
+	for _, value := range []string{"0.0.0.1", "100.64.0.1", "192.0.0.1", "198.18.0.1", "225.1.2.3", "239.255.255.255", "255.255.255.255", "fec0::1"} {
+		if !restrictedIP(net.ParseIP(value)) {
+			t.Fatalf("restrictedIP(%q) = false", value)
 		}
 	}
 }

@@ -15,6 +15,7 @@ const (
 	relayDeviceHeader    = "X-PayGate-Relay-Device"
 	relayTimeHeader      = "X-PayGate-Relay-Time"
 	relaySignatureHeader = "X-PayGate-Relay-Signature"
+	relayEpochHeader     = "X-PayGate-Relay-Epoch"
 )
 
 type RelayHandler struct {
@@ -28,7 +29,6 @@ func NewRelayHandler(service *relay.Service) *RelayHandler {
 	h.mux.HandleFunc("POST "+relay.EventPath, h.event)
 	h.mux.HandleFunc("POST "+relay.HeartbeatPath, h.heartbeat)
 	h.mux.HandleFunc("GET "+relay.DevicePath, h.getThisDevice)
-	h.mux.HandleFunc("DELETE "+relay.DevicePath, h.disconnectDevice)
 	return h
 }
 func (h *RelayHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -73,8 +73,7 @@ func (h *RelayHandler) pair(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"device_id": result.DeviceID, "enabled": result.Enabled,
-		"replaced_device_id": emptyToNil(result.ReplacedDeviceID),
+		"device_id": result.DeviceID, "enabled": result.Enabled, "enrolled_at_ms": result.EnrolledAtMS,
 	})
 }
 
@@ -118,19 +117,6 @@ func (h *RelayHandler) getThisDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"device": device})
 }
 
-func (h *RelayHandler) disconnectDevice(w http.ResponseWriter, r *http.Request) {
-	deviceID, err := h.Relay.AuthenticateDevice(r.Context(), relayAuth(r, relay.DevicePath), nil)
-	if err != nil {
-		writeRelayError(w, err)
-		return
-	}
-	if err := h.Relay.RevokeDevice(r.Context(), deviceID); err != nil {
-		writeRelayError(w, relayErrorForDeviceRevoke(err))
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
 func relayErrorForDeviceRevoke(err error) error {
 	if errors.Is(err, relay.ErrInvalidDevice) {
 		return &relay.Error{Code: "UNKNOWN_RELAY_DEVICE", Message: "relay device is not enrolled or is disabled", HTTPStatus: http.StatusUnauthorized}
@@ -141,7 +127,8 @@ func relayErrorForDeviceRevoke(err error) error {
 func relayAuth(r *http.Request, path string) relay.RequestAuth {
 	return relay.RequestAuth{
 		DeviceID: r.Header.Get(relayDeviceHeader), Timestamp: r.Header.Get(relayTimeHeader),
-		Signature: r.Header.Get(relaySignatureHeader), Method: r.Method, Path: path,
+		Signature: r.Header.Get(relaySignatureHeader), EnrollmentEpoch: r.Header.Get(relayEpochHeader),
+		Method: r.Method, Path: path,
 	}
 }
 
@@ -159,11 +146,12 @@ func readRelayBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
 	return raw, true
 }
 func writeRelayPairError(w http.ResponseWriter, err error) {
+	if writeStorageBusyError(w, err) {
+		return
+	}
 	switch {
 	case errors.Is(err, relay.ErrPairingTokenInvalid), errors.Is(err, relay.ErrPairingTokenExpired), errors.Is(err, relay.ErrPairingTokenUsed):
 		writeError(w, http.StatusUnauthorized, "invalid_pairing", "Pairing link is invalid or expired")
-	case errors.Is(err, relay.ErrRelayAlreadyActive):
-		writeError(w, http.StatusConflict, "device_already_connected", "A PayGate phone is already connected")
 	case errors.Is(err, relay.ErrInvalidDevice):
 		writeError(w, http.StatusBadRequest, "invalid_device", err.Error())
 	default:
@@ -172,17 +160,13 @@ func writeRelayPairError(w http.ResponseWriter, err error) {
 }
 
 func writeRelayError(w http.ResponseWriter, err error) {
+	if writeStorageBusyError(w, err) {
+		return
+	}
 	var relayErr *relay.Error
 	if errors.As(err, &relayErr) {
 		writeError(w, relayErr.HTTPStatus, strings.ToLower(relayErr.Code), relayErr.Message)
 		return
 	}
 	writeError(w, http.StatusInternalServerError, "internal_error", "PayGate could not process the relay request")
-}
-
-func emptyToNil(value string) any {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	return value
 }

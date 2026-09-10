@@ -240,7 +240,7 @@ Examples:
 
 ```text
 Payment detected · Paytm · ₹100.37 · matched to Sourav P Bijoy
-Payment detected · Kotak · ₹501.42 · unmatched
+Payment detected · Kotak · ₹501.42 · ambiguous; operator confirmation required
 Payment updated · pay_... · operator
 Webhook delivered · payment.paid · 200
 Webhook failed · payment.expired · 404

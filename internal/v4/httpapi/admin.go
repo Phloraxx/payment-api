@@ -2,11 +2,14 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/v4/adminpayments"
@@ -14,13 +17,40 @@ import (
 	"github.com/Phloraxx/payment-api/internal/v4/operator"
 	"github.com/Phloraxx/payment-api/internal/v4/profiles"
 	"github.com/Phloraxx/payment-api/internal/v4/relay"
+	"github.com/Phloraxx/payment-api/internal/v4/storage"
 	"github.com/Phloraxx/payment-api/internal/v4/webhooks"
 )
 
 const (
-	adminCookieName       = "paygate_admin"
-	adminLoginConcurrency = 2
+	adminCookieName           = "paygate_admin"
+	adminLoginConcurrency     = 2
+	adminLoginFailureWindow   = 15 * time.Minute
+	adminLoginFailureLimit    = 5
+	adminLoginBlockDuration   = time.Minute
+	adminLoginThrottleEntries = 1024
 )
+
+type adminLoginFailure struct {
+	failures     int
+	firstFailure time.Time
+	blockedUntil time.Time
+	lastSeen     time.Time
+}
+
+type adminDeviceAuthorizationContextKey struct{}
+
+type adminDeviceAuthorization struct {
+	ID         string
+	EnrolledAt time.Time
+}
+
+func adminDeviceAuthorizationFromContext(ctx context.Context) (adminDeviceAuthorization, bool) {
+	if ctx == nil {
+		return adminDeviceAuthorization{}, false
+	}
+	value, ok := ctx.Value(adminDeviceAuthorizationContextKey{}).(adminDeviceAuthorization)
+	return value, ok && value.ID != "" && !value.EnrolledAt.IsZero()
+}
 
 type AdminHandler struct {
 	Auth           *auth.Service
@@ -33,6 +63,8 @@ type AdminHandler struct {
 	PairingBaseURL string
 	SecureCookies  bool
 	loginSlots     chan struct{}
+	loginMu        sync.Mutex
+	loginFailures  map[string]adminLoginFailure
 	mux            *http.ServeMux
 }
 
@@ -40,7 +72,7 @@ func NewAdminHandler(authService *auth.Service, paymentService *adminpayments.Se
 	settingsService *operator.SettingsService, profileService *profiles.Service, relayService *relay.Service, webhookService *webhooks.Service) *AdminHandler {
 	h := &AdminHandler{Auth: authService, Payments: paymentService, Operator: operatorService, Settings: settingsService,
 		Profiles: profileService, Relay: relayService, Webhooks: webhookService, SecureCookies: true,
-		loginSlots: make(chan struct{}, adminLoginConcurrency), mux: http.NewServeMux()}
+		loginSlots: make(chan struct{}, adminLoginConcurrency), loginFailures: make(map[string]adminLoginFailure), mux: http.NewServeMux()}
 	h.registerRoutes()
 	return h
 }
@@ -84,45 +116,50 @@ func (h *AdminHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.mux.ServeHTTP(w, r)
 		return
 	}
-	deviceID, ok := h.deviceAuthorization(w, r)
+	requireEpoch := r.Method == http.MethodPatch && r.URL.Path == "/admin/profiles/active/destination"
+	deviceID, enrolledAt, ok := h.deviceAuthorization(w, r, requireEpoch)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Admin or connected-device authentication is required")
 		return
 	}
 	if !deviceOperationalRoute(r.Method, r.URL.Path) {
-		_ = deviceID
 		writeError(w, http.StatusForbidden, "admin_required", "This setting requires the web admin session")
 		return
 	}
+	r = r.WithContext(context.WithValue(r.Context(), adminDeviceAuthorizationContextKey{}, adminDeviceAuthorization{
+		ID: deviceID, EnrolledAt: enrolledAt,
+	}))
 	h.mux.ServeHTTP(w, r)
 }
 
 const adminDeviceBodyLimit = 256 << 10
 
-func (h *AdminHandler) deviceAuthorization(w http.ResponseWriter, r *http.Request) (string, bool) {
+func (h *AdminHandler) deviceAuthorization(w http.ResponseWriter, r *http.Request, requireEpoch bool) (string, time.Time, bool) {
 	if h.Relay == nil {
-		return "", false
+		return "", time.Time{}, false
 	}
 	deviceID := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Device"))
 	timestamp := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Time"))
 	signature := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Signature"))
-	if deviceID == "" || timestamp == "" || signature == "" {
-		return "", false
+	enrollmentEpoch := strings.TrimSpace(r.Header.Get("X-PayGate-Relay-Epoch"))
+	if deviceID == "" || timestamp == "" || signature == "" || (requireEpoch && enrollmentEpoch == "") {
+		return "", time.Time{}, false
 	}
 	var body []byte
 	if r.Body != nil {
 		raw, err := io.ReadAll(io.LimitReader(r.Body, adminDeviceBodyLimit+1))
 		if err != nil || len(raw) > adminDeviceBodyLimit {
-			return "", false
+			return "", time.Time{}, false
 		}
 		body = raw
 		r.Body = io.NopCloser(bytes.NewReader(raw))
 	}
 	target := r.URL.RequestURI()
-	id, err := h.Relay.AuthenticateDevice(r.Context(), relay.RequestAuth{
-		DeviceID: deviceID, Timestamp: timestamp, Signature: signature, Method: r.Method, Path: target,
+	id, enrolledAt, err := h.Relay.AuthenticateDeviceWithEpoch(r.Context(), relay.RequestAuth{
+		DeviceID: deviceID, Timestamp: timestamp, Signature: signature, EnrollmentEpoch: enrollmentEpoch,
+		Method: r.Method, Path: target,
 	}, body)
-	return id, err == nil
+	return id, enrolledAt, err == nil
 }
 
 func deviceOperationalRoute(method, path string) bool {
@@ -158,6 +195,13 @@ func (h *AdminHandler) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
 	}
+	key := loginRemoteKey(r)
+	now := time.Now().UTC()
+	if allowed, retry := h.loginAttemptAllowed(key, now); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(retry)))
+		writeError(w, http.StatusTooManyRequests, "login_rate_limited", "Too many failed login attempts; try again later")
+		return
+	}
 	if !h.acquireLoginSlot() {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusTooManyRequests, "login_busy", "Too many login attempts are already being verified")
@@ -167,18 +211,32 @@ func (h *AdminHandler) login(w http.ResponseWriter, r *http.Request) {
 	session, err := h.Auth.CreateAdminSession(r.Context(), input.Password)
 	if err != nil {
 		if errors.Is(err, auth.ErrInvalidCredentials) || errors.Is(err, auth.ErrNotInitialized) {
+			h.recordLoginFailure(key, now)
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "Password is incorrect")
+			return
+		}
+		if writeAdminLoginServiceError(w, err) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "internal_error", "PayGate could not create the admin session")
 		return
 	}
+	h.clearLoginFailures(key)
 	h.setAdminCookie(w, session.Token, session.ExpiresAt)
 	response := adminLoginResponse{ExpiresAt: session.ExpiresAt}
 	if strings.EqualFold(strings.TrimSpace(input.Client), "android") {
 		response.Token = session.Token
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func writeAdminLoginServiceError(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, storage.ErrBusy) {
+		return false
+	}
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "login_retryable", "PayGate is temporarily busy; try again shortly")
+	return true
 }
 
 func (h *AdminHandler) acquireLoginSlot() bool {
@@ -199,11 +257,109 @@ func (h *AdminHandler) releaseLoginSlot() {
 	}
 	<-h.loginSlots
 }
+func loginRemoteKey(r *http.Request) string {
+	if r == nil {
+		return "unknown"
+	}
+	remote := strings.TrimSpace(r.RemoteAddr)
+	if host, _, err := net.SplitHostPort(remote); err == nil && host != "" {
+		return host
+	}
+	if remote != "" {
+		return remote
+	}
+	return "unknown"
+}
+
+func retryAfterSeconds(duration time.Duration) int {
+	if duration <= 0 {
+		return 1
+	}
+	return int((duration + time.Second - 1) / time.Second)
+}
+
+func (h *AdminHandler) loginAttemptAllowed(key string, now time.Time) (bool, time.Duration) {
+	if h == nil || h.loginFailures == nil {
+		return true, 0
+	}
+	h.loginMu.Lock()
+	defer h.loginMu.Unlock()
+	h.pruneLoginFailuresLocked(now)
+	state, ok := h.loginFailures[key]
+	if !ok {
+		return true, 0
+	}
+	if now.Before(state.blockedUntil) {
+		state.lastSeen = now
+		h.loginFailures[key] = state
+		return false, state.blockedUntil.Sub(now)
+	}
+	if state.firstFailure.IsZero() || now.Sub(state.firstFailure) >= adminLoginFailureWindow {
+		delete(h.loginFailures, key)
+	}
+	return true, 0
+}
+
+func (h *AdminHandler) recordLoginFailure(key string, now time.Time) {
+	if h == nil || h.loginFailures == nil {
+		return
+	}
+	h.loginMu.Lock()
+	defer h.loginMu.Unlock()
+	h.pruneLoginFailuresLocked(now)
+	state := h.loginFailures[key]
+	if state.firstFailure.IsZero() || now.Sub(state.firstFailure) >= adminLoginFailureWindow {
+		state = adminLoginFailure{firstFailure: now}
+	}
+	state.failures++
+	state.lastSeen = now
+	if state.failures >= adminLoginFailureLimit {
+		state.blockedUntil = now.Add(adminLoginBlockDuration)
+	}
+	h.loginFailures[key] = state
+}
+
+func (h *AdminHandler) clearLoginFailures(key string) {
+	if h == nil || h.loginFailures == nil {
+		return
+	}
+	h.loginMu.Lock()
+	delete(h.loginFailures, key)
+	h.loginMu.Unlock()
+}
+
+func (h *AdminHandler) pruneLoginFailuresLocked(now time.Time) {
+	for key, state := range h.loginFailures {
+		if now.After(state.blockedUntil) && now.Sub(state.lastSeen) >= adminLoginFailureWindow {
+			delete(h.loginFailures, key)
+		}
+	}
+	for len(h.loginFailures) >= adminLoginThrottleEntries {
+		var oldestKey string
+		var oldest time.Time
+		for key, state := range h.loginFailures {
+			if oldestKey == "" || state.lastSeen.Before(oldest) {
+				oldestKey, oldest = key, state.lastSeen
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(h.loginFailures, oldestKey)
+	}
+}
 
 func (h *AdminHandler) logout(w http.ResponseWriter, r *http.Request) {
 	token, err := h.adminToken(r)
 	if err == nil {
-		_ = h.Auth.RevokeAdminSession(r.Context(), token)
+		err = h.Auth.RevokeAdminSession(r.Context(), token)
+		if err != nil && !errors.Is(err, auth.ErrInvalidSession) {
+			if writeStorageBusyError(w, err) {
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "internal_error", "Could not revoke admin session")
+			return
+		}
 	}
 	h.clearAdminCookie(w)
 	w.WriteHeader(http.StatusNoContent)
@@ -259,6 +415,9 @@ func (h *AdminHandler) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.Auth.ChangePassword(r.Context(), input.CurrentPassword, input.NewPassword); err != nil {
+		if writeStorageBusyError(w, err) {
+			return
+		}
 		switch {
 		case errors.Is(err, auth.ErrInvalidCredentials):
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", "Current password is incorrect")

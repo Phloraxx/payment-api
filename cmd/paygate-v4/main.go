@@ -3,17 +3,21 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	v4runtime "github.com/Phloraxx/payment-api/internal/v4/runtime"
+	"github.com/Phloraxx/payment-api/internal/v4/storage"
 )
 
 func main() {
@@ -23,8 +27,13 @@ func main() {
 }
 
 func run() error {
-	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
-		return healthcheck()
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "healthcheck":
+			return healthcheck()
+		case "restore-drill":
+			return restoreDrill()
+		}
 	}
 	cfg, err := configFromEnv()
 	if err != nil {
@@ -88,6 +97,37 @@ func healthcheck() error {
 	}
 	return nil
 }
+func restoreDrill() error {
+	flags := flag.NewFlagSet("restore-drill", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	backup := flags.String("backup", "", "completed standalone SQLite backup")
+	liveDB := flags.String("live-db", "", "live database path to protect")
+	expectedSHA256 := flags.String("sha256", "", "expected backup SHA-256")
+	if err := flags.Parse(os.Args[2:]); err != nil {
+		return fmt.Errorf("parse restore-drill arguments: %w", err)
+	}
+	if flags.NArg() != 0 {
+		return errors.New("restore-drill does not accept positional arguments")
+	}
+	if strings.TrimSpace(*backup) == "" {
+		return errors.New("restore-drill requires --backup")
+	}
+	protectedPath := strings.TrimSpace(*liveDB)
+	if protectedPath == "" {
+		dataDir := strings.TrimSpace(os.Getenv("PAYGATE_V4_DATA_DIR"))
+		if dataDir == "" {
+			return errors.New("restore-drill requires --live-db or PAYGATE_V4_DATA_DIR")
+		}
+		protectedPath = filepath.Join(dataDir, "paygate.db")
+	}
+	report, err := storage.RestoreDrill(context.Background(), *backup, protectedPath, *expectedSHA256)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("restore drill passed: schema=%d payments=%d relay_events=%d webhook_deliveries=%d relay_devices=%d\n",
+		report.SchemaVersion, report.Payments, report.RelayEvents, report.WebhookDeliveries, report.RelayDevices)
+	return nil
+}
 
 func configFromEnv() (v4runtime.Config, error) {
 	hour := 3
@@ -106,6 +146,14 @@ func configFromEnv() (v4runtime.Config, error) {
 		}
 		retention = parsed
 	}
+	var rawEventRetention time.Duration
+	if value := strings.TrimSpace(os.Getenv("PAYGATE_V4_RAW_EVENT_RETENTION")); value != "" {
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return v4runtime.Config{}, fmt.Errorf("invalid PAYGATE_V4_RAW_EVENT_RETENTION: %w", err)
+		}
+		rawEventRetention = parsed
+	}
 	origins := splitCSV(os.Getenv("PAYGATE_V4_ALLOWED_ORIGINS"))
 	return v4runtime.Config{
 		DataDir:                  os.Getenv("PAYGATE_V4_DATA_DIR"),
@@ -119,6 +167,7 @@ func configFromEnv() (v4runtime.Config, error) {
 		BackupDir:                os.Getenv("PAYGATE_V4_BACKUP_DIR"),
 		BackupHourUTC:            hour,
 		BackupRetention:          retention,
+		RawEventRetention:        rawEventRetention,
 	}, nil
 }
 

@@ -88,6 +88,7 @@ func TestMigratedLegacyIdempotencyKeyFailsClosedOnChangedRequest(t *testing.T) {
 	}
 	defer db.Close()
 	svc := payments.NewService(db)
+	svc.Now = func() time.Time { return now.Add(time.Hour) }
 	_, err = svc.Create(context.Background(), payments.CreateInput{RequestedAmountPaise: 10000, Name: "Different person", ExternalID: "evt_1", Metadata: []byte(`{"eventId":"evt_1"}`), IdempotencyScope: merchantIdempotencyScope, IdempotencyKey: "idem-late"})
 	if !errors.Is(err, payments.ErrIdempotencyConflict) {
 		t.Fatalf("changed retry err=%v", err)

@@ -191,7 +191,9 @@ Preference:
 
 ## Reuse/collision safety rule
 
-If a payable value has only one historical reservation compatible with the trusted occurrence time, it may match that reservation.
+If the payable value has only one historical reservation compatible with the trusted occurrence time, it is a necessary candidate, not sufficient proof.
+
+Only an origin-bound source may automatically confirm that candidate. The current v4 Paytm notification path is bound to the Paytm Business package; generic package text and Google Messages/Kotak SMS have no authenticated app, sender or provider assertion. Those observations are stored as ambiguous Activity for explicit web-admin confirmation or future independent provider corroboration.
 
 If the same value has been reused and the observation time is missing, implausible or too low-confidence to distinguish the reservations:
 
@@ -201,13 +203,12 @@ DO NOT AUTO-MATCH
 
 Store the observation as unmatched/ambiguous Activity. The operator can correct the payment directly if necessary.
 
-This is the final defense against extremely delayed SMS/notification delivery.
+This is the final defense against extremely delayed SMS/notification delivery and forged visible text.
 
 ## Auto-match algorithm
 
 For normalized observation `O`:
 
-```text
 1. dedupe signed relay event
 2. parse source and validate incoming-credit semantics
 3. validate amount > 0 and paise != 00
@@ -215,23 +216,26 @@ For normalized observation `O`:
 5. resolve collection profile P from source semantics or, for generic evidence, historical exact-amount reservations at occurred_at
 6. find historical payments on P with exact payable amount
 7. restrict candidates to payments whose lifecycle can contain O.occurred_at
-8. if exactly one candidate is safe and not yet paid:
+8. if the source is origin-bound and exactly one candidate is safe and not yet paid:
       mark paid
       attach observation as `matched`
       copy payer enrichment when present
       append payment history
       enqueue one payment.paid webhook in same transaction
-9. if exactly one safe candidate is already paid and already has a confirming observation:
-      attach this independent observation as `corroborated`
+9. if the source is generic or Google Messages/Kotak, retain the candidate as ambiguous evidence:
+      do not mutate payment state
+      do not attach a payment confirmation
+      do not enqueue a payment.paid webhook
+10. if exactly one trusted candidate is already paid and already has a confirming observation:
+      attach this independent trusted observation as `corroborated`
       optionally enrich missing payer fields
       do not create another payment transition/history/webhook
-10. if zero candidates:
+11. if zero candidates:
       save unmatched Activity
-11. if multiple/uncertain candidates:
+12. if multiple/uncertain candidates:
       fail closed; save ambiguous Activity
-```
 
-The **currently active collection profile is irrelevant to a match when historical evidence identifies the profile**. A Paytm observation can still pay an older Paytm payment after the operator switches new payment creation to Kotak. Generic evidence similarly follows a unique historical reservation profile; if the same amount was simultaneously reserved on multiple profiles, it fails closed as ambiguous rather than guessing.
+The **currently active collection profile is irrelevant to a trusted match when historical evidence identifies the profile**. A Paytm observation can still pay an older Paytm payment after the operator switches new payment creation to Kotak. Generic/Kotak evidence can still be attributed to the unique historical reservation for operator review, but never changes payment state automatically.
 
 ## Relay amount hint is not trusted
 

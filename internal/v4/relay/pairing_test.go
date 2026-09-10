@@ -40,21 +40,20 @@ func TestCreatePairingStoresOnlyTokenHash(t *testing.T) {
 	token := "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"
 	service.NewPairingToken = func() (string, error) { return token, nil }
 
-	session, err := service.CreatePairing(context.Background(), false)
+	session, err := service.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.Token != token || !session.ExpiresAt.Equal(now.Add(2*time.Minute)) || session.ReplaceExisting {
+	if session.Token != token || !session.ExpiresAt.Equal(now.Add(2*time.Minute)) {
 		t.Fatalf("pairing session = %+v", session)
 	}
 	var stored []byte
-	var replace int
 	var expires int64
-	if err := db.SQL.QueryRow(`SELECT token_hash,replace_existing,expires_at FROM pairing_sessions`).Scan(&stored, &replace, &expires); err != nil {
+	if err := db.SQL.QueryRow(`SELECT token_hash,expires_at FROM pairing_sessions`).Scan(&stored, &expires); err != nil {
 		t.Fatal(err)
 	}
 	wantHash := sha256.Sum256([]byte(token))
-	if hex.EncodeToString(stored) != hex.EncodeToString(wantHash[:]) || replace != 0 || expires != session.ExpiresAt.UnixMilli() {
+	if hex.EncodeToString(stored) != hex.EncodeToString(wantHash[:]) || expires != session.ExpiresAt.UnixMilli() {
 		t.Fatal("stored pairing session does not match hashed-token contract")
 	}
 	var rawCount int
@@ -70,7 +69,7 @@ func TestPairDeviceConsumesTokenAndEnablesFingerprintDevice(t *testing.T) {
 	now := time.Date(2026, 9, 1, 6, 15, 0, 0, time.UTC)
 	service := NewService(db, payments.NewService(db))
 	service.Now = func() time.Time { return now }
-	session, err := service.CreatePairing(context.Background(), false)
+	session, err := service.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,15 +81,15 @@ func TestPairDeviceConsumesTokenAndEnablesFingerprintDevice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.DeviceID != deviceID || !result.Enabled || result.ReplacedDeviceID != "" {
+	if result.DeviceID != deviceID || !result.Enabled || result.EnrolledAtMS != now.UnixMilli() {
 		t.Fatalf("pair result = %+v", result)
 	}
-	active, err := service.ActiveDevice(context.Background())
+	devices, err := service.Devices(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if active == nil || active.ID != deviceID || active.Name != "Motorola Edge 60 Stylus" || !active.Enabled {
-		t.Fatalf("active device = %+v", active)
+	if len(devices) != 1 || devices[0].ID != deviceID || devices[0].Name != "Motorola Edge 60 Stylus" || !devices[0].Enabled {
+		t.Fatalf("devices = %+v", devices)
 	}
 	var consumed sql.NullInt64
 	if err := db.SQL.QueryRow(`SELECT consumed_at FROM pairing_sessions`).Scan(&consumed); err != nil || !consumed.Valid {
@@ -102,13 +101,53 @@ func TestPairDeviceConsumesTokenAndEnablesFingerprintDevice(t *testing.T) {
 		t.Fatalf("replay error = %v", err)
 	}
 }
+func TestRePairRefreshesEnrollmentEpoch(t *testing.T) {
+	db := openRelayDB(t)
+	firstAt := time.Date(2026, 9, 1, 6, 20, 0, 0, time.UTC)
+	service := NewService(db, payments.NewService(db))
+	service.Now = func() time.Time { return firstAt }
+	session, err := service.CreatePairing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, deviceID := newPairingPublicKey(t)
+	input := PairDeviceInput{Token: session.Token, Name: "Phone", PublicKeyPEM: publicKey}
+	if _, err := service.PairDevice(context.Background(), input); err != nil {
+		t.Fatal(err)
+	}
+	var firstEpoch int64
+	if err := db.SQL.QueryRow(`SELECT enrolled_at FROM relay_devices WHERE id=?`, deviceID).Scan(&firstEpoch); err != nil {
+		t.Fatal(err)
+	}
+
+	// Re-pair at the exact same wall-clock millisecond. The enrollment epoch
+	// must still advance so old epoch-bound signatures become invalid.
+	secondAt := firstAt
+	service.Now = func() time.Time { return secondAt }
+	second, err := service.CreatePairing(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	input.Token = second.Token
+	repaired, err := service.PairDevice(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondEpoch int64
+	if err := db.SQL.QueryRow(`SELECT enrolled_at FROM relay_devices WHERE id=?`, deviceID).Scan(&secondEpoch); err != nil {
+		t.Fatal(err)
+	}
+	if secondEpoch != firstEpoch+1 || repaired.EnrolledAtMS != secondEpoch {
+		t.Fatalf("enrollment epoch first=%d second=%d returned=%d", firstEpoch, secondEpoch, repaired.EnrolledAtMS)
+	}
+}
 func TestAdditionalDevicePairingKeepsExistingDeviceEnabled(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 1, 6, 30, 0, 0, time.UTC)
 	_, oldID := enrollTestDevice(t, db, now.Add(-time.Hour))
 	service := NewService(db, payments.NewService(db))
 	service.Now = func() time.Time { return now }
-	session, err := service.CreatePairing(context.Background(), false)
+	session, err := service.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +156,7 @@ func TestAdditionalDevicePairingKeepsExistingDeviceEnabled(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.DeviceID != newID || result.ReplacedDeviceID != "" || !result.Enabled {
+	if result.DeviceID != newID || !result.Enabled {
 		t.Fatalf("pair result=%+v", result)
 	}
 	var oldEnabled, newEnabled int
@@ -136,25 +175,22 @@ func TestAdditionalDevicePairingKeepsExistingDeviceEnabled(t *testing.T) {
 	}
 }
 
-func TestReplaceFlagIsBackwardCompatibleButAdditive(t *testing.T) {
+func TestAdditionalPairingKeepsLegacySchemaCompatible(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 1, 6, 45, 0, 0, time.UTC)
 	_, oldID := enrollTestDevice(t, db, now.Add(-time.Hour))
 	service := NewService(db, payments.NewService(db))
 	service.Now = func() time.Time { return now }
-	session, err := service.CreatePairing(context.Background(), true)
+	session, err := service.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
-	}
-	if session.ReplaceExisting {
-		t.Fatalf("replace flag should be deprecated in v5: %+v", session)
 	}
 	publicKey, newID := newPairingPublicKey(t)
 	result, err := service.PairDevice(context.Background(), PairDeviceInput{Token: session.Token, Name: "Another Phone", PublicKeyPEM: publicKey})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.DeviceID != newID || result.ReplacedDeviceID != "" {
+	if result.DeviceID != newID {
 		t.Fatalf("pair result=%+v", result)
 	}
 	var oldEnabled, newEnabled int
@@ -164,13 +200,13 @@ func TestReplaceFlagIsBackwardCompatibleButAdditive(t *testing.T) {
 		t.Fatalf("enabled states old=%d new=%d", oldEnabled, newEnabled)
 	}
 }
-func TestExpiredReplacementLeavesOldDeviceEnabled(t *testing.T) {
+func TestExpiredPairingLeavesOldDeviceEnabled(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 1, 7, 0, 0, 0, time.UTC)
 	_, oldID := enrollTestDevice(t, db, now.Add(-time.Hour))
 	service := NewService(db, payments.NewService(db))
 	service.Now = func() time.Time { return now }
-	session, err := service.CreatePairing(context.Background(), true)
+	session, err := service.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,11 +231,11 @@ func TestMultiplePairingSessionsCanCoexistAndAreIndividuallyOneUse(t *testing.T)
 	tokens := []string{"first-pairing-token-abcdefghijklmnopqrstuvwxyz", "second-pairing-token-abcdefghijklmnopqrstuvwxyz"}
 	index := 0
 	service.NewPairingToken = func() (string, error) { value := tokens[index]; index++; return value, nil }
-	first, err := service.CreatePairing(context.Background(), false)
+	first, err := service.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := service.CreatePairing(context.Background(), false)
+	second, err := service.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,21 +267,21 @@ func TestRevokeDeviceDisablesWithoutDeletingHistory(t *testing.T) {
 	if err := service.RevokeDevice(context.Background(), deviceID); err != nil {
 		t.Fatal(err)
 	}
-	active, err := service.ActiveDevice(context.Background())
-	if err != nil || active != nil {
-		t.Fatalf("active after revoke = %+v err=%v", active, err)
+	devices, err := service.Devices(context.Background())
+	if err != nil || len(devices) != 0 {
+		t.Fatalf("devices after revoke = %+v err=%v", devices, err)
 	}
 	if countRows(t, db, "relay_devices") != 1 {
 		t.Fatal("revocation deleted relay history")
 	}
 }
-func TestReplacementRollbackKeepsOldDeviceAndTokenUnused(t *testing.T) {
+func TestPairingRollbackKeepsOldDeviceAndTokenUnused(t *testing.T) {
 	db := openRelayDB(t)
 	now := time.Date(2026, 9, 1, 7, 45, 0, 0, time.UTC)
 	_, oldID := enrollTestDevice(t, db, now.Add(-time.Hour))
 	service := NewService(db, payments.NewService(db))
 	service.Now = func() time.Time { return now }
-	session, err := service.CreatePairing(context.Background(), true)
+	session, err := service.CreatePairing(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +290,7 @@ func TestReplacementRollbackKeepsOldDeviceAndTokenUnused(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := service.PairDevice(context.Background(), PairDeviceInput{
-		Token: session.Token, Name: "Replacement", PublicKeyPEM: publicKey,
+		Token: session.Token, Name: "New Phone", PublicKeyPEM: publicKey,
 	}); err == nil {
 		t.Fatal("expected forced enrollment failure")
 	}
@@ -267,9 +303,9 @@ func TestReplacementRollbackKeepsOldDeviceAndTokenUnused(t *testing.T) {
 		t.Fatal(err)
 	}
 	if consumed.Valid {
-		t.Fatal("failed replacement consumed the pairing token")
+		t.Fatal("failed pairing consumed the pairing token")
 	}
 	if countRows(t, db, "relay_devices") != 1 {
-		t.Fatal("failed replacement persisted a partial new device")
+		t.Fatal("failed pairing persisted a partial new device")
 	}
 }

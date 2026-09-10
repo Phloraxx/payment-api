@@ -92,82 +92,44 @@ func TestPaytmFallsBackToNotificationPostTime(t *testing.T) {
 		t.Fatalf("occurred = %s source=%s", got.OccurredAt, got.OccurredAtSource)
 	}
 }
-func TestParseKotakGoogleMessagesNotification(t *testing.T) {
+func TestParseBlocksRetiredMessageAndEmailPackages(t *testing.T) {
 	posted := time.UnixMilli(1_788_200_000_000).UTC()
-	got, err := Parse(Snapshot{
-		PackageName: GoogleMessagesPackage,
-		PostedAt:    posted,
-		Title:       "VM-KOTAKB",
-		Text:        "Kotak: Received Rs. 1,250.50 from Maya UPI Ref No. 123456789012",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Source != "kotak_sms" || got.CollectionProfileID != "kotak" || got.AmountPaise != 125050 {
-		t.Fatalf("observation = %+v", got)
-	}
-	if got.PayerName != "Maya" || !got.OccurredAt.Equal(posted) || got.OccurredAtSource != "notification_posted_at" {
-		t.Fatalf("parsed Kotak details = %+v", got)
-	}
-}
-
-func TestKotakExtractsUPIWithoutRequiringReference(t *testing.T) {
-	posted := time.UnixMilli(1_788_200_000_000).UTC()
-	got, err := Parse(Snapshot{
-		PackageName: GoogleMessagesPackage,
-		PostedAt:    posted,
-		Title:       "KOTAK",
-		Text:        "Payment for Received INR 75.37 from a@upi",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.AmountPaise != 7537 || got.PayerUPIID != "a@upi" {
-		t.Fatalf("observation = %+v", got)
-	}
-}
-func TestMessagesAcceptAnyIncomingBankCreditButStillRejectUnsafeMoneyText(t *testing.T) {
-	posted := time.UnixMilli(1_788_200_000_000).UTC()
-	accepted := []struct{ title, text string }{
-		{"VM-HDFCBK", "Received Rs.100.37 from Rahul"},
-		{"JD-SBIUPI-S", "A/c credited Rs.100.37 through UPI Ref 123456789012"},
-		{"JK-SBIUPI-S", "A/c credited Rs.100.37 through UPI Ref 123456789012"},
-	}
-	for _, tc := range accepted {
-		got, err := Parse(Snapshot{PackageName: GoogleMessagesPackage, PostedAt: posted, Title: tc.title, Text: tc.text})
-		if err != nil || got.Source != GenericMessageSource {
-			t.Errorf("Parse(%q,%q)=%+v err=%v", tc.title, tc.text, got, err)
-		}
-	}
-	rejected := []struct {
-		title, text string
-		want        error
-	}{
-		{"VM-KOTAKB", "Your OTP is 123456 for Rs.100.37", ErrUnrecognized},
-		{"VM-KOTAKB", "Rs.100.37 debited from your account", ErrUnrecognized},
-		{"VM-KOTAKB", "Cashback of INR 100.37 credited to your account", ErrUnrecognized},
-		{"VM-KOTAKB", "Received Rs.100.00 from Rahul", ErrNonPayGateAmount},
-	}
-	for _, tc := range rejected {
-		_, err := Parse(Snapshot{PackageName: GoogleMessagesPackage, PostedAt: posted, Title: tc.title, Text: tc.text})
-		if !errors.Is(err, tc.want) {
-			t.Errorf("Parse(%q,%q) error=%v want=%v", tc.title, tc.text, err, tc.want)
+	for _, packageName := range []string{GoogleMessagesPackage, GmailPackage} {
+		if _, err := Parse(Snapshot{
+			PackageName: packageName,
+			PostedAt:    posted,
+			Title:       "Payment received",
+			Text:        "Received Rs. 1,250.50 from Maya",
+		}); !errors.Is(err, ErrUnrecognized) {
+			t.Errorf("Parse(%q) error=%v, want %v", packageName, err, ErrUnrecognized)
 		}
 	}
 }
 
-func TestUnknownPackageSplitTitleAndAmountCanProvideIncomingPaymentEvidence(t *testing.T) {
-	posted := time.Now().UTC()
-	got, err := Parse(Snapshot{PackageName: "com.example.wallet", PostedAt: posted, Title: "received", Text: "₹98765.43"})
-	if err != nil || got.Source != GenericNotificationSource || got.AmountPaise != 9876543 {
-		t.Fatalf("split-field generic observation=%+v err=%v", got, err)
+func TestParseRejectsUntrustedGenericPackages(t *testing.T) {
+	posted := time.UnixMilli(1_788_200_000_000).UTC()
+	for _, packageName := range []string{"com.example.wallet", "com.android.shell"} {
+		if _, err := Parse(Snapshot{
+			PackageName: packageName,
+			PostedAt:    posted,
+			Title:       "received",
+			Text:        "₹100.37 received from Rahul",
+		}); !errors.Is(err, ErrUnrecognized) {
+			t.Errorf("Parse(%q) error=%v, want %v", packageName, err, ErrUnrecognized)
+		}
 	}
 }
 
-func TestUnknownPackageCanProvideIncomingPaymentEvidence(t *testing.T) {
-	got, err := Parse(Snapshot{PackageName: "com.example.wallet", PostedAt: time.Now().UTC(), Text: "₹100.37 received from Rahul"})
-	if err != nil || got.Source != GenericNotificationSource || got.AmountPaise != 10037 {
-		t.Fatalf("generic package observation=%+v err=%v", got, err)
+func TestParseRejectsMalformedAmountTokens(t *testing.T) {
+	posted := time.UnixMilli(1_788_200_000_000).UTC()
+	for _, text := range []string{
+		"₹12.345 received from Rahul",
+		"₹12.34.56 received from Rahul",
+		"₹12.34foo received from Rahul",
+	} {
+		if _, err := Parse(Snapshot{PackageName: BHIMPackage, PostedAt: posted, Text: text}); err == nil {
+			t.Errorf("malformed amount %q was accepted", text)
+		}
 	}
 }
 
@@ -176,8 +138,8 @@ func TestParseGenericIncomingPaymentApplications(t *testing.T) {
 	cases := []struct{ pkg, text, source string }{
 		{"in.amazon.mShop.android.shopping", "Payment received: ₹499.37 from Rahul", GenericNotificationSource},
 		{"com.phonepe.app", "You received INR 250.41 from Maya via UPI", GenericNotificationSource},
+		{"com.phonepe.app", "You received INR 12.3 from Maya via UPI", GenericNotificationSource},
 		{"com.google.android.apps.nbu.paisa.user", "₹99.23 received from user@okaxis", GenericNotificationSource},
-		{GoogleMessagesPackage, "HDFC: A/c credited with Rs. 701.19 from Arun UPI Ref 123456789012", GenericMessageSource},
 	}
 	for _, tc := range cases {
 		got, err := Parse(Snapshot{PackageName: tc.pkg, PostedAt: posted, Text: tc.text})
@@ -266,7 +228,7 @@ func TestGenericPayerCleanupCompatibility(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := Parse(Snapshot{PackageName: "example.wallet", PostedAt: posted, Text: tc.text})
+			got, err := Parse(Snapshot{PackageName: BHIMPackage, PostedAt: posted, Text: tc.text})
 			if err != nil {
 				t.Fatalf("Parse() error = %v", err)
 			}
@@ -332,5 +294,58 @@ func TestParseGooglePayPaidYouNotification(t *testing.T) {
 		Text:        "You paid Rahul ₹3.05",
 	}); !errors.Is(err, ErrUnrecognized) {
 		t.Fatalf("outgoing GPay notification error = %v, want %v", err, ErrUnrecognized)
+	}
+}
+
+func TestParserRejectsAmbiguousMonetaryAmounts(t *testing.T) {
+	_, err := Parse(Snapshot{
+		PackageName: BHIMPackage,
+		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
+		Text:        "Payment received ₹1.25. Available balance ₹100.37",
+	})
+	if !errors.Is(err, ErrAmbiguousAmount) {
+		t.Fatalf("ambiguous notification error = %v, want %v", err, ErrAmbiguousAmount)
+	}
+}
+
+func TestParserRejectsFailedIncomingLanguage(t *testing.T) {
+	posted := time.UnixMilli(1_788_200_000_000).UTC()
+	for _, text := range []string{
+		"Payment failed but ₹100.37 received",
+		"UPI payment declined: received ₹100.37",
+		"Payment pending, amount ₹100.37 received",
+	} {
+		if _, err := Parse(Snapshot{PackageName: BHIMPackage, PostedAt: posted, Text: text}); !errors.Is(err, ErrUnrecognized) {
+			t.Errorf("Parse(%q) error = %v, want %v", text, err, ErrUnrecognized)
+		}
+	}
+}
+
+func TestPayerUPIUsesIncomingPayerClause(t *testing.T) {
+	got, err := Parse(Snapshot{
+		PackageName: BHIMPackage,
+		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
+		Title:       "Merchant merchant@upi",
+		Text:        "Received ₹1.25 from Alice (alice@upi)",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got.PayerName != "Alice" || got.PayerUPIID != "alice@upi" {
+		t.Fatalf("payer = %q / %q", got.PayerName, got.PayerUPIID)
+	}
+}
+
+func TestPayerUPIPrefersFirstVPAInIncomingClause(t *testing.T) {
+	got, err := Parse(Snapshot{
+		PackageName: BHIMPackage,
+		PostedAt:    time.UnixMilli(1_788_200_000_000).UTC(),
+		Text:        "Received ₹1.25 from Alice (alice@upi) to merchant@upi",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PayerName != "Alice" || got.PayerUPIID != "alice@upi" {
+		t.Fatalf("payer = %q / %q", got.PayerName, got.PayerUPIID)
 	}
 }

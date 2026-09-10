@@ -18,6 +18,7 @@ func (a *App) RunWorkers(ctx context.Context) {
 	go a.Webhooks.Run(ctx)
 	go a.expiryWorker(ctx)
 	go a.backupWorker(ctx)
+	go a.rawEventWorker(ctx)
 }
 
 func (a *App) expiryWorker(ctx context.Context) {
@@ -40,6 +41,41 @@ func (a *App) expiryWorker(ctx context.Context) {
 			if count > 0 {
 				a.Webhooks.Wake()
 			}
+		}
+	}
+}
+func (a *App) rawEventWorker(ctx context.Context) {
+	const (
+		interval = time.Hour
+		batch    = 500
+	)
+	redact := func() {
+		var total int64
+		for {
+			before := time.Now().UTC().Add(-a.Config.RawEventRetention)
+			count, err := a.Relay.RedactRawEvents(ctx, before, batch)
+			if err != nil {
+				slog.Error("redact expired relay notification bodies", "error", err)
+				return
+			}
+			total += count
+			if count < batch {
+				break
+			}
+		}
+		if total > 0 {
+			slog.Info("redacted expired relay notification bodies", "count", total)
+		}
+	}
+	redact()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			redact()
 		}
 	}
 }

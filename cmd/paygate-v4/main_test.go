@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestConfigFromEnvUsesExplicitV4BootstrapValues(t *testing.T) {
 	t.Setenv("PAYGATE_V4_DATA_DIR", t.TempDir())
@@ -19,6 +22,16 @@ func TestConfigFromEnvUsesExplicitV4BootstrapValues(t *testing.T) {
 	}
 	if cfg.BootstrapWebhookSecret != "v4-webhook-secret-0123456789abcdef012345" {
 		t.Fatal("explicit v4 webhook secret missing")
+	}
+}
+func TestConfigFromEnvReadsRawEventRetention(t *testing.T) {
+	t.Setenv("PAYGATE_V4_RAW_EVENT_RETENTION", "48h")
+	cfg, err := configFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RawEventRetention != 48*time.Hour {
+		t.Fatalf("raw event retention = %s", cfg.RawEventRetention)
 	}
 }
 

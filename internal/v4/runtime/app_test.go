@@ -21,6 +21,29 @@ import (
 
 const testAdminPassword = "correct horse battery staple"
 
+func TestRawEventRetentionDefaultsAndBounds(t *testing.T) {
+	cfg, err := (Config{DataDir: t.TempDir()}).normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RawEventRetention != 7*24*time.Hour {
+		t.Fatalf("default raw event retention = %s", cfg.RawEventRetention)
+	}
+	for _, retention := range []time.Duration{59 * time.Minute, 31 * 24 * time.Hour} {
+		_, err := (Config{DataDir: t.TempDir(), RawEventRetention: retention}).normalized()
+		if err == nil {
+			t.Fatalf("raw event retention %s should be rejected", retention)
+		}
+	}
+	cfg, err = (Config{DataDir: t.TempDir(), RawEventRetention: 24 * time.Hour}).normalized()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.RawEventRetention != 24*time.Hour {
+		t.Fatalf("explicit raw event retention = %s", cfg.RawEventRetention)
+	}
+}
+
 func newTestApp(t *testing.T, mutate func(*Config)) *App {
 	t.Helper()
 	cfg := Config{

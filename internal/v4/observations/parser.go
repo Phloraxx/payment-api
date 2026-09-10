@@ -12,14 +12,33 @@ import (
 const (
 	PaytmBusinessPackage          = "com.paytm.business"
 	GoogleMessagesPackage         = "com.google.android.apps.messaging"
+	GmailPackage                  = "com.google.android.gm"
+	BHIMPackage                   = "in.org.npci.upiapp"
+	GooglePayBusinessPackage      = "com.google.android.apps.nbu.paisa.merchant"
+	GooglePayPackage              = "com.google.android.apps.nbu.paisa.user"
+	PaytmPackage                  = "net.one97.paytm"
+	PhonePePackage                = "com.phonepe.app"
+	AmazonPackage                 = "in.amazon.mShop.android.shopping"
+	SuperMoneyPackage             = "money.super.payments"
+	Kotak811Package               = "com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge"
 	GenericNotificationSource     = "android_notification"
-	GenericMessageSource          = "android_message"
 	paytmPostTimeRefinementWindow = time.Minute
 )
+
+func isTrustedGenericPackage(packageName string) bool {
+	switch packageName {
+	case BHIMPackage, GooglePayBusinessPackage, GooglePayPackage, PaytmPackage,
+		PhonePePackage, AmazonPackage, SuperMoneyPackage, Kotak811Package:
+		return true
+	default:
+		return false
+	}
+}
 
 var (
 	ErrUnrecognized     = errors.New("notification is not a recognized incoming PayGate payment")
 	ErrNonPayGateAmount = errors.New("incoming amount is not a PayGate decimal amount")
+	ErrAmbiguousAmount  = errors.New("notification contains multiple monetary amounts")
 )
 
 type Snapshot struct {
@@ -41,8 +60,9 @@ type Observation struct {
 }
 
 var (
-	currencyAmount   = `(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)`
-	incomingPatterns = []*regexp.Regexp{
+	currencyAmount        = `(?:rs\.?|inr|₹)\s*([0-9][0-9,]*(?:\.[0-9]+)?)(?:$|[^0-9A-Za-z.]|\.(?:\s|$))`
+	currencyAmountPattern = regexp.MustCompile(`(?i)` + currencyAmount)
+	incomingPatterns      = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\b(?:payment\s+)?received\b.{0,120}?` + currencyAmount),
 		regexp.MustCompile(`(?i)` + currencyAmount + `.{0,80}?\b(?:received|credited|deposited)\b`),
 		regexp.MustCompile(`(?i)\b(?:received|credited|deposited)\b.{0,120}?` + currencyAmount),
@@ -57,8 +77,9 @@ var (
 	}
 	nonPaymentPattern    = regexp.MustCompile(`(?i)\b(?:reversal|reversed|refund(?:ed)?|cashback|reward|interest|salary|chargeback|settlement|settled|loan|emi|bill|due|reminder)\b`)
 	debitPattern         = regexp.MustCompile(`(?i)\b(?:debited|sent|you\s+paid|paid\s+to|paid\s+for|withdrawn|purchase|spent|transferred\s+to)\b`)
+	failedPattern        = regexp.MustCompile(`(?i)\b(?:failed|failure|declined|decline|unsuccessful|rejected|pending|processing)\b`)
 	upiPattern           = regexp.MustCompile(`(?i)[a-z0-9][a-z0-9._-]{0,127}@[a-z0-9][a-z0-9._-]{0,127}`)
-	fromPattern          = regexp.MustCompile(`(?i)\b(?:from|by)\s+(.+?)(?:\s+at\s+\d{1,2}:\d{2}(?:\s*[ap]m)?\b|\s+on\s+|\s+(?:upi\s+)?(?:ref|rrn|utr)|[!|\n]|\.(?:\s|$)|$)`)
+	fromPattern          = regexp.MustCompile(`(?i)\b(?:from|by)\s+(.+?)(?:\s+(?:to|via)\b|\s+at\s+\d{1,2}:\d{2}(?:\s*[ap]m)?\b|\s+on\s+|\s+(?:upi\s+)?(?:ref|rrn|utr)|[!|\n]|\.(?:\s|$)|$)`)
 	paidYouPayerPattern  = regexp.MustCompile(`(?i)^(.{1,120}?)\s+paid\s+you\b`)
 	paytmOccurredPattern = regexp.MustCompile(`(?i)\breceived\s+on\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{4}\s+\d{1,2}:\d{2}\s+(?:AM|PM))\b`)
 )
@@ -72,21 +93,23 @@ func Parse(snapshot Snapshot) (Observation, error) {
 	if pkg == PaytmBusinessPackage {
 		return parsePaytm(text, snapshot.PostedAt)
 	}
-	if pkg == GoogleMessagesPackage && strings.Contains(strings.ToLower(text), "kotak") {
-		return parseKotak(text, snapshot.PostedAt)
+	if pkg == GoogleMessagesPackage || pkg == GmailPackage {
+		return Observation{}, ErrUnrecognized
 	}
-	source := GenericNotificationSource
-	if pkg == GoogleMessagesPackage {
-		source = GenericMessageSource
+	if !isTrustedGenericPackage(pkg) {
+		return Observation{}, ErrUnrecognized
 	}
-	return parseGeneric(text, snapshot.PostedAt, source)
+	return parseGeneric(text, snapshot.PostedAt)
 }
 
-func parseGeneric(text string, postedAt time.Time, source string) (Observation, error) {
+func parseGeneric(text string, postedAt time.Time) (Observation, error) {
 	if rejectedTransactionText(text) {
 		return Observation{}, ErrUnrecognized
 	}
-	amountText := firstAmount(text, incomingPatterns)
+	amountText, err := incomingAmount(text, incomingPatterns)
+	if err != nil {
+		return Observation{}, err
+	}
 	if amountText == "" {
 		return Observation{}, ErrUnrecognized
 	}
@@ -96,7 +119,7 @@ func parseGeneric(text string, postedAt time.Time, source string) (Observation, 
 	}
 	payerName, payerUPI := extractPayer(text)
 	return Observation{
-		Source: source, AmountPaise: amount, PayerName: payerName, PayerUPIID: payerUPI,
+		Source: GenericNotificationSource, AmountPaise: amount, PayerName: payerName, PayerUPIID: payerUPI,
 		OccurredAt: postedAt.UTC(), OccurredAtSource: "notification_posted_at",
 	}, nil
 }
@@ -105,7 +128,10 @@ func parsePaytm(text string, postedAt time.Time) (Observation, error) {
 	if rejectedTransactionText(text) {
 		return Observation{}, ErrUnrecognized
 	}
-	amountText := firstAmount(text, paytmAmountPatterns)
+	amountText, err := incomingAmount(text, paytmAmountPatterns)
+	if err != nil {
+		return Observation{}, err
+	}
 	if amountText == "" {
 		return Observation{}, ErrUnrecognized
 	}
@@ -127,25 +153,15 @@ func parsePaytm(text string, postedAt time.Time) (Observation, error) {
 		PayerName: payerName, PayerUPIID: payerUPI, OccurredAt: occurredAt, OccurredAtSource: source}, nil
 }
 
-func parseKotak(text string, postedAt time.Time) (Observation, error) {
-	if rejectedTransactionText(text) {
-		return Observation{}, ErrUnrecognized
-	}
-	amountText := firstAmount(text, incomingPatterns)
-	if amountText == "" {
-		return Observation{}, ErrUnrecognized
-	}
-	amount, err := parsePayGateAmount(amountText)
-	if err != nil {
-		return Observation{}, err
-	}
-	payerName, payerUPI := extractPayer(text)
-	return Observation{Source: "kotak_sms", CollectionProfileID: "kotak", AmountPaise: amount,
-		PayerName: payerName, PayerUPIID: payerUPI, OccurredAt: postedAt.UTC(), OccurredAtSource: "notification_posted_at"}, nil
+func rejectedTransactionText(text string) bool {
+	return strings.TrimSpace(text) == "" || nonPaymentPattern.MatchString(text) || debitPattern.MatchString(text) || failedPattern.MatchString(text)
 }
 
-func rejectedTransactionText(text string) bool {
-	return strings.TrimSpace(text) == "" || nonPaymentPattern.MatchString(text) || debitPattern.MatchString(text)
+func incomingAmount(text string, patterns []*regexp.Regexp) (string, error) {
+	if len(currencyAmountPattern.FindAllStringSubmatch(text, -1)) > 1 {
+		return "", ErrAmbiguousAmount
+	}
+	return firstAmount(text, patterns), nil
 }
 
 func parsePayGateAmount(value string) (int64, error) {
@@ -172,14 +188,26 @@ func firstAmount(text string, patterns []*regexp.Regexp) string {
 }
 
 func extractPayer(text string) (string, string) {
-	upiID := strings.TrimSpace(upiPattern.FindString(text))
-	payerName := ""
+	payerText := ""
 	if match := paidYouPayerPattern.FindStringSubmatch(text); len(match) > 1 {
-		payerName = cleanPayer(match[1], upiID)
+		payerText = match[1]
 	} else if match := fromPattern.FindStringSubmatch(text); len(match) > 1 {
-		payerName = cleanPayer(match[1], upiID)
+		payerText = match[1]
 	}
+	upiID := firstUPI(payerText)
+	if upiID == "" {
+		upiID = upiPattern.FindString(text)
+	}
+	payerName := cleanPayer(payerText, upiID)
 	return truncateRunes(payerName, 255), truncateRunes(upiID, 255)
+}
+
+func firstUPI(value string) string {
+	matches := upiPattern.FindAllString(value, -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	return matches[0]
 }
 func cleanPayer(value, upiID string) string {
 	value = strings.Trim(strings.TrimSpace(value), " ,;:-")

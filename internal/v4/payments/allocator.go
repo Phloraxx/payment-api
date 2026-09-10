@@ -5,11 +5,14 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"math"
 	"math/big"
 	"time"
 
 	"github.com/Phloraxx/payment-api/internal/v4/storage"
 )
+
+const defaultSoftHorizon = 4 * time.Hour
 
 var ErrPaymentCapacity = errors.New("payment capacity temporarily unavailable")
 
@@ -24,7 +27,7 @@ type Allocator struct {
 func NewAllocator() Allocator {
 	return Allocator{
 		Random:      cryptoRandomIndex,
-		SoftHorizon: 4 * time.Hour,
+		SoftHorizon: defaultSoftHorizon,
 		Buckets:     2,
 	}
 }
@@ -36,8 +39,8 @@ func (a Allocator) Select(ctx context.Context, tx *storage.ImmediateTx, profileI
 	if profileID == "" {
 		return 0, errors.New("collection profile is required")
 	}
-	if requestedAmountPaise <= 0 || requestedAmountPaise%100 != 0 {
-		return 0, errors.New("requested amount must be positive whole INR")
+	if requestedAmountPaise <= 0 || requestedAmountPaise%100 != 0 || requestedAmountPaise > math.MaxInt64-199 {
+		return 0, errors.New("requested amount must be positive whole INR within the payable range")
 	}
 	buckets := a.Buckets
 	if buckets <= 0 {
@@ -55,11 +58,19 @@ func (a Allocator) Select(ctx context.Context, tx *storage.ImmediateTx, profileI
 		return 0, fmt.Errorf("release due amount reservations: %w", err)
 	}
 
-	cutoffMS := now.Add(-a.SoftHorizon).UTC().UnixMilli()
+	softHorizon := a.SoftHorizon
+	if softHorizon <= 0 {
+		softHorizon = defaultSoftHorizon
+	}
+	cutoffMS := now.Add(-softHorizon).UTC().UnixMilli()
 	for bucket := 0; bucket < buckets; bucket++ {
-		start := requestedAmountPaise + int64(bucket*100) + 1
-		end := requestedAmountPaise + int64(bucket*100) + 99
-		candidates, err := loadBucketCandidates(ctx, tx, profileID, start, end, cutoffMS)
+		if int64(bucket) > (math.MaxInt64-requestedAmountPaise)/100 {
+			break
+		}
+		offset := int64(bucket) * 100
+		start := requestedAmountPaise + offset + 1
+		end := start + 98
+		candidates, err := loadBucketCandidates(ctx, tx, start, end, cutoffMS)
 		if err != nil {
 			return 0, err
 		}
@@ -78,15 +89,14 @@ func (a Allocator) Select(ctx context.Context, tx *storage.ImmediateTx, profileI
 	return 0, ErrPaymentCapacity
 }
 
-func loadBucketCandidates(ctx context.Context, tx *storage.ImmediateTx, profileID string, start, end, softCutoffMS int64) ([]int64, error) {
+func loadBucketCandidates(ctx context.Context, tx *storage.ImmediateTx, start, end, softCutoffMS int64) ([]int64, error) {
 	rows, err := tx.QueryContext(ctx, `
 SELECT payable_amount_paise,
        MAX(CASE WHEN released_at IS NULL THEN 1 ELSE 0 END) AS active,
        MAX(last_used_at) AS last_used_at
 FROM amount_reservations
-WHERE collection_profile_id = ?
-  AND payable_amount_paise BETWEEN ? AND ?
-GROUP BY payable_amount_paise`, profileID, start, end)
+WHERE payable_amount_paise BETWEEN ? AND ?
+GROUP BY payable_amount_paise`, start, end)
 	if err != nil {
 		return nil, fmt.Errorf("query amount bucket: %w", err)
 	}
@@ -111,15 +121,21 @@ GROUP BY payable_amount_paise`, profileID, start, end)
 
 	preferred := make([]int64, 0, 99)
 	recent := make([]int64, 0, 99)
-	for amount := start; amount <= end; amount++ {
+	for amount := start; ; amount++ {
 		state, seen := used[amount]
 		if seen && state.active {
+			if amount == end {
+				break
+			}
 			continue
 		}
 		if !seen || state.lastUsed < softCutoffMS {
 			preferred = append(preferred, amount)
 		} else {
 			recent = append(recent, amount)
+		}
+		if amount == end {
+			break
 		}
 	}
 	if len(preferred) > 0 {
