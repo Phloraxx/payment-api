@@ -199,12 +199,14 @@ func TestAllocatorReleasesDueReservationBeforeChoosing(t *testing.T) {
 	}
 }
 
-func TestAllocatorReturnsCapacityOnlyWhenBothBucketsFull(t *testing.T) {
+func TestAllocatorReturnsCapacityOnlyWhenAllBucketsFull(t *testing.T) {
 	db := openAllocatorDB(t)
 	ctx := context.Background()
 	now := time.UnixMilli(1_788_200_000_000)
-	fillActiveRange(t, db.SQL, 10001, 10099, -1, now)
-	fillActiveRange(t, db.SQL, 10101, 10199, -1, now)
+	for bucket := int64(0); bucket < 6; bucket++ {
+		start := int64(10001) + bucket*100
+		fillActiveRange(t, db.SQL, start, start+98, -1, now)
+	}
 
 	allocator := NewAllocator()
 	err := db.WithImmediateTx(ctx, func(tx *storage.ImmediateTx) error {
@@ -213,6 +215,37 @@ func TestAllocatorReturnsCapacityOnlyWhenBothBucketsFull(t *testing.T) {
 	})
 	if !errors.Is(err, ErrPaymentCapacity) {
 		t.Fatalf("error = %v, want ErrPaymentCapacity", err)
+	}
+}
+
+func TestAllocatorSupportsThreeHundredConcurrentPayments(t *testing.T) {
+	db := openAllocatorDB(t)
+	ctx := context.Background()
+	now := time.UnixMilli(1_788_200_000_000)
+	service := NewService(db)
+	service.Now = func() time.Time { return now }
+	service.Allocator.Random = fixedIndex(0)
+
+	seen := make(map[int64]struct{}, 300)
+	for i := 0; i < 300; i++ {
+		result, err := service.Create(ctx, CreateInput{
+			RequestedAmountPaise: 10000,
+			Name:                 fmt.Sprintf("Person %d", i),
+			ExternalID:           "evt_capacity_300",
+			Metadata:             []byte(`{}`),
+			IdempotencyScope:     "load-test",
+			IdempotencyKey:       fmt.Sprintf("payment-%03d", i),
+		})
+		if err != nil {
+			t.Fatalf("create %d failed: %v", i+1, err)
+		}
+		if _, exists := seen[result.Payment.PayableAmountPaise]; exists {
+			t.Fatalf("duplicate payable amount %d at create %d", result.Payment.PayableAmountPaise, i+1)
+		}
+		seen[result.Payment.PayableAmountPaise] = struct{}{}
+	}
+	if len(seen) != 300 {
+		t.Fatalf("unique payable amounts=%d, want 300", len(seen))
 	}
 }
 
@@ -274,7 +307,7 @@ func insertTestPayment(t *testing.T, db *sql.DB, id string, payable int64, creat
 	t.Helper()
 	requested := int64(10000)
 	adjustment := payable - requested
-	if adjustment <= 0 || adjustment > 199 {
+	if adjustment <= 0 || adjustment > 599 {
 		t.Fatalf("invalid test payable %d", payable)
 	}
 	now := created.UnixMilli()

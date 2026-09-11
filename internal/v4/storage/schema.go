@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -60,7 +61,125 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 			return err
 		}
 	}
-	return db.reconcileCompatibility(ctx)
+	if err := db.reconcileCompatibility(ctx); err != nil {
+		return err
+	}
+	return db.ensurePaymentAdjustmentCapacity(ctx)
+}
+
+func (db *DB) ensurePaymentAdjustmentCapacity(ctx context.Context) error {
+	const oldConstraint = "adjustment_paise INTEGER NOT NULL CHECK(adjustment_paise BETWEEN 1 AND 199)"
+	const newConstraint = "adjustment_paise INTEGER NOT NULL CHECK(adjustment_paise BETWEEN 1 AND 599)"
+	var createSQL string
+	if err := db.SQL.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema WHERE type='table' AND name='payments'`).Scan(&createSQL); err != nil {
+		return fmt.Errorf("read payments schema: %w", err)
+	}
+	if strings.Contains(createSQL, newConstraint) {
+		return nil
+	}
+	if !strings.Contains(createSQL, oldConstraint) {
+		return fmt.Errorf("payments adjustment constraint is incompatible")
+	}
+
+	conn, err := db.SQL.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire payments schema connection: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); err != nil {
+		return fmt.Errorf("disable foreign keys for payments rebuild: %w", err)
+	}
+	foreignKeysDisabled := true
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+		if foreignKeysDisabled {
+			_, _ = conn.ExecContext(context.Background(), "PRAGMA foreign_keys=ON")
+		}
+	}()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return wrapTransactionError("begin payments constraint migration", err)
+	}
+
+	const rebuild = `
+DROP TRIGGER IF EXISTS amount_reservations_payment_consistency_insert;
+DROP TRIGGER IF EXISTS amount_reservations_payment_consistency_update;
+DROP TRIGGER IF EXISTS payments_reservation_consistency_update;
+CREATE TABLE payments_capacity_v4 (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 120),
+    external_id TEXT,
+    metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata_json)),
+    requested_amount_paise INTEGER NOT NULL CHECK(requested_amount_paise > 0 AND requested_amount_paise % 100 = 0),
+    payable_amount_paise INTEGER NOT NULL CHECK(payable_amount_paise > requested_amount_paise AND payable_amount_paise % 100 BETWEEN 1 AND 99),
+    adjustment_paise INTEGER NOT NULL CHECK(adjustment_paise BETWEEN 1 AND 599),
+    currency TEXT NOT NULL DEFAULT 'INR' CHECK(currency = 'INR'),
+    collection_profile_id TEXT NOT NULL REFERENCES collection_profiles(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    upi_id_snapshot TEXT NOT NULL,
+    payee_name_snapshot TEXT,
+    status TEXT NOT NULL CHECK(status IN ('pending','paid','expired','cancelled')),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    grace_until INTEGER NOT NULL,
+    reuse_after INTEGER NOT NULL,
+    paid_at INTEGER,
+    payer_name TEXT,
+    payer_upi_id TEXT,
+    internal_note TEXT,
+    CHECK(payable_amount_paise = requested_amount_paise + adjustment_paise),
+    CHECK(created_at < expires_at AND expires_at < grace_until AND grace_until < reuse_after),
+    CHECK((status = 'paid' AND paid_at IS NOT NULL) OR (status != 'paid' AND paid_at IS NULL))
+) STRICT;
+INSERT INTO payments_capacity_v4(
+    id,name,external_id,metadata_json,requested_amount_paise,payable_amount_paise,adjustment_paise,currency,
+    collection_profile_id,upi_id_snapshot,payee_name_snapshot,status,created_at,expires_at,grace_until,reuse_after,
+    paid_at,payer_name,payer_upi_id,internal_note)
+SELECT id,name,external_id,metadata_json,requested_amount_paise,payable_amount_paise,adjustment_paise,currency,
+    collection_profile_id,upi_id_snapshot,payee_name_snapshot,status,created_at,expires_at,grace_until,reuse_after,
+    paid_at,payer_name,payer_upi_id,internal_note FROM payments;
+DROP TABLE payments;
+ALTER TABLE payments_capacity_v4 RENAME TO payments;
+CREATE INDEX idx_payments_external_id ON payments(external_id);
+CREATE INDEX idx_payments_status_created ON payments(status, created_at DESC);
+CREATE INDEX idx_payments_profile_payable ON payments(collection_profile_id, payable_amount_paise);
+`
+	if _, err := conn.ExecContext(ctx, rebuild); err != nil {
+		return fmt.Errorf("rebuild payments for expanded adjustment capacity: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, relayPayloadIntegritySQL); err != nil {
+		return fmt.Errorf("restore payment reservation integrity triggers: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return wrapTransactionError("commit payments constraint migration", err)
+	}
+	committed = true
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys=ON"); err != nil {
+		return fmt.Errorf("restore foreign keys after payments rebuild: %w", err)
+	}
+	foreignKeysDisabled = false
+	var fkEnabled int
+	if err := conn.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&fkEnabled); err != nil || fkEnabled != 1 {
+		return fmt.Errorf("foreign keys not restored after payments rebuild: enabled=%d err=%w", fkEnabled, err)
+	}
+
+	var check string
+	if err := conn.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&check); err != nil {
+		return fmt.Errorf("check sqlite integrity after payments migration: %w", err)
+	}
+	if check != "ok" {
+		return fmt.Errorf("sqlite integrity check failed after payments migration: %s", check)
+	}
+	rowsFK, err := conn.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return fmt.Errorf("check foreign keys after payments migration: %w", err)
+	}
+	defer rowsFK.Close()
+	if rowsFK.Next() {
+		return errors.New("foreign key check failed after payments migration")
+	}
+	return rowsFK.Err()
 }
 
 func readSchemaVersions(ctx context.Context, queryer schemaQueryer) ([]int, error) {
@@ -511,7 +630,7 @@ CREATE TABLE payments (
     metadata_json TEXT NOT NULL DEFAULT '{}' CHECK(json_valid(metadata_json)),
     requested_amount_paise INTEGER NOT NULL CHECK(requested_amount_paise > 0 AND requested_amount_paise % 100 = 0),
     payable_amount_paise INTEGER NOT NULL CHECK(payable_amount_paise > requested_amount_paise AND payable_amount_paise % 100 BETWEEN 1 AND 99),
-    adjustment_paise INTEGER NOT NULL CHECK(adjustment_paise BETWEEN 1 AND 199),
+    adjustment_paise INTEGER NOT NULL CHECK(adjustment_paise BETWEEN 1 AND 599),
     currency TEXT NOT NULL DEFAULT 'INR' CHECK(currency = 'INR'),
     collection_profile_id TEXT NOT NULL REFERENCES collection_profiles(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     upi_id_snapshot TEXT NOT NULL,
