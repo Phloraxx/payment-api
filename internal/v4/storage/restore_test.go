@@ -46,6 +46,73 @@ func TestRestoreDrillValidatesIsolatedBackup(t *testing.T) {
 	}
 }
 
+func TestRestoreDrillAcceptsHistoricalPaymentAdjustmentConstraint(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	livePath := filepath.Join(dir, "paygate.db")
+	live, err := Open(ctx, livePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupPath := filepath.Join(dir, "historical-backup.db")
+	if err := live.BackupTo(ctx, backupPath); err != nil {
+		live.Close()
+		t.Fatal(err)
+	}
+	if err := live.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(backupPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createSQL string
+	if err := raw.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema WHERE type='table' AND name='payments'`).Scan(&createSQL); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	oldSQL := strings.Replace(createSQL,
+		"adjustment_paise INTEGER NOT NULL CHECK(adjustment_paise BETWEEN 1 AND 599)",
+		"adjustment_paise INTEGER NOT NULL CHECK(adjustment_paise BETWEEN 1 AND 199)", 1)
+	if oldSQL == createSQL {
+		raw.Close()
+		t.Fatal("current payments schema did not contain widened adjustment constraint")
+	}
+	if _, err := raw.ExecContext(ctx, "PRAGMA writable_schema=ON"); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `UPDATE sqlite_schema SET sql=? WHERE type='table' AND name='payments'`, oldSQL); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	var schemaNumber int
+	if err := raw.QueryRowContext(ctx, "PRAGMA schema_version").Scan(&schemaNumber); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, fmt.Sprintf("PRAGMA schema_version=%d", schemaNumber+1)); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, "PRAGMA writable_schema=OFF"); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := RestoreDrill(ctx, backupPath, livePath, "")
+	if err != nil {
+		t.Fatalf("restore historical adjustment backup: %v", err)
+	}
+	if report.SchemaVersion != schemaVersion {
+		t.Fatalf("restore schema version=%d want=%d", report.SchemaVersion, schemaVersion)
+	}
+}
+
 func TestRestoreDrillRejectsLivePathAndWrongHash(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

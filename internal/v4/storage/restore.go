@@ -392,7 +392,6 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 			"PAYABLE_AMOUNT_PAISE > REQUESTED_AMOUNT_PAISE",
 			"PAYABLE_AMOUNT_PAISE % 100 BETWEEN 1 AND 99",
 			"PAYABLE_AMOUNT_PAISE = REQUESTED_AMOUNT_PAISE + ADJUSTMENT_PAISE",
-			"ADJUSTMENT_PAISE BETWEEN 1 AND 599",
 			"CURRENCY = 'INR'",
 			"JSON_VALID(METADATA_JSON)",
 			"STATUS IN ('PENDING','PAID','EXPIRED','CANCELLED')",
@@ -470,6 +469,11 @@ func validateRestoreDatabase(ctx context.Context, path string) error {
 			return fmt.Errorf("restore table %s is not a strict production table", table)
 		}
 		upperSQL := strings.ToUpper(createSQL.String)
+		if table == "payments" &&
+			!strings.Contains(upperSQL, "ADJUSTMENT_PAISE BETWEEN 1 AND 199") &&
+			!strings.Contains(upperSQL, "ADJUSTMENT_PAISE BETWEEN 1 AND 599") {
+			return errors.New("restore table payments is missing a supported adjustment_paise production check")
+		}
 		if requiredChecks[table] && !strings.Contains(upperSQL, "CHECK") {
 			return fmt.Errorf("restore table %s is missing production checks", table)
 		}
