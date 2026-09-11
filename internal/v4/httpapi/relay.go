@@ -9,7 +9,10 @@ import (
 	"github.com/Phloraxx/payment-api/internal/v4/relay"
 )
 
-const relayHTTPBodyLimit = 64 << 10
+const (
+	relayHTTPBodyLimit      = 64 << 10
+	relayHTTPBatchBodyLimit = 1 << 20
+)
 
 const (
 	relayDeviceHeader    = "X-PayGate-Relay-Device"
@@ -27,6 +30,7 @@ func NewRelayHandler(service *relay.Service) *RelayHandler {
 	h := &RelayHandler{Relay: service, mux: http.NewServeMux()}
 	h.mux.HandleFunc("POST /api/v4/relay/pair", h.pair)
 	h.mux.HandleFunc("POST "+relay.EventPath, h.event)
+	h.mux.HandleFunc("POST "+relay.EventBatchPath, h.eventBatch)
 	h.mux.HandleFunc("POST "+relay.HeartbeatPath, h.heartbeat)
 	h.mux.HandleFunc("GET "+relay.DevicePath, h.getThisDevice)
 	return h
@@ -90,6 +94,19 @@ func (h *RelayHandler) event(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+func (h *RelayHandler) eventBatch(w http.ResponseWriter, r *http.Request) {
+	raw, ok := readRelayBodyLimit(w, r, relayHTTPBatchBodyLimit)
+	if !ok {
+		return
+	}
+	result, err := h.Relay.IngestBatchSigned(r.Context(), relayAuth(r, relay.EventBatchPath), raw)
+	if err != nil {
+		writeRelayError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (h *RelayHandler) heartbeat(w http.ResponseWriter, r *http.Request) {
 	raw, ok := readRelayBody(w, r)
 	if !ok {
@@ -133,11 +150,15 @@ func relayAuth(r *http.Request, path string) relay.RequestAuth {
 }
 
 func readRelayBody(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
+	return readRelayBodyLimit(w, r, relayHTTPBodyLimit)
+}
+
+func readRelayBodyLimit(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, bool) {
 	if !isJSON(r.Header.Get("Content-Type")) {
 		writeError(w, http.StatusUnsupportedMediaType, "invalid_content_type", "Content-Type must be application/json")
 		return nil, false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, relayHTTPBodyLimit)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "Relay body is too large or unreadable")

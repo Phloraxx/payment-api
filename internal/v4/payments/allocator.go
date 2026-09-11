@@ -28,7 +28,7 @@ func NewAllocator() Allocator {
 	return Allocator{
 		Random:      cryptoRandomIndex,
 		SoftHorizon: defaultSoftHorizon,
-		Buckets:     2,
+		Buckets:     6,
 	}
 }
 
@@ -44,7 +44,7 @@ func (a Allocator) Select(ctx context.Context, tx *storage.ImmediateTx, profileI
 	}
 	buckets := a.Buckets
 	if buckets <= 0 {
-		buckets = 2
+		buckets = 6
 	}
 	randomIndex := a.Random
 	if randomIndex == nil {

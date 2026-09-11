@@ -23,7 +23,10 @@ import (
 const (
 	SchemaVersion            = 1
 	EventPath                = "/api/v4/relay/events"
+	EventBatchPath           = "/api/v4/relay/events/batch"
 	maxRawBodyBytes          = 64 << 10
+	maxBatchRawBodyBytes     = 1 << 20
+	maxBatchEvents           = 50
 	maxNotificationTextBytes = 32 << 10
 )
 
@@ -47,11 +50,21 @@ type EventInput struct {
 }
 
 type IngestResult struct {
+	EventID      string `json:"event_id,omitempty"`
 	RelayEventID string `json:"relay_event_id"`
 	Status       string `json:"status"`
 	PaymentID    string `json:"payment_id,omitempty"`
 	Duplicate    bool   `json:"duplicate,omitempty"`
 	Transitioned bool   `json:"transitioned,omitempty"`
+}
+
+type BatchInput struct {
+	SchemaVersion int               `json:"schema_version"`
+	Events        []json.RawMessage `json:"events"`
+}
+
+type BatchIngestResult struct {
+	Results []IngestResult `json:"results"`
 }
 
 func NewService(db *storage.DB, paymentService *payments.Service) *Service {
@@ -168,9 +181,70 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 	if err := validateEventInput(&input); err != nil {
 		return IngestResult{}, err
 	}
-	payloadHash := sha256.Sum256(rawBody)
+	return s.ingestVerifiedEvent(ctx, device, input, rawBody, now)
+}
+
+func (s *Service) IngestBatchSigned(ctx context.Context, auth RequestAuth, rawBody []byte) (BatchIngestResult, error) {
+	if s == nil || s.DB == nil || s.DB.SQL == nil || s.Payments == nil {
+		return BatchIngestResult{}, errors.New("relay storage and payment service are required")
+	}
+	if len(rawBody) == 0 || len(rawBody) > maxBatchRawBodyBytes {
+		return BatchIngestResult{}, relayError("RELAY_BATCH_TOO_LARGE", "relay batch body is empty or too large", 400)
+	}
+	if strings.ToUpper(strings.TrimSpace(auth.Method)) != "POST" || auth.Path != EventBatchPath {
+		return BatchIngestResult{}, relayError("INVALID_RELAY_ENDPOINT", "relay signature is not for the v4 batch endpoint", 401)
+	}
+	nowFn := s.Now
+	if nowFn == nil {
+		nowFn = time.Now
+	}
+	now := nowFn().UTC()
+	device, err := verifyRequest(ctx, s.DB, auth, rawBody, now)
+	if err != nil {
+		return BatchIngestResult{}, err
+	}
+	var batch BatchInput
+	if err := json.Unmarshal(rawBody, &batch); err != nil {
+		return BatchIngestResult{}, relayError("INVALID_RELAY_BATCH", "relay batch is not valid JSON", 400)
+	}
+	if batch.SchemaVersion != SchemaVersion {
+		return BatchIngestResult{}, relayError("UNSUPPORTED_RELAY_SCHEMA", "schema_version must be 1", 400)
+	}
+	if len(batch.Events) == 0 || len(batch.Events) > maxBatchEvents {
+		return BatchIngestResult{}, relayError("INVALID_RELAY_BATCH", "relay batch must contain between 1 and 50 events", 400)
+	}
+
+	inputs := make([]EventInput, len(batch.Events))
+	for i, rawEvent := range batch.Events {
+		if len(rawEvent) == 0 || len(rawEvent) > maxRawBodyBytes {
+			return BatchIngestResult{}, relayError("RELAY_EVENT_TOO_LARGE", "relay batch contains an empty or oversized event", 400)
+		}
+		if err := json.Unmarshal(rawEvent, &inputs[i]); err != nil {
+			return BatchIngestResult{}, relayError("INVALID_RELAY_EVENT", "relay batch contains invalid event JSON", 400)
+		}
+		if err := validateEventInput(&inputs[i]); err != nil {
+			return BatchIngestResult{}, err
+		}
+	}
+
+	out := BatchIngestResult{Results: make([]IngestResult, 0, len(inputs))}
+	for i, input := range inputs {
+		result, err := s.ingestVerifiedEvent(ctx, device, input, batch.Events[i], now)
+		if err != nil {
+			// Earlier items may already be durable. Retrying the entire signed batch
+			// is safe because source event IDs are idempotent per relay device.
+			return BatchIngestResult{}, err
+		}
+		out.Results = append(out.Results, result)
+	}
+	return out, nil
+}
+
+func (s *Service) ingestVerifiedEvent(ctx context.Context, device verifiedDevice, input EventInput, rawEvent []byte, now time.Time) (IngestResult, error) {
+	payloadHash := sha256.Sum256(rawEvent)
 	postedAt, postedReliable := sanitizePostedAt(input.PostedAtMS, now)
 	result, inserted, err := s.acceptEvent(ctx, device, input, postedAt, postedReliable, now, payloadHash[:])
+	result.EventID = input.EventID
 	if err != nil || !inserted {
 		return result, err
 	}
@@ -219,8 +293,6 @@ func (s *Service) IngestSigned(ctx context.Context, auth RequestAuth, rawBody []
 	}
 	matched, err := s.Payments.ApplyObservationForRelay(ctx, result.RelayEventID, obs, now, device.ID, device.EnrolledAt)
 	if errors.Is(err, payments.ErrRelayEventNotFound) {
-		// A retention worker or device revocation may have finalized this
-		// stale event while parsing was in flight. Do not apply its payload.
 		if finishErr := s.finishIgnored(ctx, result.RelayEventID, errors.New("relay event was no longer authorized for processing")); finishErr != nil {
 			return IngestResult{}, finishErr
 		}
@@ -364,7 +436,7 @@ func existingRelayEvent(ctx context.Context, tx *storage.ImmediateTx, deviceID, 
 	result.PaymentID = paymentID.String
 	same := false
 	if len(storedHash) == sha256.Size {
-		same = bytes.Equal(storedHash, payloadHash)
+		same = bytes.Equal(storedHash, payloadHash) || relayEventFieldsEqual(packageName, storedPostedAt, amountHint, title, text, bigText, in, postedAt, postedReliable)
 	} else if bytes.HasPrefix(storedHash, []byte("legacy:")) {
 		comparisonPostedAt := postedAt
 		if !postedReliable {
@@ -374,15 +446,19 @@ func existingRelayEvent(ctx context.Context, tx *storage.ImmediateTx, deviceID, 
 	} else if len(storedHash) == 0 {
 		// Legacy rows without a hash retain their fields until this service
 		// redacts them, so retries remain idempotent during migration.
-		same = packageName == in.PackageName &&
-			(!postedReliable || storedPostedAt == postedAt.UnixMilli()) &&
-			nullableAmountEqual(amountHint, in.AmountHintPaise) &&
-			nullableTextEqual(title, in.Title) &&
-			nullableTextEqual(text, in.Text) &&
-			nullableTextEqual(bigText, in.BigText)
+		same = relayEventFieldsEqual(packageName, storedPostedAt, amountHint, title, text, bigText, in, postedAt, postedReliable)
 	}
 	return result, true, same, nil
 }
+func relayEventFieldsEqual(packageName string, storedPostedAt int64, amountHint sql.NullInt64, title, text, bigText sql.NullString, in EventInput, postedAt time.Time, postedReliable bool) bool {
+	return packageName == in.PackageName &&
+		(!postedReliable || storedPostedAt == postedAt.UnixMilli()) &&
+		nullableAmountEqual(amountHint, in.AmountHintPaise) &&
+		nullableTextEqual(title, in.Title) &&
+		nullableTextEqual(text, in.Text) &&
+		nullableTextEqual(bigText, in.BigText)
+}
+
 func legacyPayloadFingerprint(packageName string, postedAt int64, amountHint sql.NullInt64,
 	title, text, bigText sql.NullString) []byte {
 	data := make([]byte, 0, 128)

@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -232,7 +233,7 @@ func TestPaymentAmountAndStatusConstraints(t *testing.T) {
 	}{
 		{"dot-zero-payable", 10000, 10100, 100, "pending", nil},
 		{"requested-has-paise", 10001, 10037, 36, "pending", nil},
-		{"adjustment-too-large", 10000, 10201, 201, "pending", nil},
+		{"adjustment-too-large", 10000, 10601, 601, "pending", nil},
 		{"invalid-status", 10000, 10037, 37, "review", nil},
 		{"paid-without-paid-at", 10000, 10037, 37, "paid", nil},
 	}
@@ -247,9 +248,9 @@ func TestPaymentAmountAndStatusConstraints(t *testing.T) {
 	}
 
 	if _, err := db.SQL.Exec(`INSERT INTO payments(id,name,requested_amount_paise,payable_amount_paise,adjustment_paise,collection_profile_id,upi_id_snapshot,status,created_at,expires_at,grace_until,reuse_after)
-        VALUES('overflow_ok','Person',10000,10199,199,'paytm','merchant@paytm','pending',?,?,?,?)`,
+        VALUES('overflow_ok','Person',10000,10599,599,'paytm','merchant@paytm','pending',?,?,?,?)`,
 		now, now+300_000, now+600_000, now+900_000); err != nil {
-		t.Fatalf("valid second-bucket amount rejected: %v", err)
+		t.Fatalf("valid sixth-bucket amount rejected: %v", err)
 	}
 }
 
@@ -445,6 +446,64 @@ func TestOpenMigratesV4CrossProfileDuplicateReservationsWithoutRewritingAmounts(
 	}
 	if enforced != 1 {
 		t.Fatalf("new reservation enforcement=%d want=1", enforced)
+	}
+}
+
+func TestOpenWidensHistoricalPaymentAdjustmentConstraint(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "paygate-old-adjustment.db")
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", "file:"+filepath.ToSlash(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var createSQL string
+	if err := raw.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema WHERE type='table' AND name='payments'`).Scan(&createSQL); err != nil {
+		t.Fatal(err)
+	}
+	oldSQL := strings.Replace(createSQL,
+		"adjustment_paise INTEGER NOT NULL CHECK(adjustment_paise BETWEEN 1 AND 599)",
+		"adjustment_paise INTEGER NOT NULL CHECK(adjustment_paise BETWEEN 1 AND 199)", 1)
+	if oldSQL == createSQL {
+		t.Fatal("current payments schema did not contain widened adjustment constraint")
+	}
+	if _, err := raw.ExecContext(ctx, "PRAGMA writable_schema=ON"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `UPDATE sqlite_schema SET sql=? WHERE type='table' AND name='payments'`, oldSQL); err != nil {
+		t.Fatal(err)
+	}
+	var schemaNumber int
+	if err := raw.QueryRowContext(ctx, "PRAGMA schema_version").Scan(&schemaNumber); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, fmt.Sprintf("PRAGMA schema_version=%d", schemaNumber+1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, "PRAGMA writable_schema=OFF"); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err = Open(ctx, path)
+	if err != nil {
+		t.Fatalf("reopen historical constraint database: %v", err)
+	}
+	defer db.Close()
+	if err := db.SQL.QueryRowContext(ctx, `SELECT sql FROM sqlite_schema WHERE type='table' AND name='payments'`).Scan(&createSQL); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(createSQL, "adjustment_paise BETWEEN 1 AND 599") {
+		t.Fatalf("payments constraint was not widened: %s", createSQL)
 	}
 }
 

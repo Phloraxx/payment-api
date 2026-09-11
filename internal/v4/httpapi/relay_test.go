@@ -193,6 +193,45 @@ func TestRelaySignedEventAndSignatureFailure(t *testing.T) {
 	}
 }
 
+func TestRelaySignedBatchAcceptsAndDeduplicatesEvents(t *testing.T) {
+	f := newRelayHTTPFixture(t)
+	epoch := pairRelayHTTP(t, f)
+	eventA := map[string]any{
+		"schema_version": 1, "event_id": strings.Repeat("a", 64),
+		"package_name": "com.paytm.business", "posted_at_ms": f.now.UnixMilli(),
+		"title": "Payment Received on Paytm for Business", "text": "Received Rs. 100.00 from Alice",
+	}
+	eventB := map[string]any{
+		"schema_version": 1, "event_id": strings.Repeat("b", 64),
+		"package_name": "com.paytm.business", "posted_at_ms": f.now.UnixMilli(),
+		"title": "Payment Received on Paytm for Business", "text": "Received Rs. 100.00 from Bob",
+	}
+	body, _ := json.Marshal(map[string]any{"schema_version": 1, "events": []any{eventA, eventB}})
+
+	rr := httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, signedRelayRequest(t, f, relay.EventBatchPath, body, epoch))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("batch status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(rr.Body.String(), `"event_id":"`+strings.Repeat("a", 64)+`"`) ||
+		!strings.Contains(rr.Body.String(), `"event_id":"`+strings.Repeat("b", 64)+`"`) {
+		t.Fatalf("batch response missing source ids: %s", rr.Body.String())
+	}
+	var count int
+	if err := f.db.SQL.QueryRow(`SELECT COUNT(*) FROM relay_events`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("relay events=%d err=%v", count, err)
+	}
+
+	rr = httptest.NewRecorder()
+	f.handler.ServeHTTP(rr, signedRelayRequest(t, f, relay.EventBatchPath, body, epoch))
+	if rr.Code != http.StatusOK || strings.Count(rr.Body.String(), `"duplicate":true`) != 2 {
+		t.Fatalf("batch retry status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if err := f.db.SQL.QueryRow(`SELECT COUNT(*) FROM relay_events`).Scan(&count); err != nil || count != 2 {
+		t.Fatalf("relay events after retry=%d err=%v", count, err)
+	}
+}
+
 func TestRelayRejectsQueryParameters(t *testing.T) {
 	f := newRelayHTTPFixture(t)
 	req := httptest.NewRequest(http.MethodPost, "/api/v4/relay/pair?token=leak", strings.NewReader(`{}`))
