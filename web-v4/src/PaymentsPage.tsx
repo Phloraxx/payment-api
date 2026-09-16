@@ -212,6 +212,7 @@ function paymentAppLabel(packageName?: string): string {
     case "in.amazon.mShop.android.shopping": return "Amazon Pay";
     case "money.super.payments": return "super.money";
     case "com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge": return "Kotak";
+    case "com.hdfc.smarthub": return "HDFC SmartHub Vyapar";
     default: return packageName ? "Payment app" : "—";
   }
 }
