@@ -140,6 +140,7 @@ func TestParseGenericIncomingPaymentApplications(t *testing.T) {
 		{"com.phonepe.app", "You received INR 250.41 from Maya via UPI", GenericNotificationSource},
 		{"com.phonepe.app", "You received INR 12.3 from Maya via UPI", GenericNotificationSource},
 		{"com.google.android.apps.nbu.paisa.user", "₹99.23 received from user@okaxis", GenericNotificationSource},
+		{HDFCSmartHubPackage, "Payment received: ₹1.37 from Rahul via UPI", GenericNotificationSource},
 	}
 	for _, tc := range cases {
 		got, err := Parse(Snapshot{PackageName: tc.pkg, PostedAt: posted, Text: tc.text})
@@ -150,6 +151,28 @@ func TestParseGenericIncomingPaymentApplications(t *testing.T) {
 		if got.Source != tc.source || got.AmountPaise%100 == 0 || got.CollectionProfileID != "" {
 			t.Errorf("%s: %+v", tc.pkg, got)
 		}
+	}
+}
+
+func TestParseHDFCSmartHubIncomingNotification(t *testing.T) {
+	posted := time.Date(2026, 9, 16, 11, 12, 13, 456_000_000, time.FixedZone("IST", 5*60*60+30*60))
+	got, err := Parse(Snapshot{
+		PackageName: HDFCSmartHubPackage,
+		PostedAt:    posted,
+		Title:       "Payment received",
+		BigText:     "You have received INR 300.47 from ARJUN K (arjun@okhdfcbank) via UPI.",
+	})
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if got.Source != GenericNotificationSource || got.CollectionProfileID != "" || got.AmountPaise != 30047 {
+		t.Fatalf("observation = %+v", got)
+	}
+	if got.PayerName != "ARJUN K" || got.PayerUPIID != "arjun@okhdfcbank" {
+		t.Fatalf("payer = %q / %q", got.PayerName, got.PayerUPIID)
+	}
+	if !got.OccurredAt.Equal(posted.UTC()) || got.OccurredAtSource != "notification_posted_at" {
+		t.Fatalf("occurred = %s source=%s", got.OccurredAt, got.OccurredAtSource)
 	}
 }
 

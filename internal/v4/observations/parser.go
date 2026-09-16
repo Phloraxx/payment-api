@@ -21,6 +21,7 @@ const (
 	AmazonPackage                 = "in.amazon.mShop.android.shopping"
 	SuperMoneyPackage             = "money.super.payments"
 	Kotak811Package               = "com.kotak811mobilebankingapp.instantsavingsupiscanandpayrecharge"
+	HDFCSmartHubPackage           = "com.hdfc.smarthub"
 	GenericNotificationSource     = "android_notification"
 	paytmPostTimeRefinementWindow = time.Minute
 )
@@ -28,7 +29,7 @@ const (
 func isTrustedGenericPackage(packageName string) bool {
 	switch packageName {
 	case BHIMPackage, GooglePayBusinessPackage, GooglePayPackage, PaytmPackage,
-		PhonePePackage, AmazonPackage, SuperMoneyPackage, Kotak811Package:
+		PhonePePackage, AmazonPackage, SuperMoneyPackage, Kotak811Package, HDFCSmartHubPackage:
 		return true
 	default:
 		return false
