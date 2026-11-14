@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security issue
+    url: https://github.com/Phloraxx/payment-api/security/advisories/new
+    about: Report a vulnerability privately. Anything that confirms a payment without trustworthy evidence belongs here, not in a public issue.
+  - name: Documentation
+    url: https://github.com/Phloraxx/payment-api/blob/main/docs/v4/README.md
+    about: Architecture, payment lifecycle, storage and security documents.

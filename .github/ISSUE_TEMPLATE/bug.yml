@@ -1,0 +1,91 @@
+name: Bug report
+description: Something behaves incorrectly — matching, relay ingestion, webhooks, admin UI or deployment.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Redact payer UPI IDs, real amounts tied to a live transaction, relay enrollment codes, API keys and webhook secrets before posting.
+
+        If the bug is that a payment was confirmed without trustworthy evidence, stop and use [Report a vulnerability](../security/advisories/new) instead.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The observed behaviour, including the exact API response or error text.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Payment creation / amount allocation
+        - Notification parsing
+        - Relay pairing or enrollment
+        - Matching / lifecycle timing
+        - Webhook delivery
+        - Merchant API
+        - Admin UI
+        - Android relay app
+        - Deployment / container
+        - Migration or restore
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v4.0.x / commit sha
+    validations:
+      required: true
+
+  - type: dropdown
+    id: source
+    attributes:
+      label: Notification source
+      options:
+        - Paytm for Business
+        - Kotak via Google Messages
+        - Other / package-agnostic
+        - Not applicable
+    validations:
+      required: true
+
+  - type: input
+    id: relay
+    attributes:
+      label: Relay app version
+      description: Leave blank if no Android device is involved.
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Redacted. Server logs and the relay's local queue state are usually enough.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I removed payer identity, live amounts, enrollment codes and secrets.
+          required: true
+        - label: I searched existing issues for the same behaviour.
+          required: true

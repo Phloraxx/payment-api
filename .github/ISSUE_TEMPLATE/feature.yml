@@ -1,0 +1,60 @@
+name: Feature request
+description: Propose a capability, source, or workflow change.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do today, and where it breaks down.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behaviour
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - New notification source
+        - Matching or lifecycle
+        - Merchant API
+        - Webhooks
+        - Admin UI
+        - Android relay
+        - Deployment / operations
+        - Documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence and trust
+      description: If this touches confirmation, explain what makes the new signal origin-bound. If it cannot be made origin-bound, say whether it should remain operator-confirmed evidence.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Before submitting
+      options:
+        - label: I read `docs/v4/03_PAYMENT_LIFECYCLE_AND_MATCHING.md` and `docs/v4/10_EDGE_CASES_AND_INVARIANTS.md`.
+          required: true
+        - label: I searched existing issues for the same request.
+          required: true
